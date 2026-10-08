@@ -177,7 +177,7 @@ FEATURE_NOUN_RE = re.compile(
 #: (``dimension_protocol._extract_triple``) uses it for its conditional
 #: primary-object suppression. Pinned by ``tests/test_axis_lexicon.py``
 #: (the subset pin).
-_PART_NOUNS: frozenset[str] = frozenset({"lid"})
+_PART_NOUNS: frozenset[str] = frozenset({"lid", "spacer", "spacers"})
 
 #: The mating connectors (issue #314): words and phrases that introduce the
 #: MATING PART of a design — the part the user's part must fit or sit on.
@@ -418,12 +418,17 @@ def _split_on_and(clause: str) -> list[str]:
 
 
 def _classify_clause(
-    clause: str, *, feature_noun_in_message: bool = False
+    clause: str,
+    *,
+    sub_clause_index: int = 0,
+    feature_clause_start: int = -1,
 ) -> tuple[dict[str, float], set[str], bool, list[str]]:
     """Classify one clause. Returns (absolute, relative, global_, cue_words).
 
-    ``feature_noun_in_message`` (issue #398) enables the feature-clause
-    suppression — see ``d33d.feature_clause``.
+    ``sub_clause_index`` (issue #413) is the 0-based index of this
+    sub-clause in the message's full sub-clause list. ``feature_clause_start``
+    is the 0-based index where the feature clause begins (``-1`` when
+    there is no feature clause). See ``d33d.feature_clause``.
     """
     relative: set[str] = set()
     global_: bool = False
@@ -463,24 +468,76 @@ def _classify_clause(
             # entirely in the mating part's zone. No absolute cue.
             return ({}, relative, global_, cue_words)
 
-    # Feature-noun clause (issue #261): the number is a feature size,
-    # not a part dimension. Relative/global cues and cue words are KEPT
-    # (a release only stops enforcement); the mm number falls into
-    # unmapped_mm_numbers via the normal scan below.
-    # See ``d33d.feature_clause``.
+    # Feature-noun in-clause guard (issue #261, narrowed on #413): the
+    # number is a feature size, not a part dimension, when the feature
+    # noun is in a "with a/an" / "in a/an" phrase (subordinate feature)
+    # OR when the feature noun is the HEAD NOUN of the clause (no
+    # non-feature noun before it). Part nouns (lid, spacer) are NOT
+    # true feature nouns — they name the whole part, so the in-clause
+    # guard does NOT fire for them.
     if FEATURE_NOUN_RE.search(clause):
-        return ({}, relative, global_, cue_words)
+        m = FEATURE_NOUN_RE.search(clause)
+        if m and m.group(0).lower() not in _PART_NOUNS:
+            prefix = clause[: m.start()]
+            in_with_phrase = bool(
+                re.search(r"\b(?:with|in)\s+(?:a|an)\b", prefix, re.IGNORECASE)
+            )
+            if in_with_phrase:
+                # Check if the number is AFTER "with a" (part of the
+                # "with a" phrase) or BEFORE it (not part of the phrase).
+                # Find the position of "with a" in the prefix.
+                with_match = re.search(r"\b(?:with|in)\s+(?:a|an)\b", prefix, re.IGNORECASE)
+                if with_match:
+                    # Find the last number in the clause.
+                    last_num_pos = -1
+                    for num_m in re.finditer(r"\d+", clause):
+                        last_num_pos = num_m.end()
+                    # The number is part of the "with a" phrase if it's
+                    # after "with a" ends.
+                    if last_num_pos > with_match.end():
+                        return ({}, relative, global_, cue_words)
+            # Not in a "with a/an" phrase: check if the feature noun is
+            # the head noun (no non-feature noun before it).
+            _NON_NOUN_WORDS = {
+                "a", "an", "the", "with", "in", "on", "of", "and",
+                "or", "for", "to", "at", "by", "mm", "cm", "m",
+                "inch", "inches", "millimetre", "millimetres",
+                "millimeter", "millimeters", "tall", "high",
+                "height", "wide", "width", "deep", "depth",
+                "taller", "shorter", "higher", "lower", "wider",
+                "narrower", "deeper", "shallower",
+            }
+            found_non_feature_noun = False
+            for w in prefix.split():
+                w_clean = w.strip(".,;:!?()[]{}\"'")
+                if not w_clean:
+                    continue
+                if FEATURE_NOUN_RE.search(w_clean):
+                    continue
+                if w_clean.isdigit():
+                    continue
+                if w_clean.lower() in _NON_NOUN_WORDS:
+                    continue
+                found_non_feature_noun = True
+                break
+            if not found_non_feature_noun:
+                return ({}, relative, global_, cue_words)
 
-    # Feature-clause suppression (issue #398) — see ``d33d.feature_clause``.
-    # Relative/global cues are KEPT (a release only stops enforcement).
+    # Feature-clause suppression (issue #398, narrowed on #413) — see
+    # ``d33d.feature_clause``. Relative/global cues are KEPT (a release
+    # only stops enforcement). The cross-clause guard fires for
+    # feature-verb clauses (always) and bare measurements at or after
+    # the feature clause start.
     if feature_clause.feature_clause_suppresses(
         clause,
         cue_words,
-        feature_noun_in_message=feature_noun_in_message,
+        sub_clause_index=sub_clause_index,
+        feature_clause_start=feature_clause_start,
         absolute_words=ABSOLUTE_WORDS,
         numbers_in=_numbers_in,
         word_re=_word_re,
         feature_verb_re=_word_re,
+        feature_noun_re=FEATURE_NOUN_RE,
     ):
         return ({}, relative, global_, cue_words)
 
@@ -578,10 +635,28 @@ def classify(message: str) -> Cues:
     """
     clauses = split_clauses(message)
 
-    # Pre-scan for the feature-verb cross-clause suppression (issue
-    #398) — see ``d33d.feature_clause.message_has_feature_noun``.
-    _feature_noun_in_message = feature_clause.message_has_feature_noun(
-        clauses, FEATURE_NOUN_RE
+    # Pre-compute the feature clause start over ALL sub-clauses in the
+    # message (issue #413). The feature clause is message-wide: the
+    # feature noun's position in the full sub-clause list determines
+    # which sub-clauses are suppressed. Sub-clauses at or after the
+    # feature clause's start are suppressed; earlier ones are not.
+    #
+    # "a 40 mm wide box, 12 mm tall, with a 5 mm hole" → sub-clauses
+    # ["a 40 mm wide box", "12 mm tall", "with a 5 mm hole"]: feature
+    # noun at index 2, so "12 mm tall" (index 1) is NOT suppressed.
+    #
+    # "add a 10 mm wide slot across the top, 5 mm deep" → sub-clauses
+    # ["add a 10 mm wide slot across the top", "5 mm deep"]: feature
+    # noun at index 0, so "5 mm deep" (index 1) IS suppressed.
+    #
+    # "a 40 mm wide box with a 5 mm deep groove" → sub-clauses
+    # ["a 40 mm wide box", "a 5 mm deep groove"]: feature noun at
+    # index 1, so "a 40 mm wide box" (index 0) is NOT suppressed.
+    all_sub_clauses: list[str] = []
+    for clause in clauses:
+        all_sub_clauses.extend(_split_on_and(clause))
+    fc_start = feature_clause.feature_clause_start(
+        all_sub_clauses, FEATURE_NOUN_RE, _numbers_in
     )
 
     all_absolute: dict[str, float] = {}
@@ -590,14 +665,17 @@ def classify(message: str) -> Cues:
     all_cue_words: list[str] = []
     all_mapped_numbers: set[float] = set()
 
+    global_sub_idx = 0
     for clause in clauses:
         # Try splitting on "and" within this clause.
         sub_clauses = _split_on_and(clause)
         for sub in sub_clauses:
             abs_c, rel_c, glob_c, words_c = _classify_clause(
                 sub,
-                feature_noun_in_message=_feature_noun_in_message,
+                sub_clause_index=global_sub_idx,
+                feature_clause_start=fc_start,
             )
+            global_sub_idx += 1
             for axis, val in abs_c.items():
                 all_absolute[axis] = val
                 all_mapped_numbers.add(val)

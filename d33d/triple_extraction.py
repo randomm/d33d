@@ -245,10 +245,58 @@ def _match_states(message: str, m: re.Match[str]) -> bool:
         v > _NO_UNIT_DOUBLE_MAX_MM for v in numbers
     ):
         return False
-    # Guard 5: mating connector (issue #314) — a size after a mating
+    # Guard 5: count times size (issue #413) — a leading <int> x followed
+    # by a number and then a plural noun is a count, not a dimension pair
+    # ("print 2 x 40 mm spacers" → "2" is the count, "40 mm" is the size).
+    if _is_count_times_size(message, m):
+        return False
+    # Guard 6: mating connector (issue #314) — a size after a mating
     # connector ("fits", "for", "over", …) belongs to the mating part and
     # never states the part's axes; its numbers stay unmapped/offerable.
     return not _in_mating_zone(message, m.start())
+
+
+def _is_count_times_size(message: str, m: re.Match[str]) -> bool:
+    """True if the match is a COUNT (not a dimension pair) (issue #413).
+
+    A leading ``<int> x`` directly followed by a number and then a
+    plural noun is a count, not a dimension pair:
+    "print 2 x 40 mm spacers" → "2" is the count (2 spacers), "40 mm"
+    is the size (with no axis word). The "2 x 40" is NOT a W/D pair.
+
+    The rule: the match starts with a single-digit number (1-9),
+    followed by "x" (case-insensitive), followed by a number, and the
+    NEXT non-number token after the match is a plural noun (ends in "s"
+    or "es").
+    """
+    # Extract the numbers from the match.
+    numbers = [float(g) for g in m.groups() if g]
+    if len(numbers) < 2:
+        return False
+    # The first number must be a single digit (1-9) — a count, not a
+    # dimension.
+    if numbers[0] < 1 or numbers[0] > 9 or numbers[0] != int(numbers[0]):
+        return False
+    # The match must start with "<int> x" (case-insensitive).
+    match_text = message[m.start(): m.end()]
+    if not re.match(r"^\d+\s*[x×]\s*\d", match_text, re.IGNORECASE):
+        return False
+    # The NEXT non-number token after the match must be a plural noun.
+    after_match = message[m.end():].lstrip()
+    # Skip any unit tokens ("mm", "cm", etc.) to find the next noun.
+    tokens = after_match.split()[:3]
+    for token in tokens:
+        clean = token.strip(".,;:!?()[]{}\"'").lower()
+        if not clean:
+            continue
+        if clean.isdigit() or clean.replace(".", "", 1).isdigit():
+            continue  # number
+        if clean in {"mm", "cm", "m", "inch", "inches", "in", "millimetre", "millimetres", "millimeter", "millimeters"}:
+            continue  # unit
+        # This is the first noun-like token after the match.
+        # It must be a plural noun (ends in "s" or "es").
+        return clean.endswith("s") and len(clean) > 1
+    return False
 
 
 def _any_other_stating_match(message: str, exclude: re.Match[str]) -> bool:
@@ -407,10 +455,16 @@ def _extract_triple(message: str) -> tuple[dict[str, float], set[float]]:
         # earlier OR later, states the envelope). The pair passes the
         # rest of the guard stack (letter-glued, foreign-unit, magnitude
         # already verified in _match_states) but bypasses the feature-noun
-        # window guard (which would suppress it for "lid").
-        if m.group(3) is None and _triple_suppressed_by_feature_noun(
-            message, m, _PART_NOUNS
-        ) and not _any_other_stating_match(message, m):
+        # window guard (which would suppress it for "lid"). The count
+        # guard (issue #413) also applies: a count is not a dimension pair.
+        if (
+            m.group(3) is None
+            and not _is_count_times_size(message, m)
+            and _triple_suppressed_by_feature_noun(
+                message, m, _PART_NOUNS
+            )
+            and not _any_other_stating_match(message, m)
+        ):
             # The pair is the primary object — state W/D.
             numbers = [float(g) for g in m.groups() if g]
             axes: dict[str, float] = {}
