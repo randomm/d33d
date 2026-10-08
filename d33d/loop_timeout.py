@@ -195,7 +195,16 @@ class AttemptTracker:
             and _iter not in self._attempt_started
         ):
             self._attempt_started[_iter] = self._loop.time()
-        if isinstance(_iter, int) and _iter > self._attempt_count:
+        # Bound the attempt count by the iteration cap (like the
+        # ``_attempt_started`` check above): a frame carrying an index
+        # above the cap is a protocol violation, not evidence of more
+        # attempts — the count can never exceed what the loop may have
+        # started.
+        if (
+            isinstance(_iter, int)
+            and _iter > self._attempt_count
+            and _iter <= self._max_iterations
+        ):
             self._attempt_count = _iter
 
     @property

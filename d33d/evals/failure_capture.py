@@ -630,6 +630,26 @@ def default_run_design_loop_hook(
         result = await real_run(request=request, **kwargs)
         try:
             if result is not None:
+                # The loop's OWN per-attempt measurements (issue #417):
+                # when the loop's per-attempt deadline cut the run off,
+                # the result carries the loop-sourced attempt count
+                # (``attempts_started`` — the number of attempts STARTED,
+                # including the one killed mid-LLM-call) and the
+                # per-attempt latencies (``None`` for every non-deadline
+                # outcome) — the same numbers the adapter puts on the
+                # terminal frame. A synthetic/stand-in result without the
+                # attributes keeps the explicit-argument behaviour (no
+                # numbers on the row — honest absence).
+                _loop_attempt_count = getattr(result, "attempts_started", None)
+                _loop_latencies = getattr(result, "attempt_latencies", None)
+                # A non-deadline result has ``attempts_started`` defaulting
+                # to 0 (not a deadline cut — no measurement to report).
+                # The hook must NOT write ``attempt_count=0`` (the schema
+                # requires ``ge=1``): 0 means "no deadline cut happened",
+                # so the field is omitted entirely (``None`` — honest
+                # absence, pre-#417 row shape).
+                if _loop_attempt_count is not None and _loop_attempt_count < 1:
+                    _loop_attempt_count = None
                 record_production_failure(
                     design_result=result,
                     photo=hook_photo,
@@ -641,6 +661,10 @@ def default_run_design_loop_hook(
                         getattr(getattr(result, "best", None), "scad_source", "") or ""
                     ),
                     path=path,
+                    attempt_count=_loop_attempt_count,
+                    per_attempt_latencies=list(_loop_latencies)
+                    if _loop_latencies
+                    else None,
                 )
         except Exception:
             # The hook MUST NOT mask the loop result — a hook failure

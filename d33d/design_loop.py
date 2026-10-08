@@ -59,7 +59,7 @@ import re
 import subprocess
 import time
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
 
@@ -412,6 +412,16 @@ class DesignResult:
     ``{"reason": "image_missing" | "label_mismatch", "expected"?,
     "actual"?, "rebuild_command"}`` — the terminal frame rides it verbatim
     (omit-not-null). ``None`` for every other outcome.
+
+    ``attempt_latencies`` (issue #417) carries the LOOP'S OWN measured
+    wall-clock seconds for the attempts it actually started (one entry per
+    STARTED attempt, in order), when a deadline-driven timeout cut the run
+    off mid-LLM-call: a killed attempt's time is the budget it burned
+    before the deadline fired, a completed one is its full duration. The
+    adapter's frame-derived ``AttemptTracker`` never sees a killed attempt
+    (no view frames arrive), so the loop's own clock is the only number
+    that exists in the primary slow-model case; ``None`` for every
+    non-deadline outcome (omit-not-null).
     """
 
     status: str
@@ -419,8 +429,16 @@ class DesignResult:
     iterations: tuple[IterationRecord, ...]
     failure_reason: str | None = None
     iterations_used: int = 0
+    #: The number of attempts the loop STARTED (issue #417) — including
+    #: the one killed mid-LLM-call — on a deadline-driven timeout. The
+    #: adapter's terminal frame and the failures.jsonl row carry this as
+    #: the slow-model copy's "after N tries" count. ``0`` for every
+    #: non-deadline outcome (omit-not-null: the adapter only reads it
+    #: when the reason is ``design_loop_timed_out``).
+    attempts_started: int = 0
     env_var: str | None = None
     renderer_detail: dict[str, str] | None = None
+    attempt_latencies: tuple[float, ...] | None = None
 
 
 #: Structured failure reasons for an exhausted loop, in bit order — each
@@ -1929,6 +1947,16 @@ async def run_design_loop_async(
     prev_score: Score | None = None
     consecutive_no_improvement = 0
     iterations: list[IterationRecord] = []
+    # The loop's OWN per-attempt wall clock (issue #417): ``time.
+    # monotonic()`` around each iteration's LLM call (the call the
+    # per-attempt deadline bounds — the render that follows is already
+    # bounded separately by the render worker). A killed attempt keeps
+    # the time it actually burned (the budget), a completed one its full
+    # duration; the deadline path hands this list to the result so the
+    # adapter's terminal frame and the failures.jsonl row carry the LOOP-
+    # SOURCED numbers, never the frame-derived ones (the frames never
+    # arrive for an attempt killed mid-LLM-call).
+    _attempt_latencies: list[float] = []
 
     # The per-attempt wall-clock deadline (issue #417): each design
     # iteration gets its OWN budget (``attempt_timeout`` — production
@@ -1943,6 +1971,8 @@ async def run_design_loop_async(
     # yielding frames before the loop's own deadline can.
     for iteration in range(1, max_iterations + 1):
         _stamp_on_progress_iteration(on_progress, iteration)
+        _attempt_latencies.append(0.0)  # the attempt started — its slot
+        _attempt_started = time.monotonic()
         scad_co = _call(
             llm_fn,
             "design",
@@ -1978,10 +2008,25 @@ async def run_design_loop_async(
                 ),
             )
             if isinstance(_scad_or_result, DesignResult):
-                return _scad_or_result
+                # The deadline (or the inner per-LLM-call timeout) fired
+                # mid-LLM-call: stamp the killed attempt's burned budget
+                # on its slot, then rebuild the (frozen) result carrying
+                # the loop's own measured numbers — attempt count +
+                # per-attempt latencies — and return it. The rebuild goes
+                # through ``dataclasses.replace`` (a fresh instance with
+                # the same fields, two of them overridden — frozen data-
+                # classes refuse in-place assignment).
+                _attempt_latencies[-1] = time.monotonic() - _attempt_started
+                return replace(
+                    _scad_or_result,
+                    attempt_latencies=tuple(_attempt_latencies),
+                    attempts_started=len(_attempt_latencies),
+                )
             scad = _scad_or_result
+            _attempt_latencies[-1] = time.monotonic() - _attempt_started
         else:
             scad = await scad_co
+            _attempt_latencies[-1] = time.monotonic() - _attempt_started
         design_hash = scad.prompt_hash
         if log is not None:
             log("design", design_hash, scad.status)
@@ -2689,11 +2734,12 @@ async def _await_with_per_attempt_deadline(
     The budget is per ATTEMPT (never a flat whole-loop total), so three
     slow attempts are not cut off by one 180 s lid, and no single LLM
     call may hang forever: the call is bounded by ``asyncio.wait_for``,
-    which CANCELS the coroutine on expiry (the in-flight httpx request
-    is interrupted — an async call cancelled in the event loop does not
-    run on to completion in the background; the ``to_thread`` worker
-    thread it awaited on is a different lifetime, bounded by the render
-    worker's own 120 s subprocess timeout one level down).
+    which CANCELS the coroutine on expiry. Cancellation is a best-effort
+    interruption, not a kill: the cancelled coroutine (and any
+    ``to_thread`` worker thread it awaited on — a different lifetime,
+    bounded by the render worker's own 120 s subprocess timeout one
+    level down) may LINGER until its task is collected; the deadline
+    here does not wait for the cancellation to finish, and must not.
 
     On expiry the run ends WITH the best-so-far rendered candidate
     (``on_timeout`` builds the best-so-far exhausted result — the same

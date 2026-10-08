@@ -294,6 +294,10 @@ describe("errorMapping", () => {
     // the frame (omit-not-null). When both are present, the headline is
     // the templated "model is slow right now" copy with the measured
     // values filled in — the words "stopped responding" no longer appear.
+    // The values are LOOP-SOURCED (the loop's own wall clock): the
+    // attempt count is the number of attempts STARTED (including the
+    // one killed mid-LLM-call), the latency is the mean of the loop's
+    // per-attempt seconds, rounded up to a whole second by the adapter.
     const display = displayDesignLoopError({
       message: "Design loop timed out after 360s",
       reason: "design_loop_timed_out",
@@ -307,6 +311,29 @@ describe("errorMapping", () => {
     // The raw reason is still present for part 4 (collapsed).
     expect(display.detail).toBe("design_loop_timed_out");
     expect(display.retryable).toBe(true);
+  });
+
+  it("the loop-sourced slow-model case (attempt 1 fast, attempt 2 killed) renders the slow-model copy (issue #417)", () => {
+    // The PRIMARY slow-model path: the loop's own per-attempt deadline
+    // fires on attempt 2 mid-LLM-call. The loop starts 2 attempts and
+    // measures both (a killed attempt keeps the budget it burned, a
+    // completed one its full duration); the adapter's mean (rounded up
+    // to a whole second) and the attempt count ride the terminal frame.
+    // The SPA renders the slow-model copy with those values — "about Ns
+    // an attempt" (N = the mean) and "after N tries" (N = the count of
+    // STARTED attempts, 2, not the count that completed, 1). A sub-second
+    // budget rounds up to 1 s — never "about 0s an attempt".
+    const display = displayDesignLoopError({
+      message: "Design loop timed out after 360s",
+      reason: "design_loop_timed_out",
+      attempt_latency_seconds: 1,
+      attempt_count: 2,
+    });
+    expect(display.message).toBe(copy.failure.slowModelTimeout(1, 2));
+    expect(display.message).not.toContain("stopped responding");
+    expect(display.message).toContain("about 1s an attempt");
+    expect(display.message).toContain("stopped after 2 tries");
+    expect(display.detail).toBe("design_loop_timed_out");
   });
 
   it("the design_loop_timed_out frame without measured values falls back to the generic reason copy (issue #417)", () => {

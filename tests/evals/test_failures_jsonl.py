@@ -1678,8 +1678,16 @@ def test_design_loop_slow_model_timeout_keeps_candidate_and_versions(
                             or ""
                         ),
                         path=sink,
-                        attempt_count=result.iterations_used,
-                        per_attempt_latencies=None,
+                        # The loop's OWN measurements (issue #417): the
+                        # loop-sourced attempt count (attempts STARTED,
+                        # including the one killed mid-LLM-call) and the
+                        # per-attempt latencies — the same numbers the
+                        # adapter puts on the terminal frame. ``None``
+                        # for a non-deadline result (honest absence).
+                        attempt_count=getattr(result, "attempts_started", None),
+                        per_attempt_latencies=list(result.attempt_latencies)
+                        if getattr(result, "attempt_latencies", None)
+                        else None,
                     )
                 except Exception:  # noqa: S110, BLE001 — the hook's contract
                     pass  # (never mask the loop result on an archive failure)
@@ -1739,41 +1747,50 @@ def test_design_loop_slow_model_timeout_keeps_candidate_and_versions(
     )
 
     # (c) The terminal error frame carries the slow-model copy data.
-    # The loop's per-attempt deadline fired on attempt 2. The adapter's
-    # per-attempt clock counts from each attempt's FIRST frame; with a
-    # stub render (no view frames), no attempt has an established time,
-    # so ``attempt_count`` / ``attempt_latency_seconds`` are omitted
-    # (honest absence — the SPA falls back to the generic reason copy
-    # without a number it has not established).
-    # The version-created frame + the structured reason are the
-    # primary-path guarantees; the measured values are omitted-not-null.
-    # (The loop's own per-attempt deadline fired, not the adapter's
-    # safety net — the structured reason ``design_loop_timed_out``
-    # confirms the loop layer did the cutting off.)
+    # The loop's OWN per-attempt deadline fired on attempt 2 (the
+    # structured reason ``design_loop_timed_out`` confirms the loop
+    # layer did the cutting off, not the adapter's safety net), so the
+    # LOOP owns the numbers: attempt 1 (fast, rendered) + attempt 2
+    # (killed mid-LLM-call — no view frames ever arrive for it) =
+    # two STARTED attempts. The frame carries ``attempt_count == 2``
+    # and a POSITIVE ``attempt_latency_seconds`` (the loop's wall clock
+    # averaged over the measured attempts; with attempt 1 ≈ fast and
+    # attempt 2 cut at the 0.2 s budget the mean is ≈ 0.1 s, which
+    # rounds to a whole second and — like a real slow model's 60 s
+    # round-up — rounds UP, never to a 0 that would read as "about 0s
+    # an attempt"). The SPA renders the templated slow-model copy
+    # from these two fields (web/src/lib/errorMapping.ts).
+    assert error_data.get("attempt_count") == 2, (
+        f"expected the loop-sourced attempt count (2) on the terminal "
+        f"frame, got {error_data.get('attempt_count')!r}"
+    )
+    _lat = error_data.get("attempt_latency_seconds")
+    assert isinstance(_lat, (int, float)) and _lat > 0, (
+        f"expected a positive loop-sourced attempt_latency_seconds on "
+        f"the terminal frame, got {_lat!r}"
+    )
 
     # (d) The archive row (written by the production hook at the loop
     # seam — the loop returned a real exhausted result) carries the
-    # attempt count and per-attempt latencies; output_scad is the
-    # loop's own best.scad_source. (The hook fires on the loop's result
-    # via the app's ``default_run_design_loop_hook`` seam — in this
-    # test the loop is driven directly, so the archive is the hook's
-    # own; the adapter's own deadline-archive test above pins that
-    # path separately.)
+    # SAME loop-sourced numbers: the attempt count (2 started) and the
+    # per-attempt latencies the loop's wall clock measured, one entry
+    # per measured attempt (attempts killed mid-LLM-call are omitted —
+    # honest absence, never fabricated). Output_scad is the loop's own
+    # best.scad_source.
     out = tmp_path / "failures.jsonl"
     assert out.exists(), "deadline did not archive a failures.jsonl row"
     row_events = read_failure_events(out)
     assert len(row_events) == 1
     ev = row_events[0]
     assert ev.failure_class == DESIGN_LOOP_TIMED_OUT_REASON
-    assert ev.attempt_count is not None and ev.attempt_count >= 1
-    # ``per_attempt_latencies`` is the adapter's frame-derived measure;
-    # the hook's own archive (this test's seam) carries the loop's
-    # ``iterations_used`` as ``attempt_count`` and no latencies (the
-    # hook predates #417's adapter measure) — the adapter's own
-    # deadline-archive test above pins the latencies on that path.
-    # Both fields are optional (``None`` = absent — pre-#417 rows
-    # validate unchanged), so a ``None`` here is the honest absence.
-    assert ev.per_attempt_latencies is None
+    assert ev.attempt_count == 2, (
+        f"expected the loop-sourced attempt count (2) in the archive "
+        f"row, got {ev.attempt_count!r}"
+    )
+    assert ev.per_attempt_latencies is not None and ev.per_attempt_latencies
+    assert all(isinstance(x, float) and x >= 0 for x in ev.per_attempt_latencies), (
+        f"archive latencies are not measured seconds: {ev.per_attempt_latencies!r}"
+    )
     assert ev.output_scad == SCAD, (
         f"expected the kept candidate's SCAD in the archive row, "
         f"got {ev.output_scad!r}"

@@ -33,6 +33,7 @@ import inspect
 import io
 import json
 import logging
+import math
 import re
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -2531,13 +2532,21 @@ async def run_design_loop_with_events(
         # structured ``design_loop_timed_out`` reason stays on the
         # terminal error frame — the SPA renders the version and the
         # slow-model copy (with the measured per-attempt latency the
-        # frame carries) together, failure first. The measured
-        # per-attempt latency is derived from the run's own wall clock
-        # (the adapter's per-attempt clock measured above — the
-        # attempts the loop actually started), never fabricated: an
-        # in-flight attempt with no frames yields no number (omit-not
-        # null — the SPA then renders the generic reason copy rather
-        # than a number it has not established).
+        # frame carries) together, failure first.
+        #
+        # The numbers are LOOP-SOURCED (issue #417): the loop owns the
+        # wall clock — ``result.attempts_started`` (the attempts it
+        # STARTED, including the one killed mid-LLM-call) and
+        # ``result.attempt_latencies`` (one measured value per started
+        # attempt; a killed attempt keeps the budget it burned, a
+        # completed one its full duration). The frame's
+        # ``attempt_latency_seconds`` is the MEAN of those values (the
+        # copy says "about Ns an attempt" — a mean, not a max, not a
+        # last). The frame-derived ``_attempt_tracker`` is only a
+        # FALLBACK for results that carry no loop-sourced numbers
+        # (non-deadline-shaped results, or a stub loop the loop's own
+        # deadline did not cut — the adapter safety-net path is the
+        # only other timeout path, and it builds its own frame).
         _timeout_kept_version_id: int | None = None
         if (
             reason == DESIGN_LOOP_TIMED_OUT_REASON
@@ -2573,19 +2582,40 @@ async def run_design_loop_with_events(
                 # ("about Ns an attempt" — the SPA renders it from the
                 # terminal frame's ``attempt_latency_seconds`` /
                 # ``attempt_count`` fields, both omit-not-null): the
-                # adapter's own per-attempt clock holds the measured
-                # values for the attempts this run actually started.
-                # Omitted when no attempt was timed (an unmeasured
-                # number would violate the SPA's "never render a number
-                # the SPA has not established" invariant).
-                _latencies = _attempt_tracker.latencies()
-                _avg_latency = (
-                    sum(_latencies) / len(_latencies) if _latencies else None
-                )
-                if _avg_latency is not None:
-                    error_data["attempt_latency_seconds"] = round(_avg_latency)
-                if _attempt_tracker.attempt_count > 0:
-                    error_data["attempt_count"] = _attempt_tracker.attempt_count
+                # LOOP-SOURCED numbers above — the mean of the loop's
+                # own per-attempt wall clock, rounded up to a whole
+                # second (a killed attempt's 0.2 s burns read as
+                # "about 1s an attempt", never "about 0s"). Omitted
+                # when no attempt was measured (an unmeasured number
+                # would violate the SPA's "never render a number the
+                # SPA has not established" invariant).
+                _loop_latencies = getattr(result, "attempt_latencies", None)
+                if _loop_latencies:
+                    _avg_latency = sum(_loop_latencies) / len(_loop_latencies)
+                    # Round UP to a whole second: a killed attempt that
+                    # burned 0.2 s of a 0.2 s budget reads as "about 1s
+                    # an attempt", never "about 0s" — and a real slow
+                    # model's 58.2 s average never reads as "58s" when
+                    # it was really 59s.
+                    if _avg_latency > 0:
+                        error_data["attempt_latency_seconds"] = math.ceil(
+                            _avg_latency
+                        )
+                    _started = getattr(result, "attempts_started", None)
+                    if not isinstance(_started, int) or _started <= 0:
+                        _started = len(_loop_latencies)
+                    error_data["attempt_count"] = _started
+                else:
+                    # Fallback: the frame-derived attempt tracker (the
+                    # adapter safety-net path — see the comment above).
+                    _latencies = _attempt_tracker.latencies()
+                    _avg_latency = (
+                        sum(_latencies) / len(_latencies) if _latencies else None
+                    )
+                    if _avg_latency is not None:
+                        error_data["attempt_latency_seconds"] = round(_avg_latency)
+                    if _attempt_tracker.attempt_count > 0:
+                        error_data["attempt_count"] = _attempt_tracker.attempt_count
         # Frame order (issue #417 gate resolution): [photo notice(s),
         # version-created (when the kept candidate was stored), terminal
         # error] — the SAME order the adapter-deadline path uses, and the
