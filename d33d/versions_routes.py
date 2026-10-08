@@ -1074,6 +1074,66 @@ def _finalize_loop_kwargs(
 
         part_env = part_envelope_with_bbox(row, app.state.conn, app.state.versions)
 
+    # Issue #418: the through-hole check's baseline — the SAME
+    # resolution the chat seam in ``design_loop_events`` does. The
+    # finalize seam's loop call goes through the production closure
+    # which forwards ``through_baseline_genus`` / ``through_baseline_
+    # genus_source`` to the real loop; without them the loop defaults
+    # to a 0 baseline for a part-less project (a pocket would pass
+    # silently on any designed part that already has a hole).
+    import concurrent.futures as _cf
+
+    from d33d.design_loop_events import (
+        _measured_genus_for_dir,
+        _measured_genus_for_file,
+        _stored_part_mesh_path,
+    )
+
+    _latest_ver = (
+        app.state.versions.latest_version(project_id)
+        if app.state.versions is not None
+        else None
+    )
+    _tb_genus: int | None = None
+    _tb_source: str | None = None
+    if _latest_ver is not None and _latest_ver.get("render_artifact_dir"):
+        _render_dir = _latest_ver["render_artifact_dir"]
+        with _cf.ThreadPoolExecutor(max_workers=1) as _ex:
+            _parent_genus = _ex.submit(
+                _measured_genus_for_dir, _render_dir
+            ).result()
+        if _parent_genus is not None:
+            _tb_genus = _parent_genus
+            _tb_source = (
+                f"parent version v{_latest_ver['id']} rendered genus: "
+                f"{_parent_genus}"
+            )
+        else:
+            _tb_genus = -1
+            _tb_source = (
+                f"parent version v{_latest_ver['id']} rendered mesh "
+                f"unavailable — abstain"
+            )
+    elif row.get("part_filename"):
+        _stored_path = _stored_part_mesh_path(row, app.state.conn)
+        _stored_genus: int | None = None
+        if _stored_path is not None:
+            with _cf.ThreadPoolExecutor(max_workers=1) as _ex:
+                _stored_genus = _ex.submit(
+                    _measured_genus_for_file, str(_stored_path)
+                ).result()
+        if _stored_genus is not None:
+            _tb_genus = _stored_genus
+            _tb_source = f"stored repaired part genus: {_stored_genus}"
+        else:
+            _tb_genus = -1
+            _tb_source = "stored part mesh unavailable — abstain"
+    elif _latest_ver is not None:
+        _tb_genus = -1
+        _tb_source = (
+            f"parent version v{_latest_ver['id']} never rendered — abstain"
+        )
+
     # ``request`` must be non-empty: the hook builds a FailureEvent from
     # it (``min_length=1``) and an empty string would silently drop the
     # failures.jsonl line for an exhausted loop.
@@ -1113,6 +1173,10 @@ def _finalize_loop_kwargs(
         "state_confirmed": state_confirmed,
         "design_source": design_source,
     }
+    if _tb_genus is not None:
+        out["through_baseline_genus"] = _tb_genus
+    if _tb_source is not None:
+        out["through_baseline_genus_source"] = _tb_source
     # The import section's kwargs (issue #332, sub-issue 3) — additive:
     # the no-part case adds nothing (byte-identical loop call to today).
     if part_env is not None:

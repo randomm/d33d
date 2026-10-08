@@ -1938,7 +1938,17 @@ async def run_design_loop_with_events(
     #    rendered (no ``render_artifact_dir``), the baseline ABSTAINS
     #    (``-1`` is passed → the loop abstains) — a fabricated baseline
     #    would make the gate lie.
-    if row is not None and row.get("part_filename"):
+    #
+    # Issue #418: the parent baseline applies to EVERY v2+ edit —
+    # designed or imported. The baseline block is no longer gated on
+    # ``part_filename``: a scratch (part-less) project whose latest
+    # version has a rendered ``model.stl`` gets the parent's rendered
+    # genus, not the implicit 0 (a pocket then trivially passed on any
+    # designed part that already has a hole). Each run also LOGS the
+    # baseline used and its source (the ``through_baseline_genus_source``
+    # kwarg — the check logs it with its decision), so QA can see why
+    # the check passed or failed.
+    if row is not None:
         _latest_ver = (
             app.state.versions.latest_version(project_id)
             if app.state.versions is not None
@@ -1952,12 +1962,20 @@ async def run_design_loop_with_events(
             )
             if _parent_genus is not None:
                 kwargs["through_baseline_genus"] = _parent_genus
+                kwargs["through_baseline_genus_source"] = (
+                    f"parent version v{_latest_ver['id']} rendered genus: "
+                    f"{_parent_genus}"
+                )
             else:
                 # Abstain: the -1 unknown sentinel (the loop's
                 # resolve_baseline_genus maps it to None). A missing
                 # parent render is never a fabricated baseline.
                 kwargs["through_baseline_genus"] = -1
-        else:
+                kwargs["through_baseline_genus_source"] = (
+                    f"parent version v{_latest_ver['id']} rendered mesh "
+                    f"unavailable — abstain"
+                )
+        elif row.get("part_filename"):
             # V1 on import: the stored part mesh's genus (the mesh the
             # render imports). A 3MF import stores no STL (the render
             # re-exports it — no baseline is available) → abstain;
@@ -1971,6 +1989,9 @@ async def run_design_loop_with_events(
                 )
             if _stored_genus is not None:
                 kwargs["through_baseline_genus"] = _stored_genus
+                kwargs["through_baseline_genus_source"] = (
+                    f"stored repaired part genus: {_stored_genus}"
+                )
             else:
                 # Missing / unreadable part mesh (or a 3MF import): the
                 # check ABSTAINS. The -1 unknown sentinel is passed (the
@@ -1978,6 +1999,22 @@ async def run_design_loop_with_events(
                 # a fallback to the report's ``hole_count`` — a
                 # fabricated baseline would make the gate lie.
                 kwargs["through_baseline_genus"] = -1
+                kwargs["through_baseline_genus_source"] = (
+                    "stored part mesh unavailable — abstain"
+                )
+        else:
+            # Issue #418: a part-less project. No version yet → the
+            # NEW-design default: the kwarg is omitted (the loop
+            # defaults to 0 — "no baseline — new design"). A version
+            # exists but was never rendered (no render_artifact_dir,
+            # so no measurable parent mesh) → the check abstains — a
+            # fabricated baseline would make the gate lie.
+            if _latest_ver is not None:
+                kwargs["through_baseline_genus"] = -1
+                kwargs["through_baseline_genus_source"] = (
+                    f"parent version v{_latest_ver['id']} never rendered "
+                    f"— abstain"
+                )
 
     # Issue #295 — the lost-photo notice (the post_chat caller's photo
     # state, carried into the stream): when the project's stored photo
