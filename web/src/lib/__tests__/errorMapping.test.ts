@@ -289,23 +289,47 @@ describe("errorMapping", () => {
     expect(headless.detail).toBe("axis_params_mismatch");
   });
 
-  it("an unknown reason code maps to the generic sentence, raw code in detail", () => {
+  it("the design_loop_timed_out frame with measured values renders the slow-model copy (issue #417)", () => {
+    // The server's measured per-attempt latency and attempt count are on
+    // the frame (omit-not-null). When both are present, the headline is
+    // the templated "model is slow right now" copy with the measured
+    // values filled in — the words "stopped responding" no longer appear.
     const display = displayDesignLoopError({
-      message: "Design loop exhausted: totally_unknown",
-      reason: "totally_unknown",
+      message: "Design loop timed out after 360s",
+      reason: "design_loop_timed_out",
+      attempt_latency_seconds: 60,
+      attempt_count: 2,
     });
-    expect(display.message).not.toBe("totally_unknown");
-    expect(display.message).toContain("The design could not be generated");
-    expect(display.detail).toBe("totally_unknown");
+    expect(display.message).toBe(
+      copy.failure.design_loop_slow_model(60, 2),
+    );
+    expect(display.message).not.toContain("stopped responding");
+    expect(display.message).toContain("about 60s an attempt");
+    expect(display.message).toContain("stopped after 2 tries");
+    // The raw reason is still present for part 4 (collapsed).
+    expect(display.detail).toBe("design_loop_timed_out");
     expect(display.retryable).toBe(true);
   });
 
-  it("a missing reason maps to the generic infra sentence with the raw message", () => {
-    const display = displayDesignLoopError({ message: "design loop infra failure: boom" });
-    expect(display.message).toContain("Something went wrong");
-    expect(display.detail).toBe("design loop infra failure: boom");
-    expect(display.retryable).toBe(true);
-    expect(display.reason).toBeUndefined();
+  it("the design_loop_timed_out frame without measured values falls back to the generic reason copy (issue #417)", () => {
+    // A stall that never rendered carries no measured values — the
+    // headline falls back to the generic `design_loop_timed_out` reason
+    // sentence (which still says "ran past its time limit" — the cause
+    // is stated, just without a number the SPA has not established).
+    const display = displayDesignLoopError({
+      message: "Design loop timed out after 360s",
+      reason: "design_loop_timed_out",
+    });
+    expect(display.message).toBe(copy.failure.reasons.design_loop_timed_out);
+    expect(display.detail).toBe("design_loop_timed_out");
+  });
+
+  it("the design_loop_timed_out copy no longer contains 'stopped responding' when measured values are present (issue #417)", () => {
+    // The words "stopped responding" must not appear in the slow-model
+    // copy — the cause is now stated as "the model is slow right now".
+    const slowCopy = copy.failure.design_loop_slow_model(60, 2);
+    expect(slowCopy).not.toContain("stopped responding");
+    expect(slowCopy).toContain("The model is slow right now");
   });
 });
 

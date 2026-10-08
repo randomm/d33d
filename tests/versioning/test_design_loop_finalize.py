@@ -3946,7 +3946,7 @@ def test_design_loop_total_timeout_yields_terminal_error_frame(app_with_versions
     )
 
     monkeypatch.setattr(
-        "d33d.design_loop_events.DESIGN_LOOP_TIMEOUT_SECONDS", 0.5
+        "d33d.design_loop_events.DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS", 0.5 / 3
     )
 
     class _StallLoop:
@@ -3956,12 +3956,12 @@ def test_design_loop_total_timeout_yields_terminal_error_frame(app_with_versions
         as the real loop. The stub returns a GENUINE coroutine that sleeps
         for 10s (well beyond the 0.5s deadline) — the real production loop
         can take minutes, so a multi-second stub is realistic. The
-        deadline fires at 0.5s and cuts off the stream; the worker thread
-        keeps running until the coroutine returns at 10s, but the test's
-        ``asyncio.run`` teardown joins the executor thread, so the stub
-        must return for the test to complete. 10s is a generous margin
-        over the 0.5s deadline; the test's 2.0s assertion bound is
-        comfortably below it."""
+        deadline fires at 0.5s (3 × 0.5/3) and cuts off the stream; the
+        worker thread keeps running until the coroutine returns at 10s,
+        but the test's ``asyncio.run`` teardown joins the executor thread,
+        so the stub must return for the test to complete. 10s is a
+        generous margin over the 0.5s deadline; the test's 2.0s assertion
+        bound is comfortably below it."""
 
         def __call__(self, app=None, **kwargs):
             async def _stall():
@@ -4023,7 +4023,7 @@ def test_design_loop_deadline_does_not_false_abort_slow_run(app_with_versions, m
     from d33d.design_loop_events import run_design_loop_with_events
 
     monkeypatch.setattr(
-        "d33d.design_loop_events.DESIGN_LOOP_TIMEOUT_SECONDS", 2.0
+        "d33d.design_loop_events.DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS", 2.0 / 3
     )
 
     async def _slow_loop():
@@ -4077,7 +4077,7 @@ def test_design_loop_deadline_fires_among_liveness_frames(app_with_versions, mon
     )
 
     monkeypatch.setattr(
-        "d33d.design_loop_events.DESIGN_LOOP_TIMEOUT_SECONDS", 0.5
+        "d33d.design_loop_events.DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS", 0.5 / 3
     )
 
     class _LivenessLoop:
@@ -4163,7 +4163,7 @@ def test_design_loop_deadline_cancels_render_task(app_with_versions, monkeypatch
     from d33d.design_loop_events import run_design_loop_with_events
 
     monkeypatch.setattr(
-        "d33d.design_loop_events.DESIGN_LOOP_TIMEOUT_SECONDS", 0.5
+        "d33d.design_loop_events.DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS", 0.5 / 3
     )
     task_state: dict[str, object] = {}
 

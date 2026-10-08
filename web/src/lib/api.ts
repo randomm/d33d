@@ -442,16 +442,17 @@ export interface Envelope {
  * (issue #221, last-resort catch-all).
  *
  * Measured from the start of `streamEvents` (the fetch call) — NOT an
- * idle/per-frame timer. Must EXCEED the server-side `DESIGN_LOOP_TIMEOUT_SECONDS`
- * (d33d/design_loop_events.py, 180 s) with real margin so the server's clean,
+ * idle/per-frame timer. Must EXCEED the server-side derived total
+ * (`DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS` × `MAX_ITERATIONS` = 120 s × 3
+ * = 360 s, issue #417) with real margin so the server's clean,
  * structured "design_loop_timed_out" error frame normally arrives first;
  * this deadline fires only if the server deadline never reached the client
  * (e.g. a half-open connection or the server process died).
  *
  * Overridable via `ApiClientOptions.streamTotalTimeoutMs` for tests
- * (the 240 s production value is untestable as-is).
+ * (the 960 s production value is untestable as-is).
  */
-export const STREAM_TOTAL_TIMEOUT_MS = 240_000;
+export const STREAM_TOTAL_TIMEOUT_MS = 960_000;
 
 export const MAX_REGION_EDIT_MODULE_IDS = 10;
 

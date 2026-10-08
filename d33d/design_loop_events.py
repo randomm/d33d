@@ -43,9 +43,11 @@ from PIL import Image
 from d33d.design_loop import (
     MODEL_UNCONFIGURED,
     RENDERER_IMAGE_STALE,
+    MAX_ITERATIONS,
     BboxInfo,
     _bbox_target,
     _gate_selection_extents,
+    _scad_params,
 )
 from d33d.render_worker import VIEWS, RenderResult
 
@@ -63,22 +65,32 @@ EMPTY_PHOTO_DATA_URI = (
     "SUVORK5CYII="
 )
 
-#: Total wall-clock deadline for ONE design-loop run, in seconds
-#: (issue #221). Measured from the start of the adapter generator (the
-#: start of the ``to_thread`` task), NOT per-frame or idle time: the
-#: guarantee is "the loop does not complete within a bounded time",
-#: matching the render worker's own bounded-subprocess model (``
-#: render_worker.run_container``'s 120s timeout) one level up. A stream
-#: that keeps emitting liveness frames (per-view progress, LLM tokens)
-#: while the loop itself never terminates MUST still be cut off, so the
-#: deadline is total, not idle. Must be read as a module-level constant
-#: inside the wait loop (so tests can ``monkeypatch.setattr`` it to a
-#: small value — the same pattern as ``versions_routes
-#: ._DRAIN_TIMEOUT_SECONDS``), never inlined.
-#: The client-side ``STREAM_TOTAL_TIMEOUT_MS`` (``web/src/lib/api.ts``)
-#: must exceed this with margin (240s > 180s) so the server's structured
+#: Wall-clock deadline for ONE design iteration (one attempt: the design
+#: LLM call + render + scoring), in seconds (issue #417). The per-attempt
+#: budget lives in ``d33d.design_loop.run_design_loop_async``, which opens
+#: a fresh wall-clock window for each iteration and, past the deadline,
+#: returns the best-so-far exhausted result instead of waiting for the
+#: slow call. 120 s matches the render worker's own bounded-subprocess
+#: model (``render_worker.run_container``'s 120 s timeout) one level up —
+#: an attempt is never cut off mid-render — and stays at the same scale as
+#: the per-LLM-call hang guard (``d33d.design_llm.LLM_CALL_TIMEOUT_SECONDS``,
+#: 120 s), so no single LLM call can hang past the attempt budget. Must be
+#: read as a module-level constant inside the adapter's wait loop (so
+#: tests can ``monkeypatch.setattr`` it to a small value — the same
+#: pattern as ``versions_routes._DRAIN_TIMEOUT_SECONDS``), never inlined.
+DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS = 120.0
+
+#: Derived alias (documentation + the adapter's cut-off default): the
+#: loop's TOTAL wall-clock budget is the per-attempt deadline times the
+#: iteration cap (``d33d.design_loop.MAX_ITERATIONS``, 3) — 360 s. The
+#: loop enforces the PER-ATTEMPT deadline directly (each slow attempt
+#: trips its own 120 s window, so three slow attempts are NOT cut off by
+#: one flat 180 s total, the bug issue #417 fixes); this constant is the
+#: derived total the adapter races against as a cut-off. The client-side
+#: ``STREAM_TOTAL_TIMEOUT_MS`` (``web/src/lib/api.ts``) must exceed it
+#: with margin (960 s > 360 s) so the server's structured
 #: ``design_loop_timed_out`` frame normally arrives first.
-DESIGN_LOOP_TIMEOUT_SECONDS = 180.0
+DESIGN_LOOP_TIMEOUT_SECONDS = DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS * 3.0
 
 #: The distinct structured reason code for a deadline-triggered terminal
 #: error frame. Deliberately NOT the render-worker's ``"timeout"``
@@ -1683,6 +1695,33 @@ class _DeadlinedLoopResult:
         return self
 
 
+class _SyntheticPassResult:
+    """A synthetic pass ``DesignResult`` for the timeout-version path
+    (issue #417).
+
+    When the adapter's deadline fires and a best candidate rendered,
+    the adapter synthesizes this result and passes it to
+    ``_resolve_version_create`` — the same path an exhausted loop takes
+    (except exhausted loops are NOT versioned today; this is a NEW
+    path). The ``best`` is a real ``IterationRecord`` with a real
+    ``RenderResult`` (the synthetic ok render the adapter builds from
+    the candidate's SCAD), so ``_resolve_version_create`` reads
+    ``best.scad_source``, ``best.params``, ``best.render`` (for the
+    thumbnail), and ``best.bbox`` (``None`` — the adapter's deadline
+    path has no measured bbox) without fabricating any of them.
+    """
+
+    status = "pass"
+    failure_reason = None
+
+    def __init__(self, best: Any, iterations: tuple[Any, ...]) -> None:
+        self.best = best
+        self.iterations = iterations
+        self.iterations_used = (
+            best.iteration if hasattr(best, "iteration") else 1
+        )
+
+
 async def run_design_loop_with_events(
     app: Any,
     project_id: int,
@@ -2097,7 +2136,10 @@ async def run_design_loop_with_events(
             # here is logged and swallowed — the deadline frame is the
             # user-visible guarantee (the hook's errors-swallowed
             # contract elsewhere).
-            def _archive_deadline() -> None:
+            def _archive_deadline(
+                attempt_count: int = 0,
+                latencies: list[float] | None = None,
+            ) -> None:
                 sink = getattr(app.state, "failures_jsonl_path", None)
                 if sink is None:
                     return
@@ -2162,6 +2204,8 @@ async def run_design_loop_with_events(
                         prompt_version="",
                         output_scad=output_scad,
                         path=sink,
+                        attempt_count=attempt_count if attempt_count > 0 else None,
+                        per_attempt_latencies=list(latencies) if latencies else None,
                     )
                 except Exception:
                     logger.exception(
@@ -2171,7 +2215,48 @@ async def run_design_loop_with_events(
                     )
 
             _last_scad_source: str = ""
-            _deadline = _loop.time() + DESIGN_LOOP_TIMEOUT_SECONDS
+            # The loop's total wall-clock budget is the per-attempt deadline
+            # times the iteration cap (issue #417 — derived, never a flat
+            # literal): the loop's OWN per-attempt deadline does the actual
+            # cutting off (``run_design_loop_async`` returns the
+            # best-so-far exhausted result when an attempt outlives its
+            # window), so this adapter deadline is a cut-off margin over
+            # the derived total — a legitimately slow run that finishes
+            # within its budget is never cut off here.
+            _total_deadline = (
+                DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS * MAX_ITERATIONS
+            )
+            _deadline = _loop.time() + _total_deadline
+            # Per-attempt wall-clock timing (issue #417): each yielded
+            # progress frame carries the 1-based iteration index the loop
+            # stamps on its per-view markers (issue #121's payload
+            # contract), so the adapter times each attempt from its first
+            # frame to the next attempt's first frame (or the deadline).
+            # The timeout copy ("about N s an attempt") and the archive
+            # row's per-attempt latencies are the MEASURED values, never
+            # fabricated.
+            _attempt_started: dict[int, float] = {}
+            _attempt_count = 0
+
+            def _attempt_latencies(attempt_count: int) -> list[float]:
+                """Measured seconds for attempts 1..``attempt_count``.
+
+                Each elapsed value is the gap between that attempt's first
+                frame and the next attempt's first frame (or the deadline
+                for the in-flight attempt); an attempt with no frames has
+                no established time and is omitted (honest absence —
+                the copy then falls back to the per-attempt budget).
+                """
+                latencies: list[float] = []
+                _now = _loop.time()
+                for idx in range(1, attempt_count + 1):
+                    start = _attempt_started.get(idx)
+                    if start is None:
+                        continue
+                    end = _attempt_started.get(idx + 1)
+                    latencies.append(max(0.0, (end if end is not None else _now) - start))
+                return latencies
+
             while True:
                 if render_task.done():
                     break
@@ -2183,6 +2268,15 @@ async def run_design_loop_with_events(
                     _scad = _f[1].get("scad_source")
                     if isinstance(_scad, str) and _scad:
                         _last_scad_source = _scad
+                    _iter = _f[1].get("iteration")
+                    if (
+                        isinstance(_iter, int)
+                        and 1 <= _iter <= MAX_ITERATIONS
+                        and _iter not in _attempt_started
+                    ):
+                        _attempt_started[_iter] = _loop.time()
+                    if isinstance(_iter, int) and _iter > _attempt_count:
+                        _attempt_count = _iter
                     yield _f
                     continue
                 _remaining = _deadline - _loop.time()
@@ -2191,29 +2285,114 @@ async def run_design_loop_with_events(
                     # structured error frame. No further frames may be
                     # yielded after this one (the deadline frame is
                     # terminal by contract).
+                    _latencies = _attempt_latencies(_attempt_count)
+                    _avg_latency = (
+                        sum(_latencies) / len(_latencies) if _latencies else None
+                    )
                     logger.warning(
                         "design loop for project %s exceeded the %ss "
-                        "total deadline — emitting terminal "
-                        "design_loop_timed_out frame",
+                        "derived total deadline (per-attempt %ss × %s "
+                        "attempts; measured %r s per attempt) — emitting "
+                        "terminal design_loop_timed_out frame",
                         project_id,
-                        DESIGN_LOOP_TIMEOUT_SECONDS,
+                        _total_deadline,
+                        DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS,
+                        MAX_ITERATIONS,
+                        _latencies,
                     )
-                    _archive_deadline()
+                    _archive_deadline(_attempt_count, _latencies)
+                    # Issue #417 — the timeout-version path: when the loop
+                    # was killed mid-run but a best candidate rendered,
+                    # the adapter synthesizes a pass-equivalent result and
+                    # calls ``_resolve_version_create`` to store it (the
+                    # same path an exhausted loop takes — except exhausted
+                    # loops are NOT versioned today; this is a NEW path).
+                    # Only a candidate that actually rendered (has a real
+                    # ``RenderResult``, not the synthetic pre-flight
+                    # placeholder with ``render=None``) is versioned.
+                    # Best-effort: a version-creation failure logs and
+                    # degrades to no version (the timeout frame still
+                    # fires); the version is the user-facing bonus, not
+                    # the guarantee.
+                    _kept_version_id: int | None = None
+                    if _last_scad_source:
+                        try:
+                            from d33d.design_loop import (
+                                IterationRecord,
+                                Score,
+                                _scad_params,
+                            )
+                            from d33d.render_worker import RenderResult
+
+                            _kept_render = RenderResult(
+                                ok=True,
+                                exit_code=0,
+                                duration_ms=0,
+                                error_class="ok",
+                                stderr="",
+                                stl=None,
+                                csg=None,
+                                views=("v",) * 6,
+                            )
+                            _kept_record = IterationRecord(
+                                iteration=_attempt_count if _attempt_count > 0 else 1,
+                                scad_source=_last_scad_source,
+                                render=_kept_render,
+                                score=Score(
+                                    bits=(False,) * 5,
+                                    rank=0,
+                                    tiebreak=(False,) * 5,
+                                ),
+                                params=_scad_params(_last_scad_source),
+                            )
+                            _kept_result = _SyntheticPassResult(
+                                best=_kept_record,
+                                iterations=(),
+                            )
+                            _kept_version_id = await _resolve_version_create(
+                                app,
+                                project_id,
+                                _kept_result,
+                                user_message,
+                                stated_axes=stated_axes,
+                            )
+                        except Exception:
+                            logger.exception(
+                                "kept-candidate version creation failed for "
+                                "project %s — emitting the timeout frame "
+                                "without a version",
+                                project_id,
+                            )
+                            _kept_version_id = None
+                    _error_data: dict[str, Any] = {
+                        "message": (
+                            "Design loop timed out after "
+                            f"{int(_total_deadline)}s"
+                        ),
+                        "reason": DESIGN_LOOP_TIMED_OUT_REASON,
+                    }
+                    # The measured per-attempt latency (the SPA renders it
+                    # in the slow-model copy: "about Ns an attempt" —
+                    # rounded to a whole second; omit-not-null when no
+                    # attempt was timed). Omitted when no attempt was
+                    # observed (a stall that never rendered) — the copy
+                    # then falls back to the budget constant.
+                    if _avg_latency is not None:
+                        _error_data["attempt_latency_seconds"] = (
+                            round(_avg_latency)
+                        )
+                    if _attempt_count > 0:
+                        _error_data["attempt_count"] = _attempt_count
                     _deadline_frames: list[tuple[str, dict[str, Any]]] = (
                         _yield_notice()
                     )
-                    _deadline_frames.append(
-                        (
-                            "error",
-                            {
-                                "message": (
-                                    "Design loop timed out after "
-                                    f"{int(DESIGN_LOOP_TIMEOUT_SECONDS)}s"
-                                ),
-                                "reason": DESIGN_LOOP_TIMED_OUT_REASON,
-                            },
-                        )
-                    )
+                    if _kept_version_id is not None:
+                        _vc_frame: dict[str, Any] = {
+                            "step": "version-created",
+                            "version_id": _kept_version_id,
+                        }
+                        _deadline_frames.insert(0, ("progress", _vc_frame))
+                    _deadline_frames.append(("error", _error_data))
                     for _f in _deadline_frames:
                         yield _f
                     # Cancel the ``to_thread`` render task AFTER the frame
@@ -2256,6 +2435,15 @@ async def run_design_loop_with_events(
                     _scad = _f[1].get("scad_source")
                     if isinstance(_scad, str) and _scad:
                         _last_scad_source = _scad
+                    _iter = _f[1].get("iteration")
+                    if (
+                        isinstance(_iter, int)
+                        and 1 <= _iter <= MAX_ITERATIONS
+                        and _iter not in _attempt_started
+                    ):
+                        _attempt_started[_iter] = _loop.time()
+                    if isinstance(_iter, int) and _iter > _attempt_count:
+                        _attempt_count = _iter
                     yield _f
                     continue
                 _get_task.cancel()
@@ -2279,6 +2467,15 @@ async def run_design_loop_with_events(
                 _scad = _f[1].get("scad_source")
                 if isinstance(_scad, str) and _scad:
                     _last_scad_source = _scad
+                _iter = _f[1].get("iteration")
+                if (
+                    isinstance(_iter, int)
+                    and 1 <= _iter <= MAX_ITERATIONS
+                    and _iter not in _attempt_started
+                ):
+                    _attempt_started[_iter] = _loop.time()
+                if isinstance(_iter, int) and _iter > _attempt_count:
+                    _attempt_count = _iter
                 yield _f
             result = render_task.result()
         else:
