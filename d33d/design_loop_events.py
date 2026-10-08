@@ -41,6 +41,7 @@ from typing import Any
 from PIL import Image
 
 from d33d.design_loop import (
+    DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS,
     MAX_ITERATIONS,
     MODEL_UNCONFIGURED,
     RENDERER_IMAGE_STALE,
@@ -68,18 +69,20 @@ EMPTY_PHOTO_DATA_URI = (
 
 #: Wall-clock deadline for ONE design iteration (one attempt: the design
 #: LLM call + render + scoring), in seconds (issue #417). The per-attempt
-#: budget lives in ``d33d.design_loop.run_design_loop_async``, which opens
-#: a fresh wall-clock window for each iteration and, past the deadline,
-#: returns the best-so-far exhausted result instead of waiting for the
-#: slow call. 120 s matches the render worker's own bounded-subprocess
+#: budget is the single named constant
+#: :data:`d33d.design_loop.DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS` (120 s)
+#: imported into this module — the loop's ``attempt_timeout`` default and
+#: this adapter's derived safety-net total both read it (one definition,
+#: issue #417). 120 s matches the render worker's own bounded-subprocess
 #: model (``render_worker.run_container``'s 120 s timeout) one level up —
-#: an attempt is never cut off mid-render — and stays at the same scale as
-#: the per-LLM-call hang guard (``d33d.design_llm.LLM_CALL_TIMEOUT_SECONDS``,
-#: 120 s), so no single LLM call can hang past the attempt budget. Must be
-#: read as a module-level constant inside the adapter's wait loop (so
+#: an attempt is never cut off mid-render — and equals the per-LLM-call
+#: hang guard (``d33d.design_llm.LLM_CALL_TIMEOUT_SECONDS``, 120 s): a
+#: slow model trips the INNER per-call timeout first (httpx raises
+#: ``httpx.TimeoutException``) and a hung one trips this OUTER deadline —
+#: both lead to the same keep-best ``design_loop_timed_out`` result. Must
+#: be read as a module-level constant inside the adapter's wait loop (so
 #: tests can ``monkeypatch.setattr`` it to a small value — the same
 #: pattern as ``versions_routes._DRAIN_TIMEOUT_SECONDS``), never inlined.
-DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS = 120.0
 
 #: The margin over the derived total (per-attempt × MAX_ITERATIONS, 360 s)
 #: the adapter's OUTER SAFETY NET deadline adds (issue #417): 60 s of
@@ -91,18 +94,6 @@ DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS = 120.0
 #: (360 + 60 = 420 s < 480 s) so the server's structured frame arrives
 #: before the client's generic "stream interrupted" kill.
 ADAPTER_DEADLINE_MARGIN_SECONDS = 60.0
-
-#: Derived alias (documentation + the adapter's cut-off default): the
-#: loop's TOTAL wall-clock budget is the per-attempt deadline times the
-#: iteration cap (``d33d.design_loop.MAX_ITERATIONS``, 3) — 360 s. The
-#: loop enforces the PER-ATTEMPT deadline directly (each slow attempt
-#: trips its own 120 s window, so three slow attempts are NOT cut off by
-#: one flat 180 s total, the bug issue #417 fixes); this constant is the
-#: derived total the adapter races against as a cut-off. The client-side
-#: ``STREAM_TOTAL_TIMEOUT_MS`` (``web/src/lib/api.ts``) must exceed it
-#: with margin (480 s > 360 s) so the server's structured
-#: ``design_loop_timed_out`` frame normally arrives first.
-DESIGN_LOOP_TIMEOUT_SECONDS = DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS * MAX_ITERATIONS
 
 #: The distinct structured reason code for a deadline-triggered terminal
 #: error frame. Deliberately NOT the render-worker's ``"timeout"``

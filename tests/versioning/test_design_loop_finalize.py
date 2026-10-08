@@ -3929,7 +3929,7 @@ def test_chat_render_runs_off_the_event_loop(app_with_versions):
 
 def test_design_loop_total_timeout_yields_terminal_error_frame(app_with_versions, monkeypatch):
     """A loop that never terminates is cut off by the TOTAL wall-clock
-    deadline (``design_loop_events.DESIGN_LOOP_TIMEOUT_SECONDS``), which
+    deadline (``design_loop.DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS``), which
     fires within the monkeypatched 0.5s window and yields a terminal
     ``error`` frame with the NEW structured reason
     ``design_loop_timed_out`` (distinct from the render-worker ``"timeout"

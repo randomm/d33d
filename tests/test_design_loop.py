@@ -33,6 +33,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -4195,3 +4196,166 @@ def test_per_attempt_deadline_returns_best_so_far_exhausted():
     # path handles the honest zero-render case.
     assert result.iterations_used == 0
     assert result.best is None
+
+
+def test_async_llm_success_within_per_attempt_deadline_passes(monkeypatch):
+    """Issue #417 success path: an ASYNC ``llm_fn`` that returns a valid
+    design WITHIN the per-attempt budget goes through ``asyncio.wait_for``
+    (the ``_await_with_per_attempt_deadline`` helper) and the loop passes
+    with the candidate — ``wait_for`` returns the ``LLMResult`` (not a
+    ``Task``), so ``scad.prompt_hash`` on the success path is valid."""
+    calls = {"n": 0}
+    scad = _scad_llm(GOOD_SCAD)
+
+    async def _async_llm(role, messages, system):
+        calls["n"] += 1
+        return scad
+
+    result = asyncio.run(
+        run_design_loop_async(
+            photo=PHOTO,
+            stated_dims=STATED,
+            render_fn=lambda s, d: _render(),
+            llm_fn=_async_llm,
+            bbox_fn=_bbox_ok,
+            max_iterations=MAX_ITERATIONS,
+            attempt_timeout=5.0,
+        )
+    )
+    assert calls["n"] == 1
+    assert result.status == "pass"
+    assert result.best.iteration == 1
+    assert "cube" in result.best.scad_source
+
+
+def test_sync_llm_success_within_per_attempt_deadline_passes(monkeypatch):
+    """Issue #417 success path: a SYNC ``llm_fn`` (the `_call` inline path,
+    no coroutine wrapping) that returns a valid design within the per-attempt
+    budget also goes through the deadline helper and the loop passes."""
+    scad = _scad_llm(GOOD_SCAD)
+
+    def _sync_llm(role, messages, system):
+        return scad
+
+    result = asyncio.run(
+        run_design_loop_async(
+            photo=PHOTO,
+            stated_dims=STATED,
+            render_fn=lambda s, d: _render(),
+            llm_fn=_sync_llm,
+            bbox_fn=_bbox_ok,
+            max_iterations=MAX_ITERATIONS,
+            attempt_timeout=5.0,
+        )
+    )
+    assert result.status == "pass"
+    assert result.best.iteration == 1
+    assert "cube" in result.best.scad_source
+
+
+def test_inner_per_call_llm_timeout_keeps_best_candidate(monkeypatch):
+    """Issue #417: the production per-LLM-call bound
+    (``d33d.design_llm.LLM_CALL_TIMEOUT_SECONDS``, 120 s — the httpx
+    per-request timeout on the production edge) defaults to the SAME value
+    as the loop's per-attempt deadline, so a SLOW model trips the INNER
+    per-call timeout first (httpx raises ``httpx.TimeoutException``) rather
+    than the outer ``wait_for``'s TimeoutError. That exception must lead
+    to the SAME keep-best ``design_loop_timed_out`` result, not crash or
+    exhaust. A good attempt 1 + an inner per-call timeout on attempt 2 →
+    the attempt-1 candidate is kept and the reason is
+    ``design_loop_timed_out``."""
+    import httpx
+
+    good = _scad_llm(GOOD_SCAD)
+    calls = {"n": 0}
+
+    async def _slow_llm(role, messages, system):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return good
+        # Production per-call timeout (the httpx bound) firing on attempt 2.
+        raise httpx.TimeoutException("timed out")
+
+    result = asyncio.run(
+        run_design_loop_async(
+            photo=PHOTO,
+            stated_dims=STATED,
+            render_fn=lambda s, d: _render(),
+            llm_fn=_slow_llm,
+            max_iterations=MAX_ITERATIONS,
+            attempt_timeout=5.0,
+        )
+    )
+    # The inner per-call timeout on attempt 2 routed to the keep-best path
+    # (not a crash / not a re-attempt): attempt 1's candidate is kept.
+    assert result.status == "exhausted"
+    assert result.failure_reason == "design_loop_timed_out"
+    assert result.best is not None
+    assert result.best.iteration == 1
+    assert "cube" in result.best.scad_source
+
+
+def test_preflight_renderer_probe_bounded(monkeypatch):
+    """Issue #417 bounded pre-flight: the pre-flight ``renderer_is_available``
+    probe (``None`` → real probe via ``to_thread``) that sleeps past a
+    monkeypatched short :data:`PREFLIGHT_PROBE_TIMEOUT_SECONDS` is cut off
+    by ``asyncio.wait_for`` and returns the SAME retryable
+    ``renderer_unavailable`` result the OSError path yields."""
+    import d33d.design_loop as _dl
+
+    def _sleepy_probe(*a, **kw):
+        time.sleep(2.0)  # past the 0.5 s monkeypatched bound
+        return True
+
+    monkeypatch.setattr(_dl, "renderer_is_available", _sleepy_probe)
+    monkeypatch.setattr(
+        _dl, "PREFLIGHT_PROBE_TIMEOUT_SECONDS", 0.5, raising=False
+    )
+
+    result = asyncio.run(
+        run_design_loop_async(
+            photo=PHOTO,
+            stated_dims=STATED,
+            render_fn=lambda s, d: _render(),
+            llm_fn=lambda role, m, s: _scad_llm(GOOD_SCAD),
+            max_iterations=1,
+        )
+    )
+    assert result.status == "exhausted"
+    assert result.failure_reason == "renderer_unavailable"
+    assert result.iterations_used == 0
+
+
+def test_preflight_image_probe_bounded(monkeypatch):
+    """Issue #417 bounded pre-flight: the pre-flight image probe (``None`` →
+    real ``default_image_check`` via ``to_thread``) that sleeps past a
+    monkeypatched short :data:`PREFLIGHT_PROBE_TIMEOUT_SECONDS` is cut off
+    and returns the SAME retryable ``renderer_unavailable`` result (never
+    the terminal ``renderer_image_stale``)."""
+    import d33d.design_loop as _dl
+
+    monkeypatch.setattr(
+        _dl, "renderer_is_available", lambda *a, **kw: True
+    )
+
+    def _sleepy_image_check(*a, **kw):
+        time.sleep(2.0)  # past the 0.5 s monkeypatched bound
+
+    monkeypatch.setattr(_dl, "default_image_check", _sleepy_image_check)
+    monkeypatch.setattr(
+        _dl, "PREFLIGHT_PROBE_TIMEOUT_SECONDS", 0.5, raising=False
+    )
+
+    result = asyncio.run(
+        run_design_loop_async(
+            photo=PHOTO,
+            stated_dims=STATED,
+            render_fn=lambda s, d: _render(),
+            llm_fn=lambda role, m, s: _scad_llm(GOOD_SCAD),
+            max_iterations=1,
+        )
+    )
+    assert result.status == "exhausted"
+    assert result.failure_reason == "renderer_unavailable"
+    assert result.iterations_used == 0
+    assert result.failure_reason != "renderer_image_stale"

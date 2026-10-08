@@ -63,10 +63,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+import httpx
+
 from d33d.config.catalogue import Catalogue
 from d33d.config.probes import CapabilityResult
 from d33d.config.resolve import resolve_model
-from d33d.design_llm import LLM_CALL_TIMEOUT_SECONDS, LLMResult, send
+from d33d.design_llm import LLMResult, send
 from d33d.failure_classes import (
     REPAIRABLE_CLASSES,
     ClassifiedFailure,
@@ -154,6 +156,32 @@ RENDERER_PREFLIGHT_CACHE_SECONDS = 30.0
 #: The wall-clock bound on the ``docker info`` probe's ``subprocess.run``
 #: (issue #277: "a short timeout (≤ 5 s)").
 _PREFLIGHT_PROBE_TIMEOUT_S = 5.0
+
+#: The wall-clock bound (seconds) on the design loop's PRE-FLIGHT probes
+#: (issue #417): the ``docker info`` renderer check and the render-worker
+#: image check both run blocking ``subprocess.run`` calls off the event
+#: loop (``asyncio.to_thread``) — the subprocess has its own ``timeout``,
+#: but a probe that ignores it (or whose thread wedges in ``communicate``)
+#: would otherwise stall the whole run before any LLM call. A short
+#: named bound (30 s, below the per-attempt budget below) makes a hung
+#: pre-flight end with the same retryable :data:`RENDERER_UNAVAILABLE`
+#: result the OSError path already yields, instead of a silent stall.
+PREFLIGHT_PROBE_TIMEOUT_SECONDS = 30.0
+
+#: The design loop's per-attempt wall-clock deadline (issue #417), in
+#: seconds: ONE named constant, shared by the loop's ``attempt_timeout``
+#: default and the adapter (``d33d.design_loop_events`` imports it —
+#: previously a duplicate ``design_loop_events.DESIGN_LOOP_ATTEMPT_TIMEOUT_
+#: SECONDS`` name). 120 s equals :data:`d33d.design_llm.LLM_CALL_TIMEOUT_
+#: SECONDS`, the per-LLM-CALL bound (the httpx per-request timeout on the
+#: production edge): a slow model trips the INNER per-call timeout first
+#: (``httpx.TimeoutException``) and a hung one trips this OUTER per-attempt
+#: deadline — both lead to the same keep-best
+#: ``design_loop_timed_out`` result. ``None`` (the seam) disables the
+#: deadline; any numeric value bounds it (the previous ``> 0`` guard is
+#: dropped — a 0-second budget is meaningless and would be a caller bug,
+#: and a negative one is likewise meaningless rather than a disable).
+DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS = 120.0
 
 #: The per-process cache of the last SUCCESSFUL pre-flight probe: a
 #: timestamp (``time.monotonic``) or ``None`` (never cached / reset).
@@ -1729,7 +1757,7 @@ async def run_design_loop_async(
     on_progress_iteration: Any = "_current",
     renderer_check: Callable[[], bool] | None = None,
     image_check: Callable[[], dict[str, str] | None] | None = None,
-    attempt_timeout: float | None = LLM_CALL_TIMEOUT_SECONDS,
+    attempt_timeout: float | None = DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS,
 ) -> DesignResult:
     """Run the bounded iterate-and-score design loop (async core).
 
@@ -1777,15 +1805,34 @@ async def run_design_loop_async(
     # so test harnesses default to "available" without shelling out; ``None``
     # runs the real probe.
     #
-    # The real probe shells out to ``docker info`` (blocking subprocess):
-    # run it off the event loop so a hung/slow daemon never stalls other
-    # SSE streams. An injected ``renderer_check`` is assumed to be a cheap
-    # test stub — a plain direct call keeps the stubs trivial (a sync
-    # zero-arg callable, no coroutine wiring needed). The image probe
-    # (issue #346) follows the same injectability convention: an injected
-    # ``image_check`` is a sync stub, the real probe runs off the loop.
+    # The real probes shell out to ``docker`` (blocking subprocess): run
+    # them off the event loop so a hung/slow daemon never stalls other SSE
+    # streams, and bound them with ``asyncio.wait_for`` (issue #417, the
+    # named :data:`PREFLIGHT_PROBE_TIMEOUT_SECONDS`): a probe that wedges
+    # (a daemon that ignores its own subprocess timeout) degrades to the
+    # SAME retryable :data:`RENDERER_UNAVAILABLE` result the OSError path
+    # yields, never a silent stall. An injected ``renderer_check`` /
+    # ``image_check`` is a cheap test stub — a plain direct call keeps the
+    # stubs trivial (a sync zero-arg callable, no coroutine wiring
+    # needed). The image probe (issue #346) follows the same injectability
+    # convention: an injected ``image_check`` is a sync stub, the real
+    # probe runs off the loop.
     if renderer_check is None:
-        renderer_ok = await asyncio.to_thread(renderer_is_available)
+        try:
+            renderer_ok = await asyncio.wait_for(
+                asyncio.to_thread(renderer_is_available),
+                timeout=PREFLIGHT_PROBE_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            # A pre-flight probe that wedges is a transient daemon fault:
+            # the SAME retryable renderer_unavailable result the OSError
+            # path yields — never a silent stall, never image_stale.
+            logger.debug(
+                "renderer pre-flight probe wedged past the %ss bound — "
+                "degrading this run to renderer_unavailable (retryable)",
+                PREFLIGHT_PROBE_TIMEOUT_SECONDS,
+            )
+            renderer_ok = False
     else:
         renderer_ok = renderer_check()
     if not renderer_ok:
@@ -1811,7 +1858,31 @@ async def run_design_loop_async(
     # The probe is injectable (``image_check``, ``None`` runs the real
     # probe) so the fast suite never shells out to real Docker.
     if image_check is None:
-        image_detail = await asyncio.to_thread(default_image_check)
+        try:
+            image_detail = await asyncio.wait_for(
+                asyncio.to_thread(default_image_check),
+                timeout=PREFLIGHT_PROBE_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            # A pre-flight image probe that wedges is a transient daemon
+            # fault: the SAME retryable renderer_unavailable result the
+            # OSError path yields — never a silent stall, never the
+            # terminal renderer_image_stale.
+            logger.debug(
+                "render-worker image pre-flight probe wedged past the %ss "
+                "bound — degrading this run to renderer_unavailable ("
+                "retryable), never renderer_image_stale",
+                PREFLIGHT_PROBE_TIMEOUT_SECONDS,
+            )
+            return DesignResult(
+                status="exhausted",
+                best=IterationRecord(
+                    iteration=0, scad_source="", render=None, score=None
+                ),
+                iterations=(),
+                failure_reason=RENDERER_UNAVAILABLE,
+                iterations_used=0,
+            )
     else:
         try:
             image_detail = image_check()
@@ -1851,7 +1922,7 @@ async def run_design_loop_async(
 
     # The per-attempt wall-clock deadline (issue #417): each design
     # iteration gets its OWN budget (``attempt_timeout`` — production
-    # defaults it to :data:`LLM_CALL_TIMEOUT_SECONDS`, 120 s) so three
+    # defaults it to :data:`DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS`, 120 s) so three
     # slow attempts are never cut off by one flat total, and no single
     # LLM call may hang forever. The loop is the SOLE owner of the time
     # budget: on expiry it returns the best-so-far rendered candidate
@@ -1881,7 +1952,7 @@ async def run_design_loop_async(
             ),
             _design_system(stated_dims, part_scale),
         )
-        if attempt_timeout is not None and attempt_timeout > 0:
+        if attempt_timeout is not None:
             # The deadline can fire: ``_await_with_per_attempt_deadline``
             # returns ``LLMResult`` on success, the best-so-far
             # exhausted ``DesignResult`` on expiry (the loop's own
@@ -2618,6 +2689,26 @@ async def _await_with_per_attempt_deadline(
     """
     try:
         return await asyncio.wait_for(scad_co, timeout=timeout)
+    except httpx.TimeoutException:
+        # The production per-LLM-call bound (``d33d.design_llm.LLM_CALL_
+        # TIMEOUT_SECONDS``, 120 s — the httpx per-request timeout on the
+        # production edge) and the per-attempt deadline default to the
+        # SAME value: a slow model trips the INNER per-call timeout first
+        # (httpx raises its own ``httpx.TimeoutException`` — NOT the outer
+        # ``wait_for``'s TimeoutError) instead of the deadline firing. In
+        # production the two are equal, so the inner bound always wins
+        # for a slow call — it must lead to the SAME keep-best
+        # ``design_loop_timed_out`` result, not crash or exhaust (the
+        # bug issue #417 is about). Only the per-call timeout is caught:
+        # a cancellation (CancelledError) or a real error propagates
+        # unchanged.
+        logger.warning(
+            "design loop attempt %s hit the per-LLM-call timeout (%ss) — "
+            "returning the best-so-far candidate",
+            iteration,
+            timeout,
+        )
+        return on_timeout()
     except TimeoutError:
         logger.warning(
             "design loop attempt %s exceeded the %ss per-attempt deadline "
