@@ -1847,25 +1847,6 @@ async def run_design_loop_async(
         # call and carried onto the iteration record(s) this call builds.
         _confirm_first, _confirm_sentence = extract_confirm_hints(scad)
         scad_source = _scad_from_result(scad)
-        # The loop's own SCAD-bearing progress frame (issue #417): the
-        # adapter's deadline path versions the best-so-far candidate via
-        # this frame — a REAL candidate the loop actually produced
-        # (rendered, scored, bbox measured below), never unvalidated
-        # text. The per-view markers (issue #121) never carry the
-        # source; this one does (payload: ``scad_source`` + 1-based
-        # ``iteration``). Emitted on every iteration (including the
-        # fail-fast empty-SCAD record) so the adapter's tracker holds
-        # the LAST candidate the loop produced; the adapter's
-        # ``scad_looks_valid`` gate suppresses the version on an empty
-        # or truncated source (honest absence).
-        if on_progress is not None:
-            try:
-                on_progress(
-                    "scad-ready",
-                    {"scad_source": scad_source, "iteration": iteration},
-                )
-            except Exception:  # the hook is best-effort (the run never dies on it)
-                logger.debug("scad-ready on_progress hook failed", exc_info=True)
         if not scad_source.strip():
             # Fail fast: an empty/blank SCAD would burn a whole render run
             # on nothing. A distinct structured error (not a render class)

@@ -347,12 +347,15 @@ def test_sse_loop_deadline_ends_stream_cleanly(app_with_streaming, monkeypatch):
     monkeypatch.setattr(
         "d33d.design_loop_events.DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS", 0.05
     )
+    monkeypatch.setattr(
+        "d33d.design_loop_events.ADAPTER_DEADLINE_MARGIN_SECONDS", 0.05
+    )
 
     class _StallLoop:
         """A production-seam-shaped stub that never terminates within
-        the deadline (sleeps 10 s). The deadline fires at 0.15 s
-        (3 × 0.05 s) and cuts off the stream with the terminal
-        design_loop_timed_out frame."""
+        the deadline (sleeps 10 s). The deadline fires at 0.2 s
+        (3 × 0.05 s + 0.05 s margin) and cuts off the stream with the
+        terminal design_loop_timed_out frame."""
 
         def __call__(self, app=None, **kwargs):
             async def _stall():

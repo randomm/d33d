@@ -447,18 +447,15 @@ export interface Envelope {
  * margin so the server's clean, structured "design_loop_timed_out" error
  * frame normally arrives first; this deadline fires only if the server
  * deadline never reached the client (e.g. a half-open connection or the
- * server process died). 720 s (12 min) is 6× the server's per-attempt
- * 120 s deadline — enough margin for a slow model to finish all 3 attempts
- * (the loop's per-attempt deadline returns the best-so-far candidate
- * within 120 s per attempt) + the server's own deadline to fire, without
- * the 960 s (16 min) over-allocation that let a client (or a malicious
- * actor with a valid session) tie up a server-side design-loop task for
- * 16 min instead of 12 (issue #417 review, PERFORMANCE finding).
+ * server process died). 480 s (8 min) is the server's 420 s outer net
+ * (3 × 120 s per-attempt + 60 s margin) plus a 60 s network headroom —
+ * the server's structured frame is what the user actually sees; this
+ * value is the catch-all for a dead stream, not a second timeout.
  *
  * Overridable via `ApiClientOptions.streamTotalTimeoutMs` for tests
  * (the 720 s production value is untestable as-is).
  */
-export const STREAM_TOTAL_TIMEOUT_MS = 720_000;
+export const STREAM_TOTAL_TIMEOUT_MS = 480_000;
 
 export const MAX_REGION_EDIT_MODULE_IDS = 10;
 

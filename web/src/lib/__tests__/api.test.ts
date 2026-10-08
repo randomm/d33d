@@ -1013,12 +1013,12 @@ describe("SSE stream demux", () => {
 });
 
 describe("STREAM_TOTAL_TIMEOUT_MS constant", () => {
-  it("is strictly greater than the server-side 360 s derived total with margin", () => {
-    // Server deadline: 120 s per-attempt × 3 attempts = 360 s (issue #417).
+  it("is strictly greater than the server-side 420 s outer net with margin", () => {
+    // Server deadline: 120 s per-attempt × 3 attempts + 60 s margin = 420 s (issue #417).
     // Client must exceed with real margin.
-    expect(STREAM_TOTAL_TIMEOUT_MS).toBeGreaterThan(360_000);
+    expect(STREAM_TOTAL_TIMEOUT_MS).toBeGreaterThan(420_000);
     // Must have at least 60 s of margin (not just 1 ms more).
-    expect(STREAM_TOTAL_TIMEOUT_MS).toBeGreaterThanOrEqual(720_000);
+    expect(STREAM_TOTAL_TIMEOUT_MS).toBeGreaterThanOrEqual(480_000);
   });
 });
 
