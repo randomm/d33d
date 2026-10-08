@@ -64,6 +64,12 @@ _BARE_HOLE_NOUNS = tuple(HOLE_NOUNS)
 #: the others (issue #418, lens finding 2).
 _HOLE_VOCABULARY: tuple[str, ...] = (*HOLE_NOUNS, *_HYPHENATED_TOKENS)
 
+# The -1 abstain sentinel for a baseline genus: -1 means the baseline is
+# unknown/unmeasurable (abstain); >= 0 is a measured genus. The alias
+# documents the sentinel so callers and tests can rely on the same
+# meaning of a negative value.
+BaselineGenus = int
+
 #: The ``_HOLE_VOCABULARY`` tokens as a single regex alternation — each
 #: token normalised to a regex-safe literal (the singular form with a
 #: trailing ``s`` stripped, so ``s?`` covers both forms; the hyphen
@@ -158,14 +164,16 @@ def requested_hole_count(request: str) -> int:
     """Issue #418: the number of holes the request asks for (``1`` when
     no count is stated).
 
-    A stated count — the numeral or number word IMMEDIATELY before the
-    hole noun (single whitespace or a hyphen), e.g. "two holes",
-    "3 holes", "four through-holes" — is the count. A number followed by
-    a unit (mm, cm, in, ") is a SIZE, not a count ("drill 2mm holes"
-    and "drill a 2.5 mm hole" both leave the count unstated → ``1``),
-    and a number in a LATER clause ("drill a 2.5mm hole and three
-    holes") is not the requested count — the parser reads only the
-    immediate neighbourhood of the first hole noun. Everything else
+    A stated count — the first numeral or number word before the first
+    hole noun that is NOT a dimension (a number + unit), e.g. "two
+    holes", "3 holes", "four through-holes" — is the count. Not "the
+    number immediately before the noun": the parser scans the whole
+    prefix before the first hole noun and skips any number that is
+    followed by a unit (mm, cm, in, ") — a dimension, not a count —
+    so "drill 2mm holes" and "drill a 2.5 mm hole" both leave the count
+    unstated → ``1``, and a number in a LATER clause ("drill a 2.5mm
+    hole and three holes") is not the requested count — the parser
+    reads only the prefix before the first hole noun. Everything else
     ("a hole", "the through-hole", no article) is ``1``.
     """
     number_words = {
@@ -239,7 +247,7 @@ THROUGH_HOLE_INSTRUCTION = (
 )
 
 
-def resolve_baseline_genus(through_baseline_genus: int | None) -> int | None:
+def resolve_baseline_genus(through_baseline_genus: BaselineGenus | None) -> BaselineGenus | None:
     """The baseline genus for the through-hole check (issue #386, operator
     decision 2026-10-05; issue #418).
 
@@ -279,7 +287,7 @@ def resolve_baseline_genus(through_baseline_genus: int | None) -> int | None:
 def route_through_hole_repair(
     request: str,
     stl: str | None,
-    through_baseline_genus: int | None,
+    through_baseline_genus: BaselineGenus | None,
     scad_source: str,
     through_baseline_genus_source: str | None = None,
 ) -> tuple[str, str] | None:
@@ -346,7 +354,7 @@ def route_through_hole_repair(
 def through_hole_check(
     request: str,
     stl: str | None,
-    baseline_genus: int | None,
+    baseline_genus: BaselineGenus | None,
     baseline_source: str | None = None,
 ) -> tuple[int, int] | None:
     """The through-hole post-check (issue #386, operator decision

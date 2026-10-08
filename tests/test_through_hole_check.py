@@ -373,40 +373,53 @@ def test_requested_hole_count_is_adjacent_to_hole_noun():
 
 
 def test_hole_vocabularies_are_shared():
-    """Issue #418 (lens finding 2): every token that can fire
-    ``is_through_request`` (HOLE_NOUNS plus the hyphenated tokens) is
-    ALSO inspected by ``_request_is_existing_hole`` and
-    ``requested_hole_count``. If the three functions source different
-    sets, one can classify a phrase the others treat as invisible — so
-    all three must route through the SAME shared tuple."""
+    """Issue #418 (lens finding 2, round-2 rewrite): every token in the
+    shared vocabulary is BEHAVIOURALLY visible to the three
+    classification functions — the test probes each token through the
+    functions' actual output instead of introspecting source or globals.
+
+    * every bare noun fires ``is_through_request`` with "drill a {tok}
+      through";
+    * every hyphenated token fires on its own ("add a {tok}");
+    * ``requested_hole_count`` parses the stated count ("add 3 {plural}
+      through") for every token where a plural is natural;
+    * every hyphenated token with "the" is an EXISTING hole ("make the
+      {tok} 8 mm");
+    * every bare noun with "the" is DELIBERATELY a new hole ("drill the
+      {noun} through") — the round-1 adversarial rule.
+    """
     import d33d.through_hole_check as thc
 
-    fire_set = set(thc._HOLE_VOCABULARY)
-    for name in ("HOLE_NOUNS", "_HYPHENATED_TOKENS"):
-        if hasattr(thc, name):
-            fire_set |= set(getattr(thc, name))
-
-    # _request_is_existing_hole must iterate tokens from the shared
-    # vocabulary (the hyphenated subset), not a private copy.
-    src_existing = thc._request_is_existing_hole.__code__.co_names
-    assert (
-        "_HOLE_VOCABULARY" in src_existing
-        or "_HYPHENATED_TOKENS" in src_existing
-        or "HOLE_NOUNS" in src_existing
-    ), (
-        "_request_is_existing_hole must source its tokens from the shared "
-        "vocabulary, not a private copy"
-    )
-
-    # requested_hole_count must source its hole-noun pattern from the
-    # shared tuple (a global name), not only a private regex literal —
-    # otherwise a vocab token the count parser cannot see would be
-    # classified by the other two functions but invisible to the count.
-    code_globals = thc.requested_hole_count.__globals__
-    assert ("_HOLE_VOCABULARY" in code_globals or "HOLE_VOCABULARY" in code_globals), (
-        "requested_hole_count must source its hole-noun pattern from the "
-        "shared tuple, not a private regex literal"
-    )
+    hyphenated = set(thc._HYPHENATED_TOKENS)
+    for tok in thc._HOLE_VOCABULARY:
+        if tok in hyphenated:
+            # The hyphenated tokens fire on their own (no hole noun needed).
+            assert is_through_request(f"add a {tok}"), (
+                f"hyphenated token {tok!r} must fire is_through_request"
+            )
+            # "the" + hyphenated compound is an existing-hole reference.
+            assert thc._request_is_existing_hole(f"make the {tok} 8 mm"), (
+                f"hyphenated token {tok!r} with 'the' must be an existing hole"
+            )
+            # A stated count parses off the hyphenated token's plural
+            # ("through-holes" / "thru-holes").
+            assert requested_hole_count(f"add 3 {tok}s through") == 3, (
+                f"count parser must read the numeral before {tok!r}"
+            )
+        else:
+            # Bare nouns need the separate "through" word to fire.
+            assert is_through_request(f"drill a {tok} through"), (
+                f"bare noun {tok!r} must fire is_through_request"
+            )
+            # "the" + a bare noun is a NEW hole (deliberately, per the
+            # round-1 adversarial rule).
+            assert not thc._request_is_existing_hole(f"drill the {tok} through"), (
+                f"bare noun {tok!r} with 'the' must be a new hole"
+            )
+            # A stated count parses off the bare noun's plural.
+            assert requested_hole_count(f"add 3 {tok}s through") == 3, (
+                f"count parser must read the numeral before {tok!r}"
+            )
 
 
 def test_check_logs_baseline_and_source(tmp_path, caplog):
