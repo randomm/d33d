@@ -114,22 +114,31 @@ def _request_is_existing_hole(request: str) -> bool:
     asking for a new one?
 
     True (the existing-hole branch) ONLY when the hole phrase is preceded
-    by the definite article (``the``) — "make the through-hole 8 mm", "the
-    hole", "move the through-hole". False (the new-hole branch) for an
-    indefinite article ("a hole", "an 8 mm hole"), a stated count ("two
-    holes"), or no article at all ("drill a 6 mm hole through the middle",
-    "resize a hole through the plate").
+    by the definite article (``the``) AND the token is a hyphenated
+    compound (``through-hole`` / ``thru-hole``) — "make the through-hole
+    8 mm", "move the through-hole to the left". The hyphenated compound
+    names a specific, already-existing hole; the user is modifying it.
 
-    The classification is article-conditional, NOT verb-conditional: an
-    existing-hole verb (``move`` / ``resize`` / …) that appears without a
-    definite article before the hole phrase does NOT select the existing-hole
-    branch — "resize a hole through the plate" is a NEW-hole request, and a
-    marker verb in a different clause ("move the plate", "resize the lid")
-    has no hole noun at all and is not a trigger. Runs only on text that
-    already fired :func:`is_through_request`.
+    False (the new-hole branch) for:
+    * an indefinite article ("a hole", "an 8 mm hole"), a stated count
+      ("two holes"), or no article at all ("drill a 6 mm hole through
+      the middle", "resize a hole through the plate");
+    * ``the`` + a BARE hole noun ("drill the hole through", "make the
+      hole go through", "the hole through, please"). A bare noun with
+      ``the`` and a separate word ``through`` in the request describes
+      the act of cutting through — a NEW-hole request (the gate's stated
+      purpose). The definite article marks specificity ("the hole I
+      mentioned"), not existence: the user is asking for a hole to be
+      drilled, not referring to one already present.
+
+    The classification is article-conditional for hyphenated tokens and
+    always new-hole for bare nouns, NOT verb-conditional: a marker verb
+    in a different clause ("move the plate", "resize the lid") has no
+    hole noun at all and is not a trigger. Runs only on text that already
+    fired :func:`is_through_request`.
     """
     lower = request.lower()
-    for noun in _HOLE_VOCABULARY:
+    for noun in _HYPHENATED_TOKENS:
         idx = lower.find(noun)
         while idx != -1:
             j = idx - 1

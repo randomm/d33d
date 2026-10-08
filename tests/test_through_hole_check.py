@@ -386,12 +386,16 @@ def test_hole_vocabularies_are_shared():
         if hasattr(thc, name):
             fire_set |= set(getattr(thc, name))
 
-    # _request_is_existing_hole must iterate the shared set, not a
-    # private copy of the tokens.
+    # _request_is_existing_hole must iterate tokens from the shared
+    # vocabulary (the hyphenated subset), not a private copy.
     src_existing = thc._request_is_existing_hole.__code__.co_names
-    assert ("_HOLE_VOCABULARY" in src_existing or "HOLE_NOUNS" in src_existing), (
+    assert (
+        "_HOLE_VOCABULARY" in src_existing
+        or "_HYPHENATED_TOKENS" in src_existing
+        or "HOLE_NOUNS" in src_existing
+    ), (
         "_request_is_existing_hole must source its tokens from the shared "
-        "tuple, not a private copy"
+        "vocabulary, not a private copy"
     )
 
     # requested_hole_count must source its hole-noun pattern from the
@@ -583,3 +587,43 @@ def test_requested_hole_count_is_clause_local():
     assert requested_hole_count("add two holes through") == 2
     assert requested_hole_count("drill 3 holes through the plate") == 3
     assert requested_hole_count("four through-holes in a row") == 4
+
+
+# ---------------------------------------------------------------------------
+# Issue #418 round-1 (adversarial): "the" + BARE hole noun is a NEW-hole
+# request (cutting through), not an existing-hole reference. Only the
+# hyphenated compound (through-hole / thru-hole) with "the" is existing.
+# ---------------------------------------------------------------------------
+
+
+def test_article_bare_hole_with_definite_article_is_new_hole(tmp_path):
+    """Issue #418 (adversarial finding 1): "the" + a BARE hole noun is a
+    NEW-hole request — the user is asking for a hole to be drilled through
+    (the gate's stated purpose). The definite article marks specificity, not
+    existence. A pocket render (genus 0) over a parent baseline 1 must
+    FAIL, not silently pass."""
+    stl = _write_stl(tmp_path / "pocket.stl", _pocket_stl())
+    # "drill the hole through" — bare noun, definite article, separate
+    # "through" word → new-hole branch → pocket over baseline 1 fails.
+    assert through_hole_check("drill the hole through", stl, 1) == (1, 0)
+    # "make the hole go through" — same pattern → new-hole branch.
+    assert through_hole_check("make the hole go through", stl, 1) == (1, 0)
+    # "the hole through" (no comma) — same pattern → new-hole branch.
+    assert through_hole_check("the hole through", stl, 1) == (1, 0)
+    # A through render (genus 1) over baseline 1 still fails (no rise).
+    stl1 = _write_stl(tmp_path / "through.stl", _through_stl())
+    assert through_hole_check("drill the hole through", stl1, 1) == (1, 1)
+    # But over baseline 0 (fresh design) it passes (1 >= 0 + 1).
+    assert through_hole_check("drill the hole through", stl1, 0) is None
+
+
+def test_article_hyphenated_hole_with_definite_article_still_existing(tmp_path):
+    """Issue #418 (regression): the v108 cases — "the" + hyphenated
+    compound (through-hole / thru-hole) is an EXISTING-hole request.
+    Unchanged genus passes; a fall below baseline fails."""
+    stl = _write_stl(tmp_path / "through.stl", _through_stl())
+    assert through_hole_check("make the through-hole 8 mm", stl, 1) is None
+    assert through_hole_check("move the thru-hole to the left", stl, 1) is None
+    # A fall below baseline (hole closed) still fails.
+    pocket_stl = _write_stl(tmp_path / "pocket.stl", _pocket_stl())
+    assert through_hole_check("make the through-hole 8 mm", pocket_stl, 1) == (1, 0)
