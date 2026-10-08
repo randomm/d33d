@@ -109,6 +109,8 @@ __all__ = [
     "scad_looks_valid",
     "scad_title",
     "score",
+    "unchanged_mesh_check",
+    "UNCHANGED_INSTRUCTION",
 ]
 
 #: The auto-iteration cap (spec: "capped at 3 auto-iterations"). The cap
@@ -1119,6 +1121,28 @@ def _dim_params(
     return out
 
 
+def _unchanged_mesh_post_check(
+    parent_stl: str | None,
+    render: RenderResult,
+) -> tuple[str, str] | None:
+    """Issue #419: the unchanged-mesh post-check (deferred-import wrapper,
+    the #317 pattern).
+
+    Delegates to :func:`d33d.unchanged_mesh_check.unchanged_mesh_check`
+    (the v2+ parent baseline ``None`` → the check abstains; a parent
+    whose ``model.stl`` is missing or unreadable → the check abstains —
+    a fabricated baseline would make the gate lie). Returns
+    ``(evidence, instruction)`` on a fired repair, ``None`` when the
+    check abstains or the mesh genuinely changed.
+    """
+    from d33d.unchanged_mesh_check import unchanged_mesh_check
+
+    return unchanged_mesh_check(
+        parent_stl=parent_stl,
+        candidate_stl=getattr(render, "stl", None),
+    )
+
+
 def _stack_height_post_check(
     scad_source: str,
     measured_z: float | None,
@@ -1725,6 +1749,7 @@ async def run_design_loop_async(
     part_bbox_mm: tuple[float, float, float] | None = None,
     through_baseline_genus: int | None = None,
     through_baseline_genus_source: str | None = None,
+    parent_mesh_stl: str | None = None,
     on_progress_iteration: Any = "_current",
     renderer_check: Callable[[], bool] | None = None,
     image_check: Callable[[], dict[str, str] | None] | None = None,
@@ -2172,6 +2197,45 @@ async def run_design_loop_async(
                     next_repair = _stack_repair
                     _stack_repair_fired = True
 
+        # Issue #419: an ok render whose gates are green can still be a
+        # candidate whose rendered mesh EQUALS the parent's — the QA v100
+        # repro (an import's missing semicolon made the difference() a
+        # child of import(), so the "38 mm hole" edit re-exported the
+        # parent identical, delta 0, and the loop passed "Your design is
+        # ready"). The check runs BEFORE the pass return (off the event
+        # loop — the STL load is real disk I/O), only on edit turns with
+        # a stored parent mesh (``parent_mesh_stl`` — the seam measures
+        # the parent's stored ``model.stl``; ``None`` abstains: a v1 has
+        # no parent, a 3MF import stores no STL, a missing file is never
+        # a fabricated baseline). Rides the EXISTING
+        # ``geometrically_wrong`` class — no new class, no new
+        # error_class — routed through the same ``route_repair`` path.
+        # Gate order: screw → through → stack → unchanged (each checks
+        # the prior three); a fired earlier repair suppresses the check
+        # (two post-repairs never fire on one iteration).
+        _unchanged_repair_fired = False
+        if (
+            render.error_class == "ok"
+            and next_repair is None
+            and not _screw_repair_fired
+            and not _through_repair_fired
+            and not _stack_repair_fired
+            and parent_mesh_stl is not None
+        ):
+            _unchanged_det = await asyncio.to_thread(
+                _unchanged_mesh_post_check, parent_mesh_stl, render
+            )
+            if _unchanged_det is not None:
+                _evidence, _instruction = _unchanged_det
+                failure_class = "geometrically_wrong"
+                next_repair = {
+                    "failure_class": "geometrically_wrong",
+                    "instruction": _instruction,
+                    "scad_source": scad_source,
+                    "evidence": _evidence,
+                }
+                _unchanged_repair_fired = True
+
         record = IterationRecord(
             iteration=iteration,
             scad_source=scad_source,
@@ -2188,7 +2252,7 @@ async def run_design_loop_async(
         )
         iterations.append(record)
 
-        if candidate_score.perfect and not _screw_repair_fired and not _through_repair_fired and not _stack_repair_fired:
+        if candidate_score.perfect and not _screw_repair_fired and not _through_repair_fired and not _stack_repair_fired and not _unchanged_repair_fired:
             return DesignResult(
                 status="pass",
                 best=record,
@@ -2463,6 +2527,7 @@ def run_design_loop(
     part_bbox_mm: tuple[float, float, float] | None = None,
     through_baseline_genus: int | None = None,
     through_baseline_genus_source: str | None = None,
+    parent_mesh_stl: str | None = None,
     renderer_check: Callable[[], bool] | None = None,
     image_check: Callable[[], dict[str, str] | None] | None = None,
 ) -> DesignResult:
@@ -2494,6 +2559,7 @@ def run_design_loop(
             part_bbox_mm=part_bbox_mm,
             through_baseline_genus=through_baseline_genus,
             through_baseline_genus_source=through_baseline_genus_source,
+            parent_mesh_stl=parent_mesh_stl,
             renderer_check=renderer_check,
             image_check=image_check,
         )
@@ -2599,6 +2665,27 @@ def _exhausted(
         and (reason is None or reason == GATE_REASON_BITS[0])
     ):
         reason = best.render.error_class
+    # Issue #419: a v2+ edit whose rendered mesh is unchanged from the
+    # parent's (the QA v100 repro — the "38 mm hole" edit that re-exported
+    # the parent identical, delta 0) exhausts with every gate bit green
+    # (the mesh IS the parent — a valid, well-sized render), so the
+    # weakest-gate-bit reason would be ``None`` and the terminal frame
+    # would carry no ``reason`` at all. When the BEST iteration's repair
+    # was the unchanged-mesh check's (``geometrically_wrong`` with the
+    # "unchanged from the parent" evidence), swap in the structured
+    # ``mesh_unchanged`` reason — the SPA maps it to the deck's
+    # "The change didn't take — nothing in the part moved." copy.
+    # A gate-driven or non-unchanged repair (a different failure_class,
+    # or an unchanged-mesh repair that is NOT the best iteration's) does
+    # NOT trigger the swap: the existing reason stands.
+    if reason is None:
+        _repair = getattr(best, "repair", None)
+        if (
+            isinstance(_repair, dict)
+            and _repair.get("failure_class") == "geometrically_wrong"
+            and "unchanged from the parent" in str(_repair.get("evidence", ""))
+        ):
+            reason = "mesh_unchanged"
     return DesignResult(
         status="exhausted",
         best=best,

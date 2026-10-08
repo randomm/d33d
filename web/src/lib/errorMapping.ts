@@ -86,6 +86,14 @@ export const FAILURE_REASONS: readonly string[] = [
   // the rebuild command) feeds the "What the checker actually said"
   // disclosure, and no retry is offered (rebuilding is the operator's).
   "renderer_image_stale",
+  // `mesh_unchanged` (d33d/unchanged_mesh_check.py, issue #419): a v2+
+  // edit whose rendered mesh equals the parent's (volume + face count
+  // within epsilon) — the loop routes a `geometrically_wrong` repair
+  // (not a pass); the frame's `reason` field carries `mesh_unchanged`
+  // when the loop exhausts without the change taking, and the SPA
+  // renders the deck's `mesh_unchanged` sentence ("The change didn't
+  // take — nothing in the part moved.").
+  "mesh_unchanged",
 ];
 
 /** The generic fallback for a reason code outside the closed set. */

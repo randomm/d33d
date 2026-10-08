@@ -306,6 +306,32 @@ describe("design contract", () => {
     expect(display.message).toBe(headline);
   });
 
+  /* ---------------------------------------- W419 */
+
+  it("the unchanged-mesh failure copy lives in the deck (issue #419)", () => {
+    // Issue #419: the terminal `mesh_unchanged` frame (a v2+ edit whose
+    // rendered mesh equals the parent's — the QA v100 repro) maps to the
+    // deck's reason sentence. The sentence is "The change didn't take —
+    // nothing in the part moved." — it never inlines a volume or face
+    // count (the numbers are the server's own gate evidence, rendered
+    // in the "What the checker actually said" disclosure, never here).
+    const headline = copy.failure.reasons.mesh_unchanged;
+    expect(headline).toBe("The change didn't take — nothing in the part moved.");
+    // No digit: a number in the reason sentence the SPA has not
+    // established is the house anti-pattern.
+    expect(headline).not.toMatch(/\d/);
+    // The closed set includes the reason.
+    expect(FAILURE_REASONS).toContain("mesh_unchanged");
+    const display = displayDesignLoopError({
+      message: "Design loop exhausted: mesh_unchanged",
+      reason: "mesh_unchanged",
+    });
+    // The headline is the deck's reason sentence.
+    expect(display.message).toBe(headline);
+    // The raw reason is present for the collapsed detail.
+    expect(display.detail).toBe("mesh_unchanged");
+  });
+
   /* ---------------------------------------- W260 */
 
   it("the question pre-route's no-run replies live in the deck (issue #260)", () => {

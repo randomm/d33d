@@ -47,7 +47,10 @@ import re
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from d33d.render_diagnostics import unknown_variables as _unknown_variables
+from d33d.render_diagnostics import (
+    unknown_parameters as _unknown_parameters,
+    unknown_variables as _unknown_variables,
+)
 
 # ---------------------------------------------------------------------------
 # Failure class enum
@@ -393,6 +396,16 @@ def _classify_syntax_error(stderr: str) -> OpenSCADFailureClass:
     #     repair instruction can name the variable(s) directly (the
     #     generic fallback cannot).
     if _unknown_variables(stderr):
+        return "unknown_variable"
+    # 10b. Unknown named argument (issue #419, the #383 sibling): the
+    #      same exit-0 warning path, but for a named argument a builtin
+    #      does not accept (``cylinder(position=...);`` — OpenSCAD warns
+    #      ``Unknown parameter "position" for object "cylinder"`` and
+    #      silently drops it). Same class as rule 10: it is the same
+    #      defect family (an ignored name, geometry built without it),
+    #      and the repair instruction names the offending name either
+    #      way (no new class — issue #419's binding constraint).
+    if _unknown_parameters(stderr):
         return "unknown_variable"
     # 11. Fallback
     return "unclassified_syntax_error"

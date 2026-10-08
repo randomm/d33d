@@ -4172,3 +4172,188 @@ def test_loop_unknown_variable_render_is_repair_naming_variable():
     assert result.iterations[0].repair is not None
     assert result.iterations[0].repair["failure_class"] == "unknown_variable"
     assert "H" in result.iterations[0].repair["evidence"]
+
+# ---------------------------------------------------------------------------
+# Issue #419: unchanged-mesh post-check — a v2+ edit whose rendered mesh
+# equals the parent's (volume + face count within epsilon) does NOT pass;
+# it routes a `geometrically_wrong` repair (no new error_class) with
+# evidence naming the unchanged volume/face count. A genuine edit that
+# changes the mesh passes. The v100 repro (import with missing semicolon
+# + `position=`) is the regression fixture.
+# ---------------------------------------------------------------------------
+
+
+def _render_with_stl_and_bbox(stl_path: str, bbox: BboxInfo) -> RenderResult:
+    """An ok render whose ``stl`` points at a REAL file on disk (the
+    unchanged-mesh check's trimesh.load seam) with a fixed bbox (all
+    five gate bits green — the check is the only gate under test)."""
+    return RenderResult(
+        ok=True,
+        exit_code=0,
+        duration_ms=10,
+        error_class="ok",
+        stderr="",
+        stl=stl_path,
+        csg="model.csg",
+        views=VIEWS_OK,
+        render_log="",
+    )
+
+
+def _run_unchanged_loop(
+    stl_path: str | None,
+    *,
+    parent_mesh_stl: str | None = None,
+    stated: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    bbox: BboxInfo | None = None,
+    max_iterations: int = MAX_ITERATIONS,
+) -> DesignResult:
+    """Run the loop over an ok render carrying the given real STL path,
+    with the given parent mesh (``None`` → the check abstains)."""
+    render = _render_with_stl_and_bbox(stl_path, bbox or BboxInfo(20, 20, 20, 8000.0))
+    llm = _through_box_llm(_through_box_scad_source())
+
+    def render_fn(scad, defines):
+        return render
+
+    return run_design_loop(
+        photo=PHOTO,
+        stated_dims=stated,
+        render_fn=render_fn,
+        llm_fn=(lambda role, messages, system: llm),
+        bbox_fn=(lambda r: bbox or BboxInfo(20, 20, 20, 8000.0)),
+        parent_mesh_stl=parent_mesh_stl,
+        max_iterations=max_iterations,
+    )
+
+
+def test_unchanged_mesh_v100_repro_fires_geometrically_wrong(tmp_path):
+    """Issue #419 (the v100 repro): a v2+ edit whose rendered mesh EQUALS
+    the parent's (the parent's own model.stl as the candidate's rendered
+    mesh — delta 0, the most unchanged case) does NOT pass — iteration 1
+    is ``geometrically_wrong`` (NOT a pass), with evidence naming the
+    unchanged volume and face count. The scripted model repeats the
+    unchanged candidate to the cap (the loop exhausts — the change never
+    takes)."""
+    fixture_dir = Path(__file__).parent / "fixtures" / "stl"
+    parent = str(fixture_dir / "v100-plate.stl")
+    # The candidate's rendered mesh IS the parent's (the v100 repro:
+    # the missing semicolon made the difference() a child of import(),
+    # which re-exports the parent identical).
+    result = _run_unchanged_loop(parent, parent_mesh_stl=parent)
+    # The all-green candidate does NOT pass: the post-check routes the
+    # repair and the loop exhausts (the scripted model repeats the
+    # unchanged mesh to the cap).
+    assert result.status == "exhausted"
+    assert result.iterations_used == MAX_ITERATIONS == 3
+    first = result.iterations[0]
+    # All five gate bits green (the mesh IS the parent — a valid render)
+    # yet the structured repair fired.
+    assert first.score.perfect is True
+    assert first.failure_class == "geometrically_wrong"
+    assert first.repair is not None
+    assert first.repair["failure_class"] == "geometrically_wrong"
+    # The evidence names the unchanged volume and face count.
+    assert "unchanged from the parent" in first.repair["evidence"]
+    assert "faces" in first.repair["evidence"]
+    # The terminal reason is the structured mesh_unchanged (the SPA maps
+    # it to "The change didn't take — nothing in the part moved.").
+    assert result.failure_reason == "mesh_unchanged"
+
+
+def test_unchanged_mesh_genuine_edit_passes(tmp_path):
+    """Issue #419: a v2+ edit whose rendered mesh DIFFERS from the parent's
+    (a genuine change — volume and face count both beyond epsilon) PASSES
+    on iteration 1 (no repair routed). The recut fixture (792 faces,
+    7578 mm3) differs from the plate (800 faces, 56663 mm3) by well over
+    1% on both metrics — the check must not false-fire on a real change."""
+    fixture_dir = Path(__file__).parent / "fixtures" / "stl"
+    parent = str(fixture_dir / "v100-plate.stl")
+    recut = str(fixture_dir / "v100-plate-recut.stl")
+    result = _run_unchanged_loop(recut, parent_mesh_stl=parent)
+    assert result.status == "pass"
+    assert result.iterations_used == 1
+    assert result.iterations[0].repair is None
+    assert result.iterations[0].failure_class is None
+
+
+def test_unchanged_mesh_no_parent_abstains(tmp_path):
+    """Issue #419: a v1 design (no parent — ``parent_mesh_stl`` is
+    ``None``) → the check abstains and the loop PASSES (a fabricated
+    baseline would make the gate lie)."""
+    fixture_dir = Path(__file__).parent / "fixtures" / "stl"
+    candidate = str(fixture_dir / "v100-plate.stl")
+    result = _run_unchanged_loop(candidate, parent_mesh_stl=None)
+    assert result.status == "pass"
+    assert result.iterations_used == 1
+    assert result.iterations[0].repair is None
+
+
+def test_unchanged_mesh_missing_parent_file_abstains(tmp_path):
+    """Issue #419: a v2+ edit whose parent's ``model.stl`` is missing
+    (the file was deleted out-of-band, or the version was never rendered)
+    → the check abstains and the loop PASSES (a missing file is never a
+    fabricated baseline — the #386 abstain pattern)."""
+    fixture_dir = Path(__file__).parent / "fixtures" / "stl"
+    candidate = str(fixture_dir / "v100-plate.stl")
+    missing_parent = str(tmp_path / "does-not-exist.stl")
+    result = _run_unchanged_loop(candidate, parent_mesh_stl=missing_parent)
+    assert result.status == "pass"
+    assert result.iterations_used == 1
+    assert result.iterations[0].repair is None
+
+
+def test_unchanged_mesh_missing_candidate_stl_abstains(tmp_path):
+    """Issue #419: a v2+ edit whose candidate's ``render.stl`` is
+    non-existent (the render has no STL, or it was deleted) → the check
+    abstains and the loop PASSES (an unloadable candidate is never a
+    fabricated candidate — the check needs both sides)."""
+    fixture_dir = Path(__file__).parent / "fixtures" / "stl"
+    parent = str(fixture_dir / "v100-plate.stl")
+    missing_candidate = str(tmp_path / "candidate-does-not-exist.stl")
+    render = _render_with_stl_and_bbox(
+        missing_candidate, BboxInfo(20, 20, 20, 8000.0)
+    )
+    llm = _through_box_llm(_through_box_scad_source())
+    result = run_design_loop(
+        photo=PHOTO,
+        stated_dims=(0.0, 0.0, 0.0),
+        render_fn=(lambda scad, defines: render),
+        llm_fn=(lambda role, messages, system: llm),
+        bbox_fn=(lambda r: BboxInfo(20, 20, 20, 8000.0)),
+        parent_mesh_stl=parent,
+    )
+    assert result.status == "pass"
+    assert result.iterations[0].repair is None
+
+
+def test_unchanged_mesh_repair_then_changed_mesh_passes_within_cap(tmp_path):
+    """Issue #419: the model fixes the change on the repair iteration —
+    iteration 1 is the unchanged mesh (the v100 repro), iteration 2 is a
+    genuine edit (the recut) that PASSES, all within the 3-iteration cap."""
+    fixture_dir = Path(__file__).parent / "fixtures" / "stl"
+    parent = str(fixture_dir / "v100-plate.stl")
+    recut = str(fixture_dir / "v100-plate-recut.stl")
+    calls = {"n": 0}
+
+    def render_fn(scad, defines):
+        calls["n"] += 1
+        stl = parent if calls["n"] == 1 else recut
+        return _render_with_stl_and_bbox(stl, BboxInfo(20, 20, 20, 8000.0))
+
+    llm = _through_box_llm(_through_box_scad_source())
+    result = run_design_loop(
+        photo=PHOTO,
+        stated_dims=(0.0, 0.0, 0.0),
+        render_fn=render_fn,
+        llm_fn=(lambda role, messages, system: llm),
+        bbox_fn=(lambda r: BboxInfo(20, 20, 20, 8000.0)),
+        parent_mesh_stl=parent,
+    )
+    assert result.status == "pass"
+    assert result.iterations_used == 2
+    assert result.iterations[0].failure_class == "geometrically_wrong"
+    assert result.iterations[0].repair is not None
+    assert "unchanged from the parent" in result.iterations[0].repair["evidence"]
+    assert result.iterations[1].failure_class is None
+    assert result.iterations[1].repair is None

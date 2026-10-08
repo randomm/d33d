@@ -71,7 +71,7 @@ from d33d.part_mesh import (
 from d33d.part_mesh import (
     validate_part_path as _validate_part_path_impl,
 )
-from d33d.render_diagnostics import unknown_variables
+from d33d.render_diagnostics import unknown_parameters, unknown_variables
 
 logger = logging.getLogger(__name__)
 
@@ -1342,6 +1342,14 @@ def classify(
     # geometry silently lost whatever the undefined variable sized. Last
     # in the table: every more-specific class above already won.
     if unknown_variables(stderr) or unknown_variables(render_log):
+        return "syntax_error"
+    # Issue #419 (the #383 sibling): an exit-0 render whose stderr or
+    # render.log tail carries an OpenSCAD unknown-named-argument warning
+    # (``cylinder(position=...);`` — OpenSCAD WARNS and silently drops the
+    # argument) is NOT ok either — the geometry built without the
+    # argument (the QA v100 repro: a difference() that removed nothing
+    # because ``position=`` was ignored). Same demotion, same buffer pair.
+    if unknown_parameters(stderr) or unknown_parameters(render_log):
         return "syntax_error"
     return "ok"
 

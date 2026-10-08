@@ -1975,6 +1975,20 @@ async def run_design_loop_with_events(
                     f"parent version v{_latest_ver['id']} rendered mesh "
                     f"unavailable — abstain"
                 )
+            # Issue #419 — the unchanged-mesh check's parent baseline:
+            # the SAME stored parent render's ``model.stl`` (the file
+            # the genus measurement above just read from — one file, two
+            # baselines, one disk read each). The path is passed to the
+            # loop, which loads the candidate's ``render.stl`` and the
+            # parent ``model.stl`` and compares volume + face count
+            # (the check itself abstains when either file is missing —
+            # ``model.stl`` absent from the artifact dir → the loop's
+            # check abstains, mirroring the genus path above). The
+            # parent stats come from the stored parent version/render
+            # already on disk; NO extra render is added (the file is
+            # the parent version's own render, measured once at loop
+            # start).
+            kwargs["parent_mesh_stl"] = str(Path(_render_dir) / "model.stl")
         elif row.get("part_filename"):
             # V1 on import: the stored part mesh's genus (the mesh the
             # render imports). A 3MF import stores no STL (the render
@@ -2002,6 +2016,15 @@ async def run_design_loop_with_events(
                 kwargs["through_baseline_genus_source"] = (
                     "stored part mesh unavailable — abstain"
                 )
+            # Issue #419: the first edit on an import (v1 has the stored
+            # repaired ``part.stl``, not a ``model.stl``) compares the
+            # unchanged-mesh check against that stored repaired part mesh
+            # — the exact mesh the render imports. A 3MF import stores no
+            # STL, and a missing/unreadable file abstains (the check
+            # itself never fires on a fabricated baseline — the path is
+            # only set for a file that exists on disk).
+            if _stored_path is not None:
+                kwargs["parent_mesh_stl"] = str(_stored_path)
         else:
             # Issue #418: a part-less project. No version yet → the
             # NEW-design default: the kwarg is omitted (the loop
