@@ -505,6 +505,13 @@ export const failure = {
     timeout: "The render ran out of time. A simpler shape will get through.",
     design_loop_timed_out:
       "The design loop stopped responding — it ran past its time limit.",
+    /** The slow-model timeout copy (issue #417): the per-attempt latency
+     *  and attempt count are filled in from the server's measured values.
+     *  ``attempt_seconds`` is the measured per-attempt wall-clock time
+     *  (rounded to a whole second); ``attempt_count`` is the number of
+     *  attempts made before the deadline fired. */
+    design_loop_slow_model: (attemptSeconds: number, attemptCount: number): string =>
+      `The model is slow right now (about ${attemptSeconds}s an attempt), so I stopped after ${attemptCount} tries.`,
     oom: "The model was too heavy to render. A simpler shape will get through.",
     container_error:
       "The render environment failed. That is temporary — try again.",

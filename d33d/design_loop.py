@@ -1656,6 +1656,7 @@ async def run_design_loop_async(
     on_progress_iteration: Any = "_current",
     renderer_check: Callable[[], bool] | None = None,
     image_check: Callable[[], dict[str, str] | None] | None = None,
+    attempt_timeout: float | None = None,
 ) -> DesignResult:
     """Run the bounded iterate-and-score design loop (async core).
 
@@ -1775,27 +1776,95 @@ async def run_design_loop_async(
     consecutive_no_improvement = 0
     iterations: list[IterationRecord] = []
 
+    # The per-attempt wall-clock deadline (issue #417): each iteration
+    # gets its OWN budget — the design LLM call + render + scoring — so
+    # three slow attempts are not cut off by one flat total. The budget
+    # is the adapter's ``DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS`` (120 s)
+    # read through the module (tests monkeypatch it); a negative or zero
+    # ``attempt_timeout`` disables the deadline (the loop then runs to
+    # its 3-attempt cap, as before the fix — used by tests that need the
+    # pre-#417 flat-total behaviour). The deadline does NOT kill the
+    # worker thread (it cannot); a slow call that outlives the window is
+    # simply never awaited to completion — the loop returns the
+    # best-so-far exhausted result instead, and the abandoned call runs
+    # on to completion in the background off the event loop (the same
+    # "the loop returns, the call finishes in the background" contract
+    # the render worker's subprocess timeout has one level down).
+    _attempt_budget: float | None = (
+        attempt_timeout if attempt_timeout is not None else None
+    )
+
     for iteration in range(1, max_iterations + 1):
         _stamp_on_progress_iteration(on_progress, iteration)
-        scad = await _call(
-            llm_fn,
-            "design",
-            _design_messages(
-                photo=photo,
-                chat_history=chat_history,
-                stated=stated_dims,
-                repair=repair,
-                request=request,
-                state_params=state_params,
-                state_bbox=state_bbox,
-                state_stated=state_stated,
-                state_meta=state_meta,
-                state_confirmed=state_confirmed,
-                design_source=design_source,
-                part_scale=part_scale,
-            ),
-            _design_system(stated_dims, part_scale),
-        )
+        if _attempt_budget is None:
+            scad = await _call(
+                llm_fn,
+                "design",
+                _design_messages(
+                    photo=photo,
+                    chat_history=chat_history,
+                    stated=stated_dims,
+                    repair=repair,
+                    request=request,
+                    state_params=state_params,
+                    state_bbox=state_bbox,
+                    state_stated=state_stated,
+                    state_meta=state_meta,
+                    state_confirmed=state_confirmed,
+                    design_source=design_source,
+                    part_scale=part_scale,
+                ),
+                _design_system(stated_dims, part_scale),
+            )
+        else:
+            _attempt_started_at = time.monotonic()
+            try:
+                scad = await asyncio.wait_for(
+                    _call(
+                        llm_fn,
+                        "design",
+                        _design_messages(
+                            photo=photo,
+                            chat_history=chat_history,
+                            stated=stated_dims,
+                            repair=repair,
+                            request=request,
+                            state_params=state_params,
+                            state_bbox=state_bbox,
+                            state_stated=state_stated,
+                            state_meta=state_meta,
+                            state_confirmed=state_confirmed,
+                            design_source=design_source,
+                            part_scale=part_scale,
+                        ),
+                        _design_system(stated_dims, part_scale),
+                    ),
+                    timeout=max(0.0, _attempt_budget - (time.monotonic() - _attempt_started_at)),
+                )
+            except asyncio.TimeoutError:
+                # The per-attempt deadline fired on the design call
+                # (issue #417): the slow call is abandoned (it runs on
+                # to completion in the background, off the event loop —
+                # the loop cannot kill a worker thread), and the run
+                # ends WITH the best candidate rendered so far ("keep
+                # the best candidate, say the model is slow"), never a
+                # fabricated empty result. An empty-iteration deadline
+                # (no candidate yet) is the honest zero-render case the
+                # adapter's "no version" path handles.
+                logger.warning(
+                    "design loop attempt %s exceeded the %ss per-attempt "
+                    "deadline — returning the best-so-far candidate "
+                    "(%d iteration(s) completed)",
+                    iteration,
+                    _attempt_budget,
+                    len(iterations),
+                )
+                return _exhausted(
+                    iterations,
+                    best,
+                    best_score,
+                    failure_reason="design_loop_timed_out",
+                )
         design_hash = scad.prompt_hash
         if log is not None:
             log("design", design_hash, scad.status)
@@ -2487,10 +2556,18 @@ def _exhausted(
     iterations: list[IterationRecord],
     best: IterationRecord,
     best_score: Score | None,
+    failure_reason: str | None = None,
 ) -> DesignResult:
     """Build the exhaustion result: best-scoring candidate + a STRUCTURED
     failure reason (weakest gate bit of the best, never free text, never
     silently the last attempt).
+
+    ``failure_reason`` (issue #417) overrides the derived reason when the
+    exhaustion is deadline-driven (the per-attempt deadline fired mid-run
+    — the run's structured reason is the loop-level
+    ``design_loop_timed_out``, never a gate bit of the best candidate
+    which may have been a healthy render that simply didn't score a
+    pass): ``None`` (the default) keeps today's derivation.
 
     Issue #277: when the FIRST failing gate bit is bit 0
     (``error_class_not_ok``) and the best render carries a NON-"ok"
@@ -2502,24 +2579,25 @@ def _exhausted(
     is None``) and a best render with error_class "ok" keep today's
     behaviour.
     """
-    reason: str | None = None
-    if best_score is not None:
-        for bit, name in zip(best_score.bits, GATE_REASON_BITS):
-            if not bit:
-                reason = name
-                break
-    # Issue #277: when the FIRST failing gate bit is bit 0 (the generic
-    # ``error_class_not_ok``) and the best render carries a NON-"ok"
-    # error_class, swap in that specific class — never the generic name.
-    # A render-less record (``best.render is None``) keeps today's
-    # behaviour; a best render with error_class "ok" that fails a LATER
-    # gate keeps that gate's name.
-    if (
-        best.render is not None
-        and best.render.error_class != "ok"
-        and (reason is None or reason == GATE_REASON_BITS[0])
-    ):
-        reason = best.render.error_class
+    reason: str | None = failure_reason
+    if reason is None:
+        if best_score is not None:
+            for bit, name in zip(best_score.bits, GATE_REASON_BITS):
+                if not bit:
+                    reason = name
+                    break
+        # Issue #277: when the FIRST failing gate bit is bit 0 (the generic
+        # ``error_class_not_ok``) and the best render carries a NON-"ok"
+        # error_class, swap in that specific class — never the generic name.
+        # A render-less record (``best.render is None``) keeps today's
+        # behaviour; a best render with error_class "ok" that fails a LATER
+        # gate keeps that gate's name.
+        if (
+            best.render is not None
+            and best.render.error_class != "ok"
+            and (reason is None or reason == GATE_REASON_BITS[0])
+        ):
+            reason = best.render.error_class
     return DesignResult(
         status="exhausted",
         best=best,

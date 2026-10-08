@@ -281,6 +281,18 @@ export function displayDesignLoopError(
      *  (the disclosure falls back to the plain reason, never a half-
      *  established detail). */
     renderer_detail?: unknown;
+    /** The server's measured per-attempt wall-clock seconds (issue #417,
+     *  `design_loop_timed_out` frame field, omit-not-null): the average
+     *  measured latency across the attempts that completed before the
+     *  deadline fired. Used to fill in the slow-model copy's "about Ns
+     *  an attempt" clause. Malformed/absent → the generic reason
+     *  sentence stands (no number the SPA has not established). */
+    attempt_latency_seconds?: unknown;
+    /** The server's measured attempt count (issue #417, `design_loop_
+     *  timed_out` frame field, omit-not-null): the number of design-loop
+     *  iterations that started before the deadline fired. Used to fill
+     *  in the slow-model copy's "after N tries" clause. */
+    attempt_count?: unknown;
   },
   envelopeLimits?: [number, number, number],
 ): DisplayError {
@@ -299,7 +311,24 @@ export function displayDesignLoopError(
   const rendererDetail = parseRendererDetail(data.renderer_detail);
   if (reason !== undefined) {
     const mapped = (copy.failure.reasons as Record<string, string>)[reason];
+    // The slow-model timeout copy (issue #417): the server's measured
+    // per-attempt latency and attempt count are on the frame (omit-not-
+    // null). When both are present, the headline is the templated
+    // "model is slow right now" copy with the measured values filled in
+    // — the words "stopped responding" no longer appear for this case.
+    // When the frame carries no measured values (a stall that never
+    // rendered), the headline falls back to the generic
+    // `design_loop_timed_out` reason sentence (which still says "ran
+    // past its time limit" — the cause is stated, just without a number
+    // the SPA has not established).
     let message = mapped ?? UNKNOWN_REASON_COPY;
+    if (reason === "design_loop_timed_out") {
+      const lat = data.attempt_latency_seconds;
+      const cnt = data.attempt_count;
+      if (typeof lat === "number" && typeof cnt === "number" && cnt > 0) {
+        message = copy.failure.design_loop_slow_model(lat, cnt);
+      }
+    }
     // The carried-axis variant: the frame's `carried_axes` is the set the
     // gate enforced (the user's earlier statements, held by the carry-
     // forward merge). A bbox failure with at least one enforced axis says

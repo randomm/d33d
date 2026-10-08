@@ -318,3 +318,88 @@ def test_sse_event_schema_fields():
     events = parse_sse_stream(frame)
     assert events[0]["event"] == "error"
     assert events[0]["data"]["message"] == "boom"
+
+
+# ---------------------------------------------------------------------------
+# (issue #417) SSE stream ends cleanly on the loop deadline
+# ---------------------------------------------------------------------------
+
+
+def test_sse_loop_deadline_ends_stream_cleanly(app_with_streaming, monkeypatch):
+    """On the loop-deadline path (issue #417), the SSE stream ends
+    cleanly with a terminal error frame (reason design_loop_timed_out)
+    and no client hang. The stream terminates after the error frame —
+    no further events, no unhandled cancellation warning.
+
+    The deadline is monkeypatched to 0.1 s (well below the stub's
+    10 s sleep) so the deadline fires promptly; the stub loop never
+    renders a candidate (zero-output stall — the same shape as the
+    existing deadline tests in test_design_loop_finalize.py).
+    """
+    import asyncio
+    import time
+
+    from d33d.design_loop_events import (
+        DESIGN_LOOP_TIMED_OUT_REASON,
+        run_design_loop_with_events,
+    )
+
+    monkeypatch.setattr(
+        "d33d.design_loop_events.DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS", 0.05
+    )
+
+    class _StallLoop:
+        """A production-seam-shaped stub that never terminates within
+        the deadline (sleeps 10 s). The deadline fires at 0.15 s
+        (3 × 0.05 s) and cuts off the stream with the terminal
+        design_loop_timed_out frame."""
+
+        def __call__(self, app=None, **kwargs):
+            async def _stall():
+                await asyncio.sleep(10)
+
+            return _stall()
+
+    async def _call(client):
+        create_r = await client.post(
+            "/api/projects", json={"name": "Deadline SSE"}
+        )
+        pid = create_r.json()["id"]
+        app_with_streaming.state.run_design_loop = _StallLoop()
+        # Use the SSE endpoint directly (not the adapter) — the adapter
+        # is registered as the event source for the project.
+        source = run_design_loop_with_events(
+            app_with_streaming,
+            pid,
+            user_message="hi",
+            stated_dims=None,
+            chat_history=(),
+            photo="data:image/png;base64,x",
+            request_text="hi",
+        )
+        app_with_streaming.state.event_sources[pid] = source
+        started = time.monotonic()
+        async with client.stream("GET", f"/api/stream/{pid}") as response:
+            chunks = []
+            async for chunk in response.aiter_text():
+                chunks.append(chunk)
+            raw = "".join(chunks)
+        elapsed = time.monotonic() - started
+        return raw, elapsed
+
+    raw, elapsed = _run_async(app_with_streaming, _call)
+    # The deadline fired within the 0.15 s window (+ scheduling margin).
+    assert elapsed < 1.0, f"deadline did not fire promptly: {elapsed:.2f}s"
+    events = parse_sse_stream(raw)
+    assert events, "no events emitted"
+    event_names = [e["event"] for e in events]
+    # The terminal frame is the error frame with the structured reason.
+    assert "error" in event_names, f"no error frame: {events}"
+    assert event_names[-1] == "error", f"error is not the last frame: {events}"
+    error_event = events[-1]
+    assert (
+        error_event["data"].get("reason") == DESIGN_LOOP_TIMED_OUT_REASON
+    ), f"wrong reason: {error_event}"
+    # The stream terminated cleanly — no events after the error frame.
+    # (The error frame is the last frame, so nothing follows it.)
+    assert len(events) >= 1

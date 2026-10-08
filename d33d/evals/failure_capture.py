@@ -232,6 +232,18 @@ class FailureEvent(BaseModel):
     failure_class: str = Field(min_length=1)
     exit_code: int | None = None
     stderr_tail: str = ""
+    #: The number of design-loop attempts the run made before the
+    #: deadline fired (issue #417). Optional — pre-#417 rows (and
+    #: non-deadline rows) carry no attempt count (the model must
+    #: validate existing rows without these fields).
+    attempt_count: int | None = Field(default=None, ge=1)
+    #: Measured wall-clock seconds per completed attempt (issue #417),
+    #: one entry per timed attempt in attempt order. Optional — ``None``
+    #: (absent) when no attempt was timed (a stall that never rendered);
+    #: an empty list is never written (omit-not-null: honest absence).
+    per_attempt_latencies: list[float] | None = Field(
+        default=None, min_length=1
+    )
     ts: str = Field(min_length=1)
     event_id: str = Field(min_length=1)
 
@@ -524,6 +536,8 @@ def record_production_failure(
     output_scad: str,
     path: str | Path | None = None,
     now: datetime | None = None,
+    attempt_count: int | None = None,
+    per_attempt_latencies: list[float] | None = None,
 ) -> FailureEvent | None:
     """The production hook: archive an exhausted design loop to
     ``failures.jsonl``.
@@ -532,6 +546,13 @@ def record_production_failure(
     loop produces no failure line (there is nothing to archive). The
     eval harness's assert path never calls this function (structural
     exclusion), so eval-run failures never reach the file.
+
+    ``attempt_count`` / ``per_attempt_latencies`` (issue #417) ride the
+    deadline-kill row: the adapter's measured attempt count and the
+    per-attempt wall-clock seconds (one per timed attempt, in order).
+    Both are optional (``None`` = absent — pre-#417 rows validate
+    unchanged); an empty latencies list is normalised to ``None``
+    (omit-not-null — honest absence over an empty array).
 
     Returns the :class:`FailureEvent` written, or ``None`` for a
     passing result. An untagged/exhausted result (no ``failure_reason``)
@@ -554,6 +575,10 @@ def record_production_failure(
         prompt_version=prompt_version,
         output_scad=output_scad,
     )
+    if attempt_count is not None:
+        event.attempt_count = attempt_count
+    if per_attempt_latencies:
+        event.per_attempt_latencies = list(per_attempt_latencies)
     append_failure_line(event, path)
     return event
 
