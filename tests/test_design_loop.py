@@ -3475,6 +3475,13 @@ def test_stack_height_imported_part_abstains():
         "  cube([20, 20, 1]);\n"
         "}\n"
     )
+    # The SCAD must yield a qualifying declared stack sum (the stack check's
+    # candidate), so the abstention under test is the part_scale guard — not
+    # an unreadable declared stack. Without this, the test would pass for
+    # the wrong reason if the guard were removed.
+    from d33d.stack_height_check import declared_stack_sum
+
+    assert declared_stack_sum(scad) is not None
     llm = [_stack_scad_llm(scad)]
 
     def render_fn(scad_src, defines):
