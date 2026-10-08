@@ -188,8 +188,8 @@ def test_select_measured_hole_center_qualifier_no_match_returns_no_match():
     result = select_measured_hole(
         holes, "make the center hole 38 mm", bbox_mm=[120.0, 80.0], trigger_size=38.0
     )
-    # Distances to the centre (60, 40): (8,72)→61.1, (112,8)→61.1, (112,72)
-    # →61.1 mm — all far beyond the 30 mm match threshold.
+    # Distances to the centre (60, 40): (8,72)→61.1, (112,8)→68.8, (112,72)
+    # →68.8 mm — all far beyond the 30 mm match threshold.
     assert isinstance(result, NoMatchHole), (
         f"a 'center hole' no measured hole sits at must be NoMatchHole, "
         f"got {result!r}"
@@ -241,6 +241,64 @@ def test_select_measured_hole_center_qualifier_ambiguous_still_none_not_no_match
 # ---------------------------------------------------------------------------
 # DRY: _snap_axis single definition (item 7)
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# no_match_hole_reply — empty / all-malformed hole lists (issue #414 review)
+# ---------------------------------------------------------------------------
+
+def test_no_match_reply_empty_holes_falls_back_to_no_hole_copy():
+    """Issue #414 review: ``no_match_hole_reply`` with an EMPTY holes list
+    must NOT emit "Here are the holes I did find: " with an empty tail —
+    it falls back to the existing no-hole copy (``no_hole_reply``)."""
+    from d33d.fill_recut import no_match_hole_reply
+    from d33d.part_holes import no_hole_reply
+
+    reply = no_match_hole_reply("hole", [])
+    # The dangling-tail is gone: the no-hole copy is used instead.
+    assert reply == no_hole_reply("hole"), (
+        f"empty holes must fall back to the no-hole copy, got: {reply!r}"
+    )
+    # The "Here are the holes I did find: " lead is NOT present.
+    assert "Here are the holes I did find" not in reply, (
+        f"empty holes must not carry the no-match lead: {reply!r}"
+    )
+
+
+def test_no_match_reply_all_malformed_holes_falls_back_to_no_hole_copy():
+    """Issue #414 review: when every hole entry is malformed (no valid
+    centre + diameter), the reply must NOT emit "Here are the holes I did
+    find: " with an empty list tail — it falls back to the no-hole copy."""
+    from d33d.fill_recut import no_match_hole_reply
+    from d33d.part_holes import no_hole_reply
+
+    malformed = [
+        {"center": "not-a-list", "diameter_mm": 4.0},
+        {"center": [1.0, 2.0, 3.0], "diameter_mm": "bad"},
+    ]
+    reply = no_match_hole_reply("hole", malformed)
+    assert reply == no_hole_reply("hole"), (
+        f"all-malformed holes must fall back to the no-hole copy, got: {reply!r}"
+    )
+    assert "Here are the holes I did find" not in reply, (
+        f"all-malformed holes must not carry the no-match lead: {reply!r}"
+    )
+
+
+def test_no_match_reply_valid_holes_still_uses_no_match_lead():
+    """Issue #414 review: a list with at least one VALID hole still uses
+    the no-match lead with the rendered list (no behaviour change)."""
+    from d33d.fill_recut import no_match_hole_reply
+
+    holes = [
+        {"center": [8.0, 72.0, 3.0], "diameter_mm": 4.0},
+        {"center": "bad", "diameter_mm": 4.0},  # malformed — omitted
+    ]
+    reply = no_match_hole_reply("hole", holes)
+    assert "Here are the holes I did find" in reply, (
+        f"valid holes must use the no-match lead, got: {reply!r}"
+    )
+    assert "Ø4 mm at (8, 72)" in reply, f"valid hole must be listed: {reply!r}"
+
 
 def test_snap_axis_single_definition_no_duplicate():
     """The ``_snap_axis`` function must exist in exactly ONE module as a

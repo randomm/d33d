@@ -339,12 +339,15 @@ def no_match_hole_reply(
     renders numbers) — so the user can pick by name or point at it. No
     recut offer is made for a hole that does not exist.
 
-    Callers pass the MEASURED holes (non-empty — the upstream
-    ``holes_in_mm`` guard already returns ``None`` for an empty list); a
-    list where EVERY entry is malformed degrades to the lead-in with an
-    honest ``none`` rather than a dangling ``"…find: "`` tail."""
+    Callers pass the MEASURED holes; an empty list or a list where EVERY
+    entry is malformed (no valid centre + diameter) falls back to the
+    existing no-hole copy (``d33d.part_holes.no_hole_reply``) rather than
+    emitting a dangling ``"…Here are the holes I did find: "`` tail.
+    """
     if not holes:
-        return FRILL_NO_MATCH_LEAD.format(noun=noun, holes="none")
+        from d33d.part_holes import no_hole_reply
+
+        return no_hole_reply(noun)
     entries: list[str] = []
     for h in holes:
         center = h.get("center")
@@ -366,6 +369,12 @@ def no_match_hole_reply(
                 f"Ø{_fmt_size(float(diameter))} mm at "
                 f"({_fmt_coord(float(center[0]))}, {_fmt_coord(float(center[1]))})"
             )
+    if not entries:
+        # Every entry was malformed — same situation as an empty list:
+        # fall back to the no-hole copy, never a dangling tail.
+        from d33d.part_holes import no_hole_reply
+
+        return no_hole_reply(noun)
     return FRILL_NO_MATCH_LEAD.format(noun=noun, holes="; ".join(entries))
 
 

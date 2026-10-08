@@ -53,17 +53,19 @@ def _section_interior_rings(
     hands back one closed ``shapely.geometry.Polygon`` per section
     contour, the exterior outline plus one polygon per hole).
 
-    Returns a list of ``(u, v, diameter)`` tuples for the INTERIOR
-    rings (the holes — every contour except the largest-area one,
-    which is the outer face outline), with the in-plane coordinates
-    ALREADY mapped back to the body's 3D frame (the full affine
-    transform is applied internally — the two in-plane coords fill the
-    non-slice axes, so the caller uses them directly).
+    The ``(u, v)`` pair is the hole's in-plane coordinate along the two
+    NON-SLICE axes (slots 0/1 excluding ``axis_index``), in the body's
+    3D frame — the full affine transform (``tf @ [cx, cy, 0, 1]``) is
+    applied here, so the caller uses the values directly. The slice-axis
+    coordinate is NOT included (the caller fills it with the mid-plane
+    offset).
+
+    Returns an empty list when the section is degenerate (a section
+    trimesh trimesh cannot build) or the section has no interior
+    contours.
 
     Raises: :class:`ImportError` propagates (a missing scipy / shapely
-    is a deployment error, not a geometric failure); a degenerate
-    mesh (a section trimesh cannot build) is a geometric failure and
-    yields an empty list.
+    is a deployment error, not a geometric failure).
     """
     lo, hi = body.bounds
     mid = 0.5 * (float(lo[axis_index]) + float(hi[axis_index]))
