@@ -3163,6 +3163,232 @@ def test_through_hole_v2_edit_existing_hole(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Issue #409: stack-height post-check — the declared derived height sum
+# vs the measured Z (the v65 repro: a lid written as a stack of
+# height-named features where the model committed the stack with
+# difference() instead of a union — the render is a flat 4 mm slab,
+# the declared stack says 11 mm, invisible to every gate bit).
+# ---------------------------------------------------------------------------
+
+
+def _stack_scad_llm(scad: str) -> LLMResult:
+    """A T1-shaped design response carrying a SCAD whose parameter block
+    declares a derived height sum (the stack-height check's candidate).
+    """
+    return _scad_llm(scad)
+
+
+def _run_stack_loop(
+    scad: str,
+    bbox_z: float,
+    *,
+    stated_h: float = 0.0,
+    llm_script: Sequence[LLMResult] | None = None,
+    max_iterations: int = MAX_ITERATIONS,
+    seen_prompts: list[str] | None = None,
+) -> DesignResult:
+    """Run the loop over an ok render whose measured Z is ``bbox_z``.
+    ``stated_h=0`` (no stated height) keeps bit 2 abstained and bit 5
+    untagged, so the stack check — not the bbox gate — is the only gate
+    under test."""
+    render = _render()
+    llm_script = llm_script if llm_script is not None else [_stack_scad_llm(scad)]
+    seen = seen_prompts if seen_prompts is not None else []
+    stated = (20.0, 20.0, stated_h)
+
+    def llm_fn(role, messages, system):
+        text = messages[0]["content"][0]["text"]
+        seen.append(text)
+        return llm_script[min(len(seen) - 1, len(llm_script) - 1)]
+
+    def render_fn(scad_src, defines):
+        return render
+
+    return run_design_loop(
+        photo=PHOTO,
+        stated_dims=stated,
+        render_fn=render_fn,
+        llm_fn=llm_fn,
+        bbox_fn=lambda r: BboxInfo(20.0, 20.0, bbox_z, 400.0),
+        max_iterations=max_iterations,
+    )
+
+
+def test_stack_height_v65_fires_geometrically_wrong():
+    """Issue #409 (the v65 repro): an ok render with the v65 lid's SCAD
+    (declared stack 11 mm) and a measured Z of 4 (the rendered slab)
+    does NOT pass — iteration 1's repair carries
+    ``failure_class: geometrically_wrong`` and the stack repair
+    instruction (model every declared component / union, not difference).
+    The scripted model repeats v65 to the cap."""
+    from pathlib import Path
+
+    v65 = (Path(__file__).parent / "fixtures" / "scad" / "v65-lid-difference-inversion.scad").read_text()
+    llm = [_stack_scad_llm(v65)]
+    seen: list[str] = []
+    result = _run_stack_loop(v65, 4.0, llm_script=llm, seen_prompts=seen)
+    assert result.status == "exhausted"
+    assert result.iterations_used == MAX_ITERATIONS == 3
+    first = result.iterations[0]
+    assert first.score.perfect is True  # all five gate bits green
+    assert first.failure_class == "geometrically_wrong"
+    assert first.repair is not None
+    assert first.repair["failure_class"] == "geometrically_wrong"
+    assert "union, not difference" in first.repair["instruction"]
+    assert "11 mm" in first.repair["evidence"]
+    assert "4 mm" in first.repair["evidence"]
+    # The repair reached iteration 2's prompt through the existing
+    # REPAIR block.
+    assert "REPAIR directive" not in seen[0]
+    assert "REPAIR directive" in seen[1]
+
+
+def test_stack_height_correct_lid_passes():
+    """Issue #409: the correct lid (same declared stack 11 mm) at
+    measured Z 11 does NOT trigger — a clean pass on iteration 1.
+    """
+    from pathlib import Path
+
+    lid = (Path(__file__).parent / "fixtures" / "scad" / "lid-correct-union.scad").read_text()
+    result = _run_stack_loop(lid, 11.0)
+    assert result.status == "pass"
+    assert result.iterations_used == 1
+    assert result.iterations[0].repair is None
+    assert result.iterations[0].failure_class is None
+
+
+def test_stack_height_repair_then_correct_lid_passes_within_cap():
+    """Issue #409: the model fixes the stack on the repair iteration —
+    v65 (Z 4) triggers, the correct lid (Z 11) passes, all within the
+    3-iteration cap."""
+    from pathlib import Path
+
+    fixtures = Path(__file__).parent / "fixtures" / "scad"
+    v65 = (fixtures / "v65-lid-difference-inversion.scad").read_text()
+    lid = (fixtures / "lid-correct-union.scad").read_text()
+    calls = {"n": 0}
+
+    def render_fn(scad_src, defines):
+        calls["n"] += 1
+        return _render()
+
+    def llm_fn(role, messages, system):
+        text = messages[0]["content"][0]["text"]
+        return _stack_scad_llm(lid if "REPAIR directive" in text else v65)
+
+    stated = (20.0, 20.0, 0.0)
+
+    def bbox_fn(r):
+        return BboxInfo(20.0, 20.0, 4.0 if calls["n"] == 1 else 11.0, 400.0)
+
+    result = run_design_loop(
+        photo=PHOTO,
+        stated_dims=stated,
+        render_fn=render_fn,
+        llm_fn=llm_fn,
+        bbox_fn=bbox_fn,
+    )
+    assert result.status == "pass"
+    assert result.iterations_used == 2
+    assert result.iterations[0].failure_class == "geometrically_wrong"
+    assert result.iterations[0].repair is not None
+    assert result.iterations[1].failure_class is None
+    assert result.iterations[1].repair is None
+
+
+def test_stack_height_no_sum_passes():
+    """Issue #409: an ok render whose SCAD declares NO height sum (the
+    common case — 78 of 81 audited SCADs) → the check abstains and
+    the candidate passes cleanly."""
+    box = "W = 20;\nD = 20;\nH = 8;\ncube([W, D, H]);\n"
+    result = _run_stack_loop(box, 4.0)
+    assert result.status == "pass"
+    assert result.iterations_used == 1
+    assert result.iterations[0].repair is None
+
+
+def test_stack_height_gate_driven_repair_suppresses():
+    """Issue #409: when a gate-driven repair is already routed this
+    iteration (bit 2 fails — the stated H disagrees with the measured
+    Z), the gate evidence wins and the stack check is suppressed
+    (``next_repair is not None`` → the stack check is skipped)."""
+    from pathlib import Path
+
+    v65 = (Path(__file__).parent / "fixtures" / "scad" / "v65-lid-difference-inversion.scad").read_text()
+    # Stated H = 50 (the bbox gate fires: 50 vs 4 — bit 2 fails), but the
+    # SCAD has no W/D params matching the stated, so bit 5 abstains. The
+    # gate routes a repair, suppressing the stack check.
+    llm = [_stack_scad_llm(v65)]
+    stated = (20.0, 20.0, 50.0)
+
+    def render_fn(scad_src, defines):
+        return _render()
+
+    result = run_design_loop(
+        photo=PHOTO,
+        stated_dims=stated,
+        render_fn=render_fn,
+        llm_fn=lambda role, messages, system: llm[0],
+        bbox_fn=lambda r: BboxInfo(20.0, 20.0, 4.0, 400.0),
+    )
+    # The repair is routed (the gate fires on the stated H); the evidence
+    # is the gate's, not the stack check's (the stack check is suppressed
+    # because next_repair is already set).
+    first = result.iterations[0]
+    assert first.repair is not None
+    # The evidence is NOT the stack check's "declared stack sum" — it is
+    # the bbox gate's evidence (the stated H disagreement).
+    assert "declared stack sum" not in first.repair["evidence"]
+
+
+def test_stack_height_direct_check_contract():
+    """Issue #409: the post-check helper's contract in isolation —
+    the DETECTION tuple (declared, measured) and the fire/pass/abstain
+    conditions."""
+    from d33d.stack_height_check import stack_height_check as _check
+
+    from pathlib import Path
+
+    fixtures = Path(__file__).parent / "fixtures" / "scad"
+    v65 = (fixtures / "v65-lid-difference-inversion.scad").read_text()
+    lid = (fixtures / "lid-correct-union.scad").read_text()
+    # Fires: v65 at Z 4 (the rendered slab).
+    det = _check(v65, 4.0)
+    assert det is not None
+    declared, measured = det
+    assert declared == 11.0
+    assert measured == 4.0
+    # Passes: correct lid at Z 11.
+    assert _check(lid, 11.0) is None
+    # Abstains: no sum.
+    assert _check("W = 20;\ncube([W, W, W]);\n", 20.0) is None
+    # Abstains: no measured Z.
+    assert _check(v65, None) is None
+    # At the threshold (diff 5, exactly max(20%, 5)): passes.
+    assert _check(v65, 6.0) is None
+    assert _check(v65, 16.0) is None
+    # Just over the threshold (diff 5.1): fires.
+    det = _check(v65, 16.1)
+    assert det is not None and det == (11.0, 16.1)
+
+
+def test_stack_height_repair_scad_source_equals_iteration_scad():
+    """Issue #409: the repair's ``scad_source`` carries the iteration's
+    REAL SCAD (routed through ``route_repair``, the #317/#386 pattern),
+    not an empty string."""
+    from pathlib import Path
+
+    v65 = (Path(__file__).parent / "fixtures" / "scad" / "v65-lid-difference-inversion.scad").read_text()
+    llm = [_stack_scad_llm(v65)]
+    result = _run_stack_loop(v65, 4.0, llm_script=llm)
+    first = result.iterations[0]
+    assert first.repair is not None
+    assert first.repair["scad_source"] == first.scad_source
+    assert first.repair["scad_source"] == v65
+    assert first.repair["scad_source"] != ""
+
+
+# ---------------------------------------------------------------------------
 # Issue #332 — import guard: post-check (missing import, wrong filename,
 # rescale, resize → repair; correct candidate → pass)
 # ---------------------------------------------------------------------------
