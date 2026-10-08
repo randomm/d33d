@@ -4381,3 +4381,97 @@ def test_preflight_image_probe_bounded(monkeypatch):
     assert result.failure_reason == "renderer_unavailable"
     assert result.iterations_used == 0
     assert result.failure_reason != "renderer_image_stale"
+
+
+def test_real_send_readtimeout_keeps_best_candidate():
+    """Issue #417 (the PM's CRITICAL check): the production per-call bound
+    (``d33d.design_llm.LLM_CALL_TIMEOUT_SECONDS`` — the httpx per-request
+    timeout on the production edge) trips as ``httpx.ReadTimeout`` (a
+    subclass of ``httpx.TimeoutException``) INSIDE the real ``send()`` —
+    neither ``send()`` nor ``make_logged_llm_fn`` catches or re-raises it,
+    so it propagates to the loop and must lead to the SAME keep-best
+    ``design_loop_timed_out`` result as the outer per-attempt deadline.
+
+    This drives the REAL production chain: ``make_llm_fn`` + the REAL
+    ``d33d.design_llm.send`` (T1 fenced-JSON) over a ``httpx.AsyncClient``
+    with a ``httpx.MockTransport`` whose handler returns a good fenced
+    tool call on attempt 1 and raises ``httpx.ReadTimeout`` on attempt 2
+    (the wire-level ReadTimeout a slow remote model produces when the
+    per-request timeout fires). A good attempt 1 + a read-timeout attempt 2
+    → the attempt-1 candidate is kept with reason ``design_loop_timed_out``
+    (not a crash, not a re-attempt, not an empty result).
+    """
+    import json as _json
+
+    import httpx
+
+    from d33d.config.probes import CapabilityResult
+    from d33d.design_loop import make_llm_fn
+
+    wire_calls = {"n": 0}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        wire_calls["n"] += 1
+        if wire_calls["n"] == 1:
+            payload = {
+                "choices": [
+                    {
+                        "message": {
+                            "content": (
+                                "```json\n"
+                                + _json.dumps(
+                                    {
+                                        "tool": "emit_design",
+                                        "arguments": {"scad": GOOD_SCAD},
+                                    }
+                                )
+                                + "\n```"
+                            )
+                        }
+                    }
+                ]
+            }
+            return httpx.Response(200, json=payload)
+        # The production per-request httpx bound firing on attempt 2:
+        # the same exception the real edge raises (not the outer
+        # wait_for's TimeoutError).
+        raise httpx.ReadTimeout("read timed out")
+
+    async def _factory(body: dict) -> httpx.Response:
+        # The production edge's shape (d33d.app._http_request_factory's
+        # _factory): an AsyncClient whose transport injects the timeout.
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(_handler)
+        ) as client:
+            return await client.post(
+                "http://llm.test/v1/chat/completions",
+                json=body,
+                headers={"Authorization": "Bearer k"},
+            )
+
+    t1 = CapabilityResult(
+        tools=True, json_schema=False, vision=True, max_images=8, validated=True
+    )
+    llm_fn = make_llm_fn(_catalogue(), {"design": _factory}, {"design": t1})
+
+    result = asyncio.run(
+        run_design_loop_async(
+            photo=PHOTO,
+            stated_dims=STATED,
+            render_fn=lambda s, d: _render(),
+            llm_fn=llm_fn,
+            max_iterations=MAX_ITERATIONS,
+            attempt_timeout=10.0,
+        )
+    )
+    assert wire_calls["n"] == 2, (
+        f"expected 2 wire calls (good attempt 1 + read-timeout attempt 2), "
+        f"got {wire_calls['n']}"
+    )
+    # The REAL send()'s ReadTimeout routed to the keep-best path (not a
+    # crash / not a SenderError / not a re-attempt of the wire call).
+    assert result.status == "exhausted"
+    assert result.failure_reason == "design_loop_timed_out"
+    assert result.best is not None
+    assert result.best.iteration == 1
+    assert "cube" in result.best.scad_source
