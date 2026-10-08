@@ -1137,6 +1137,16 @@ class TestFeatureVerbClauseNoAxis:
             # Positive controls: 'make' is not a feature verb.
             ("make it 40 mm wide with a 5 mm hole", {"W": 40.0}),
             ("a 40 mm wide box with a 5 mm deep groove", {"W": 40.0}),
+            # Six QA 2026-10-08 §3 phrases (issue #413): part sizes +
+            # a feature in one message. The feature clause starts at the
+            # feature phrase; part sizes in earlier sub-clauses are
+            # unaffected.
+            ("a 40 mm wide box, 12 mm tall, with a 5 mm hole", {"W": 40.0, "H": 12.0}),
+            ("a planter 100 mm wide and 120 mm tall with a 10 mm drain hole", {"W": 100.0, "H": 120.0}),
+            ("a 50 mm wide stand, 80 mm tall, with a 10 mm wide cable slot", {"W": 50.0, "H": 80.0}),
+            ("a 40 mm wide, 12 mm tall box with a slot", {"W": 40.0, "H": 12.0}),
+            ("a 30 mm tall spacer with a 5 mm hole", {"H": 30.0}),
+            ("add a boss 12 mm wide and 8 mm tall on the top", {}),
         ],
     )
     def test_feature_verb_clause_no_axis(self, msg: str, expected: dict) -> None:
