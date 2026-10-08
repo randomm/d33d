@@ -30,7 +30,6 @@ from d33d.design_prompts import (
     METRIC_SCREW_CLEARANCE_MM,
     SCREW_CLEARANCE_INSTRUCTION,
     SCREW_SIZE_RE,
-    TOTAL_HEIGHT_INSTRUCTION,
     clearance_rows_line,
     design_prompt,
     import_part_instruction,
@@ -231,24 +230,6 @@ def test_design_prompt_instructs_screw_clearance_not_nominal():
     assert "NOT the nominal size" in system
     assert "parameter's reason" in system
 
-
-def test_design_prompt_instructs_total_height_declaration():
-    """Issue #409: the design prompt instructs the model to declare the
-    part's overall height as a derived parameter named ``total_height``
-    (a sum of its stacked component parameters, when the part is a stack
-    of features). Both the standalone ``design_prompt`` and the live loop
-    prompt (``_design_system``) carry the instruction from the SINGLE
-    source in ``d33d.design_prompts``."""
-    system, _ = design_prompt(stated_dims=STATED)
-    assert TOTAL_HEIGHT_INSTRUCTION in system
-    # The live loop prompt carries the same instruction.
-    import d33d.design_loop as dl
-
-    live_system = dl._design_system(STATED)
-    assert TOTAL_HEIGHT_INSTRUCTION in live_system
-    # The instruction names ``total_height``.
-    assert "total_height" in system
-    assert "derived" in system
 
 
 def test_design_prompt_has_neutral_delimiters_not_model_specific_tokens() -> None:

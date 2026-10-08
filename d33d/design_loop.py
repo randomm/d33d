@@ -2090,12 +2090,9 @@ async def run_design_loop_async(
                     failure_class = "geometrically_wrong"
                     from d33d.stack_height_check import STACK_HEIGHT_INSTRUCTION
 
-                    next_repair = {
-                        "failure_class": "geometrically_wrong",
-                        "instruction": STACK_HEIGHT_INSTRUCTION,
-                        "scad_source": scad_source,
-                        "evidence": _evidence,
-                    }
+                    _stack_repair = directive.to_dict()
+                    _stack_repair["instruction"] = STACK_HEIGHT_INSTRUCTION
+                    next_repair = _stack_repair
                     _stack_repair_fired = True
 
         record = IterationRecord(
