@@ -49,6 +49,7 @@ from d33d.response_shape import response_message_shape
 
 __all__ = [
     "LLM_CALL_TIMEOUT_SECONDS",
+    "TOTAL_HEIGHT_INSTRUCTION",
     "Dialect",
     "LLMResult",
     "SenderError",
@@ -98,6 +99,24 @@ ROLE_TOOL_NAMES: dict[str, str] = {
     "question": "emit_answer",
 }
 
+#: Issue #409 (task-prompt): unlike SCREW_CLEARANCE_INSTRUCTION (design_prompts),
+#: this lives in design_llm because the T0 tool schema needs it and design_prompts -> design_loop -> design_llm would cycle.
+#: The live prompt surfaces rendering it: the T0 tool schema
+#: (:data:`ROLE_TOOL_SCHEMAS`), the design system prompt
+#: (``d33d.design_loop._design_system``), and
+#: ``d33d.design_prompts.design_prompt`` — the #317 single-definition pattern.
+#: The T1 reply-shape text in ``d33d.design_loop._design_messages`` carries NO
+#: copy — the T1 model gets the instruction via the system prompt.
+TOTAL_HEIGHT_INSTRUCTION = (
+    "When the part is a stack of features (a base plus a rim, a skirt plus "
+    "a plate, a lid on a box — anything where the overall height is the "
+    "sum of two or more named component heights), declare a derived "
+    "parameter named total_height in the top variable block as a literal "
+    "sum of those component parameters (e.g. total_height = base_height + "
+    "rim_height). Do NOT declare total_height for a part whose height is a "
+    "single named parameter already."
+)
+
 #: The OpenAI function-calling tool definition per role — the native ``tools``
 #: array the T0 request carries (the maker closures, 
 #: ``design_loop.make_llm_fn`` / ``critique_protocol.make_critique_llm_fn``,
@@ -110,7 +129,10 @@ ROLE_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
         "type": "function",
         "function": {
             "name": "emit_design",
-            "description": "Emit the parametric OpenSCAD",
+            "description": (
+                "Emit the parametric OpenSCAD. "
+                + TOTAL_HEIGHT_INSTRUCTION
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {

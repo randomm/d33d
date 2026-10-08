@@ -86,14 +86,62 @@ def test_design_prompt_instructs_readable_names_and_labels() -> None:
 
 def test_design_prompt_axis_schema_description() -> None:
     """Issue #385: the emit_design tool schema's axis field carries the
-    axis-tag rule as a description (for T0 native-tool-calling models)."""
-    from d33d.design_llm import ROLE_TOOL_SCHEMAS
+    axis-tag rule as a description (for T0 native-tool-calling models).
+    Issue #409: the schema's function description also carries the
+    derived ``total_height`` instruction — the SAME constant the live
+    prompt builders render (so the T0 wire carries the instruction the
+    T1 fenced-JSON path gets from the prompt text)."""
+    from d33d.design_llm import ROLE_TOOL_SCHEMAS, TOTAL_HEIGHT_INSTRUCTION
 
     schema = ROLE_TOOL_SCHEMAS["emit_design"]
     props = schema["function"]["parameters"]["properties"]["parameters"]["items"]["properties"]
     axis_desc = props["axis"]["description"]
     assert "part's own overall W, D or H extent" in axis_desc
     assert "hole_distance_from_left_edge" in axis_desc
+    # Issue #409 (task-prompt): the total_height instruction rides the
+    # tool's function description (the T0 wire carries it verbatim).
+    assert TOTAL_HEIGHT_INSTRUCTION in schema["function"]["description"]
+
+
+def test_design_prompt_carries_total_height_instruction() -> None:
+    """Issue #409 (task-prompt): the ``TOTAL_HEIGHT_INSTRUCTION`` constant
+    (``d33d.design_llm`` — the SINGLE definition) is wired into BOTH live
+    design prompt surfaces, so the instruction reaches the model regardless
+    of which prompt builder the call path uses:
+
+    - ``d33d.design_prompts.design_prompt`` (the static design-role prompt
+      — the same surface ``SCREW_CLEARANCE_INSTRUCTION`` is pinned on);
+    - ``d33d.design_loop._design_system`` (the live loop's system prompt —
+      the #317 single-source pattern: both prompts carry the same text
+      from the same constant).
+
+    The instruction text carries the key elements: the parameter name
+    (``total_height``), the rule (derived = a literal sum), the scope
+    (only when the part IS a stack of features), and it does NOT instruct
+    axis tagging (it complements #385's axis rule, it does not replace it).
+    """
+    import d33d.design_loop as dl
+    from d33d.design_llm import TOTAL_HEIGHT_INSTRUCTION
+
+    # The constant is importable and non-empty.
+    assert isinstance(TOTAL_HEIGHT_INSTRUCTION, str)
+    assert len(TOTAL_HEIGHT_INSTRUCTION) > 20
+    # The instruction names the parameter.
+    assert "total_height" in TOTAL_HEIGHT_INSTRUCTION
+    # It specifies the parameter is derived (a literal sum).
+    assert "derived" in TOTAL_HEIGHT_INSTRUCTION
+    assert "literal sum" in TOTAL_HEIGHT_INSTRUCTION
+    # It scopes to stacked parts (not a blanket rule).
+    assert "stack" in TOTAL_HEIGHT_INSTRUCTION
+    # It is NOT an axis instruction (complements #385, does not replace it).
+    assert '"axis"' not in TOTAL_HEIGHT_INSTRUCTION
+
+    # The live prompt surfaces carry the constant verbatim (single source —
+    # the two prompts cannot drift).
+    system, _ = design_prompt(stated_dims=STATED)
+    assert TOTAL_HEIGHT_INSTRUCTION in system
+    live_system = dl._design_system(STATED)
+    assert TOTAL_HEIGHT_INSTRUCTION in live_system
 
 
 def _catalogue():
@@ -181,6 +229,7 @@ def test_design_prompt_instructs_screw_clearance_not_nominal():
     assert "clearance diameter" in system
     assert "NOT the nominal size" in system
     assert "parameter's reason" in system
+
 
 
 def test_design_prompt_has_neutral_delimiters_not_model_specific_tokens() -> None:

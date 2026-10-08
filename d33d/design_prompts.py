@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Any
 
 from d33d.config.catalogue import Catalogue, resolve_call_params
+from d33d.design_llm import TOTAL_HEIGHT_INSTRUCTION
 from d33d.design_loop import _dim_axis_list
 from d33d.import_guard import PART_STL_NAME
 
@@ -45,6 +46,7 @@ __all__ = [
     "METRIC_SCREW_CLEARANCE_MM",
     "SCREW_CLEARANCE_INSTRUCTION",
     "SCREW_SIZE_RE",
+    "TOTAL_HEIGHT_INSTRUCTION",
     "clearance_rows_line",
     "design_prompt",
     "import_part_instruction",
@@ -312,6 +314,11 @@ def design_prompt(
     lines.append("Screw clearance (through-holes), in mm:")
     lines.append(clearance_rows_line())
     lines.append(SCREW_CLEARANCE_INSTRUCTION)
+
+    # Issue #409 (task-prompt): the derived total_height instruction — the
+    # SAME constant the live loop prompt renders (single definition in
+    # d33d.design_llm, the #317 single-source pattern).
+    lines.append(TOTAL_HEIGHT_INSTRUCTION)
 
     lines.append("")
     lines.append("BOSL2 cheatsheet (verified module signatures; do not invent):")

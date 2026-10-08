@@ -1048,6 +1048,25 @@ def _dim_params(
     return out
 
 
+def _stack_height_post_check(
+    scad_source: str,
+    measured_z: float | None,
+) -> tuple[float, float] | None:
+    """Issue #409: the stack-height post-check (deferred-import wrapper,
+    the #317 pattern).
+
+    Delegates to :func:`d33d.stack_height_check.stack_height_check`
+    (declared derived height sum vs the measured Z the loop already
+    computes from the bbox). Returns the DETECTION tuple
+    ``(declared, measured)`` when the declared stack sum and the
+    measured Z disagree beyond the disagrees-major threshold, ``None``
+    when the check abstains or the stack passed.
+    """
+    from d33d.stack_height_check import stack_height_check
+
+    return stack_height_check(scad_source, measured_z)
+
+
 def _scad_params(scad_source: str) -> dict[str, float]:
     """The ``IterationRecord.params`` of one candidate (issue #219): the
     SHARED extraction of the named assignments the candidate's own SCAD
@@ -1100,6 +1119,7 @@ def _design_system(
     unsettled part) the prompt is byte-identical to today."""
     from d33d.design_prompts import (
         SCREW_CLEARANCE_INSTRUCTION,
+        TOTAL_HEIGHT_INSTRUCTION,
         clearance_rows_line,
         import_part_instruction,
     )
@@ -1112,6 +1132,9 @@ def _design_system(
         "Screw clearance (through-holes), in mm: "
         f"{clearance_rows_line()}. "
         f"{SCREW_CLEARANCE_INSTRUCTION} "
+        # Issue #409 (task-prompt): the derived total_height instruction —
+        # the SAME constant the T0 tool schema and design_prompt render.
+        f"{TOTAL_HEIGHT_INSTRUCTION} "
     )
     if part_scale is not None:
         system += import_part_instruction(part_scale) + " "
@@ -1330,7 +1353,8 @@ def _design_messages(
         "`// title: <what this version is or what changed, at most 40 "
         "characters>` — e.g. `// title: Bore to 38 mm`. Every stated "
         "dimension and any FDM tolerance must be a named parameter in a "
-        "top variable block, never an inline literal. Name every parameter "
+        "top variable block, never an inline literal. "
+        "Name every parameter "
         "with full words in snake_case — readable identifiers, not "
         "abbreviations (BAD: `fst` for a fillet size; GOOD: `fillet_size_top`). "
         "Reply with a single "
@@ -2000,6 +2024,8 @@ async def run_design_loop_async(
         # ``route_repair`` path. A gate-driven repair already routed
         # this iteration wins; a fired screw-hole repair suppresses the
         # check (two post-repairs never fire on one iteration).
+        # Gate order: screw → through → stack, each checking the prior
+        # two (issue #409).
         _through_repair_fired = False
         if (
             render.error_class == "ok"
@@ -2024,6 +2050,51 @@ async def run_design_loop_async(
                 }
                 _through_repair_fired = True
 
+        # Issue #409: an ok render whose gates are green can still carry
+        # a DISCARDED stack — the model wrote ``difference()`` where the
+        # stacked feature belongs in a union (the v65 lid: declared
+        # stack 11 mm, rendered slab 4 mm — invisible to every gate bit
+        # when no H is stated or tagged). The check runs BEFORE the
+        # pass return (pure text + the bbox the loop already measured —
+        # zero extra renders). Rides the EXISTING
+        # ``geometrically_wrong`` class — no new class, no new error
+        # class, no new score bit — routed through the same
+        # ``route_repair`` path. A gate-driven repair already routed
+        # this iteration wins; a fired screw-hole or through-hole
+        # repair suppresses the check (two post-repairs never fire on
+        # one iteration).
+        _stack_repair_fired = False
+        if (
+            render.error_class == "ok"
+            and next_repair is None
+            and not _screw_repair_fired
+            and not _through_repair_fired
+            and part_scale is None
+        ):
+            _stack_det = _stack_height_post_check(scad_source, bbox.z if bbox else None)
+            if _stack_det is not None:
+                _declared, _measured = _stack_det
+                _evidence = (
+                    f"declared stack sum {_declared:g} mm vs measured Z "
+                    f"{_measured:g} mm"
+                )
+                _ax_classified = ClassifiedFailure(
+                    failure_class="geometrically_wrong",
+                    evidence=_evidence,
+                    repairable=True,
+                )
+                directive = route_repair(
+                    classified=_ax_classified, scad_source=scad_source
+                )
+                if directive is not None:
+                    failure_class = "geometrically_wrong"
+                    from d33d.stack_height_check import STACK_HEIGHT_INSTRUCTION
+
+                    _stack_repair = directive.to_dict()
+                    _stack_repair["instruction"] = STACK_HEIGHT_INSTRUCTION
+                    next_repair = _stack_repair
+                    _stack_repair_fired = True
+
         record = IterationRecord(
             iteration=iteration,
             scad_source=scad_source,
@@ -2040,7 +2111,7 @@ async def run_design_loop_async(
         )
         iterations.append(record)
 
-        if candidate_score.perfect and not _screw_repair_fired and not _through_repair_fired:
+        if candidate_score.perfect and not _screw_repair_fired and not _through_repair_fired and not _stack_repair_fired:
             return DesignResult(
                 status="pass",
                 best=record,
