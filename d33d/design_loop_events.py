@@ -1493,6 +1493,102 @@ def _measured_genus_for_dir(render_artifact_dir: str) -> int | None:
     return genus_from_stl(str(stl_path))
 
 
+def _measured_parent_stats_for_dir(
+    render_artifact_dir: str,
+) -> tuple[int | None, float | None, int | None]:
+    """Issue #419 (consolidation): measure the parent version's rendered
+    genus, volume, and face count from its ``model.stl`` in ONE mesh load.
+
+    Returns ``(genus, volume_mm3, face_count)`` — each ``None`` when the
+    corresponding measurement is unavailable (missing file, load failure,
+    zero watertight components). A fabricated baseline would make the gate
+    lie, so ``None`` means "abstain" for that metric.
+
+    The face count is read from the merged mesh (``len(mesh.faces)`` after
+    ``merge_vertices``) — the same measurement the unchanged-mesh check
+    applies to the candidate's ``render.stl`` (``trimesh.load(
+    process=False, force="mesh")`` without merge), so the comparison is
+    symmetric in the same way the genus and volume are.
+    """
+    from d33d.part_mesh_topology import load_and_split
+
+    stl_path = Path(render_artifact_dir) / "model.stl"
+    if not stl_path.is_file():
+        return (None, None, None)
+    try:
+        components = load_and_split(str(stl_path))
+    except Exception:
+        return (None, None, None)
+    if not components:
+        return (None, None, None)
+    # Genus: use the shared helper (handles the zero-watertight abstain).
+    genus = None
+    try:
+        from d33d.part_mesh_topology import mesh_topology
+
+        topo = mesh_topology(merged=components[0], components=components)
+        if topo["watertight_bodies"] > 0:
+            genus = topo["genus"]
+    except Exception:
+        genus = None
+    # Volume + face count: sum across watertight components.
+    try:
+        total_vol = 0.0
+        total_faces = 0
+        for comp in components:
+            if comp.is_watertight:
+                total_vol += float(comp.volume)
+                total_faces += len(comp.faces)
+        if total_faces <= 0:
+            return (genus, None, None)
+        return (genus, total_vol, total_faces)
+    except Exception:
+        return (genus, None, None)
+
+
+def _measured_parent_stats_for_file(
+    stl_path: str,
+) -> tuple[int | None, float | None, int | None]:
+    """Issue #419 (consolidation): measure a stored part mesh's genus,
+    volume, and face count in ONE mesh load (the ``part.stl`` twin of
+    :func:`_measured_parent_stats_for_dir`).
+
+    Returns ``(genus, volume_mm3, face_count)`` — each ``None`` when
+    the corresponding measurement is unavailable.
+    """
+    from d33d.part_mesh_topology import load_and_split
+
+    if not Path(stl_path).is_file():
+        return (None, None, None)
+    try:
+        components = load_and_split(stl_path)
+    except Exception:
+        return (None, None, None)
+    if not components:
+        return (None, None, None)
+    genus = None
+    try:
+        from d33d.part_mesh_topology import mesh_topology
+
+        topo = mesh_topology(merged=components[0], components=components)
+        if topo["watertight_bodies"] > 0:
+            genus = topo["genus"]
+    except Exception:
+        genus = None
+    try:
+        total_vol = 0.0
+        total_faces = 0
+        for comp in components:
+            if comp.is_watertight:
+                total_vol += float(comp.volume)
+                total_faces += len(comp.faces)
+        if total_faces <= 0:
+            return (genus, None, None)
+        return (genus, total_vol, total_faces)
+    except Exception:
+        return (genus, None, None)
+
+
 async def _resolve_version_create(
     app: Any,
     project_id: int,
@@ -1955,10 +2051,15 @@ async def run_design_loop_with_events(
             else None
         )
         if _latest_ver is not None and _latest_ver.get("render_artifact_dir"):
-            # V2+: measure the parent version's rendered genus.
+            # V2+: measure the parent version's rendered genus, volume,
+            # and face count from ONE mesh load (issue #419
+            # consolidation — the operator decision: parent stats live
+            # in #418's parent-version block, not a separate one).
             _render_dir = _latest_ver["render_artifact_dir"]
-            _parent_genus = await asyncio.to_thread(
-                _measured_genus_for_dir, _render_dir
+            _parent_genus, _parent_vol, _parent_faces = (
+                await asyncio.to_thread(
+                    _measured_parent_stats_for_dir, _render_dir
+                )
             )
             if _parent_genus is not None:
                 kwargs["through_baseline_genus"] = _parent_genus
@@ -1976,30 +2077,35 @@ async def run_design_loop_with_events(
                     f"unavailable — abstain"
                 )
             # Issue #419 — the unchanged-mesh check's parent baseline:
-            # the SAME stored parent render's ``model.stl`` (the file
-            # the genus measurement above just read from — one file, two
-            # baselines, one disk read each). The path is passed to the
-            # loop, which loads the candidate's ``render.stl`` and the
-            # parent ``model.stl`` and compares volume + face count
-            # (the check itself abstains when either file is missing —
-            # ``model.stl`` absent from the artifact dir → the loop's
-            # check abstains, mirroring the genus path above). The
-            # parent stats come from the stored parent version/render
-            # already on disk; NO extra render is added (the file is
-            # the parent version's own render, measured once at loop
-            # start).
+            # the volume and face count measured from the SAME mesh load
+            # as the genus (one file, one disk read, two baselines).
+            # The path is also passed (the check falls back to loading
+            # it when the stats are None); the check itself abstains
+            # when both the stats and the file are missing — mirroring
+            # the genus path above. The parent stats come from the
+            # stored parent version/render already on disk; NO extra
+            # render is added.
             kwargs["parent_mesh_stl"] = str(Path(_render_dir) / "model.stl")
+            if _parent_vol is not None:
+                kwargs["parent_volume_mm3"] = _parent_vol
+            if _parent_faces is not None:
+                kwargs["parent_face_count"] = _parent_faces
         elif row.get("part_filename"):
-            # V1 on import: the stored part mesh's genus (the mesh the
-            # render imports). A 3MF import stores no STL (the render
-            # re-exports it — no baseline is available) → abstain;
-            # ``_stored_part_mesh_path`` filters the non-STL suffix,
-            # so no format string compare is needed here.
+            # V1 on import: the stored part mesh's genus, volume, and
+            # face count (the mesh the render imports). A 3MF import
+            # stores no STL (the render re-exports it — no baseline is
+            # available) → abstain; ``_stored_part_mesh_path`` filters
+            # the non-STL suffix, so no format string compare is needed
+            # here.
             _stored_genus: int | None = None
+            _stored_vol: float | None = None
+            _stored_faces: int | None = None
             _stored_path = _stored_part_mesh_path(row, app.state.conn)
             if _stored_path is not None:
-                _stored_genus = await asyncio.to_thread(
-                    _measured_genus_for_file, str(_stored_path)
+                _stored_genus, _stored_vol, _stored_faces = (
+                    await asyncio.to_thread(
+                        _measured_parent_stats_for_file, str(_stored_path)
+                    )
                 )
             if _stored_genus is not None:
                 kwargs["through_baseline_genus"] = _stored_genus
@@ -2025,6 +2131,10 @@ async def run_design_loop_with_events(
             # only set for a file that exists on disk).
             if _stored_path is not None:
                 kwargs["parent_mesh_stl"] = str(_stored_path)
+            if _stored_vol is not None:
+                kwargs["parent_volume_mm3"] = _stored_vol
+            if _stored_faces is not None:
+                kwargs["parent_face_count"] = _stored_faces
         else:
             # Issue #418: a part-less project. No version yet → the
             # NEW-design default: the kwarg is omitted (the loop

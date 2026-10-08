@@ -1124,6 +1124,8 @@ def _dim_params(
 def _unchanged_mesh_post_check(
     parent_stl: str | None,
     render: RenderResult,
+    parent_volume_mm3: float | None = None,
+    parent_face_count: int | None = None,
 ) -> tuple[str, str] | None:
     """Issue #419: the unchanged-mesh post-check (deferred-import wrapper,
     the #317 pattern).
@@ -1134,12 +1136,21 @@ def _unchanged_mesh_post_check(
     a fabricated baseline would make the gate lie). Returns
     ``(evidence, instruction)`` on a fired repair, ``None`` when the
     check abstains or the mesh genuinely changed.
+
+    ``parent_volume_mm3`` and ``parent_face_count`` (issue #419
+    consolidation): when the seam has already measured the parent's
+    volume and face count (from the same mesh load that produced the
+    genus baseline), they are passed here directly — the check does
+    NOT re-load the parent mesh. When ``None``, the check falls back
+    to loading ``parent_stl`` (the original path-based design).
     """
     from d33d.unchanged_mesh_check import unchanged_mesh_check
 
     return unchanged_mesh_check(
         parent_stl=parent_stl,
         candidate_stl=getattr(render, "stl", None),
+        parent_volume_mm3=parent_volume_mm3,
+        parent_face_count=parent_face_count,
     )
 
 
@@ -1750,6 +1761,8 @@ async def run_design_loop_async(
     through_baseline_genus: int | None = None,
     through_baseline_genus_source: str | None = None,
     parent_mesh_stl: str | None = None,
+    parent_volume_mm3: float | None = None,
+    parent_face_count: int | None = None,
     on_progress_iteration: Any = "_current",
     renderer_check: Callable[[], bool] | None = None,
     image_check: Callable[[], dict[str, str] | None] | None = None,
@@ -2223,7 +2236,11 @@ async def run_design_loop_async(
             and parent_mesh_stl is not None
         ):
             _unchanged_det = await asyncio.to_thread(
-                _unchanged_mesh_post_check, parent_mesh_stl, render
+                _unchanged_mesh_post_check,
+                parent_mesh_stl,
+                render,
+                parent_volume_mm3,
+                parent_face_count,
             )
             if _unchanged_det is not None:
                 _evidence, _instruction = _unchanged_det
@@ -2528,6 +2545,8 @@ def run_design_loop(
     through_baseline_genus: int | None = None,
     through_baseline_genus_source: str | None = None,
     parent_mesh_stl: str | None = None,
+    parent_volume_mm3: float | None = None,
+    parent_face_count: int | None = None,
     renderer_check: Callable[[], bool] | None = None,
     image_check: Callable[[], dict[str, str] | None] | None = None,
 ) -> DesignResult:
@@ -2560,6 +2579,8 @@ def run_design_loop(
             through_baseline_genus=through_baseline_genus,
             through_baseline_genus_source=through_baseline_genus_source,
             parent_mesh_stl=parent_mesh_stl,
+            parent_volume_mm3=parent_volume_mm3,
+            parent_face_count=parent_face_count,
             renderer_check=renderer_check,
             image_check=image_check,
         )

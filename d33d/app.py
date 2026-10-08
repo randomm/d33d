@@ -1962,6 +1962,9 @@ def _build_production_design_loop():
             through_baseline_genus_source=kwargs.get(
                 "through_baseline_genus_source"
             ),
+            parent_mesh_stl=kwargs.get("parent_mesh_stl"),
+            parent_volume_mm3=kwargs.get("parent_volume_mm3"),
+            parent_face_count=kwargs.get("parent_face_count"),
             model=res.entry.model,
             prompt_version=prompt_version,
             on_progress=on_progress,

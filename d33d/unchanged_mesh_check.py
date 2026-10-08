@@ -136,6 +136,8 @@ def unchanged_mesh_check(
     *,
     parent_stl: str | None,
     candidate_stl: str | None,
+    parent_volume_mm3: float | None = None,
+    parent_face_count: int | None = None,
     scad_source: str = "",
 ) -> tuple[str, str] | None:
     """Issue #419: the unchanged-mesh post-check (detection).
@@ -143,8 +145,13 @@ def unchanged_mesh_check(
     Returns ``None`` (the check abstains — the candidate is allowed to
     pass on its own merits) when:
 
-    - ``parent_stl`` is ``None`` (no parent version, no stored
-      ``model.stl`` — a v1 design, a 3MF import, a missing file).
+    - ``parent_stl`` is ``None`` AND ``parent_volume_mm3`` is ``None``
+      (no parent version, no stored ``model.stl`` — a v1 design, a 3MF
+      import, a missing file). The parent side must have SOME baseline;
+      when pre-computed stats are supplied (``parent_volume_mm3`` and
+      ``parent_face_count``), ``parent_stl`` may be ``None`` (the path
+      is not needed — the stats were already measured off the same mesh
+      load the genus came from).
     - ``candidate_stl`` is ``None`` or unloadable (the loop's
       render has no STL, or it cannot be read).
     - Either mesh's face count cannot be read (a zero-face load is a
@@ -158,24 +165,44 @@ def unchanged_mesh_check(
     iteration's ``REPAIR`` block), and the instruction is
     :data:`UNCHANGED_INSTRUCTION`.
     """
-    if parent_stl is None:
-        return None
-    if (
-        candidate_stl is None
-        or not isinstance(candidate_stl, str)
-        or not candidate_stl
-    ):
+    # The parent side: either a path to load, or pre-computed stats.
+    # Both must be present for the check to have a baseline.
+    parent: Any | None = None
+    parent_faces: int | None = None
+    parent_vol: float | None = None
+
+    if parent_volume_mm3 is not None or parent_face_count is not None:
+        # Pre-computed stats path: the parent mesh was already loaded
+        # (off the event loop) in the seam that also measured the genus.
+        # Use those stats directly — no second load.
+        if parent_face_count is not None and parent_face_count > 0:
+            parent_faces = parent_face_count
+        if parent_volume_mm3 is not None:
+            parent_vol = parent_volume_mm3
+        if parent_faces is None:
+            return None  # no usable face count → abstain
+    elif parent_stl is not None:
+        # Path-based path (the original design): load the parent mesh.
+        parent = _load_mesh(parent_stl)
+        if parent is None:
+            return None
+        parent_faces = len(parent.faces)
+        if parent_faces <= 0:
+            return None
+        parent_vol = _volume(parent)
+    else:
+        # No parent at all → abstain.
         return None
 
-    parent = _load_mesh(parent_stl)
+    if candidate_stl is None or not isinstance(candidate_stl, str) or not candidate_stl:
+        return None
     candidate = _load_mesh(candidate_stl)
-    if parent is None or candidate is None:
+    if candidate is None:
         return None
-
-    parent_faces = len(parent.faces)
     candidate_faces = len(candidate.faces)
-    if parent_faces <= 0 or candidate_faces <= 0:
+    if candidate_faces <= 0:
         return None
+    candidate_vol = _volume(candidate)
 
     # Face count: the primary signal (re-export noise on face count is
     # small — a re-triangulation of the same geometry shifts it by a
@@ -188,8 +215,6 @@ def unchanged_mesh_check(
     # floor — see the module constants). A non-watertight mesh cannot
     # yield a volume; the check then relies on the face count alone
     # (the v100 repro is decisive on face count: 664 == 664).
-    parent_vol = _volume(parent)
-    candidate_vol = _volume(candidate)
     if parent_vol is not None and candidate_vol is not None and abs(parent_vol) > 0.0:
         vol_delta = abs(candidate_vol - parent_vol)
         vol_tol = max(_VOLUME_REL_TOL * abs(parent_vol), _VOLUME_ABS_FLOOR_MM3)
@@ -200,7 +225,6 @@ def unchanged_mesh_check(
         # "unchanged" check — a genuine edit changes the face count by
         # more than 1% on any non-trivial part).
         vol_changed = False
-        parent_vol, candidate_vol = None, None
 
     if faces_changed or vol_changed:
         return None
