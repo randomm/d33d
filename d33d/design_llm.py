@@ -99,16 +99,14 @@ ROLE_TOOL_NAMES: dict[str, str] = {
     "question": "emit_answer",
 }
 
-#: Issue #409 (task-prompt): the SINGLE source of the design-prompt
-#: instruction that asks the model to declare the part's overall height as
-#: a derived parameter named ``total_height`` when the part is a stack of
-#: features.  Rendered from the constant by all three live prompt surfaces:
-#: the T0 tool schema's description (:data:`ROLE_TOOL_SCHEMAS`), the T1
-#: fenced-JSON reply-shape text in ``d33d.design_loop._design_messages``
-#: (the "Declare every parameter" list), and both design system prompts
-#: (``_design_system`` and ``d33d.design_prompts.design_prompt`` — the
-#: #317 single-definition pattern).  Complements #385's axis-tag rule:
-#: ``total_height`` is a derived parameter, never a single measurement.
+#: Issue #409 (task-prompt): unlike SCREW_CLEARANCE_INSTRUCTION (design_prompts),
+#: this lives in design_llm because the T0 tool schema needs it and design_prompts -> design_loop -> design_llm would cycle.
+#: The live prompt surfaces rendering it: the T0 tool schema
+#: (:data:`ROLE_TOOL_SCHEMAS`), the design system prompt
+#: (``d33d.design_loop._design_system``), and
+#: ``d33d.design_prompts.design_prompt`` — the #317 single-definition pattern.
+#: The T1 reply-shape text in ``d33d.design_loop._design_messages`` carries NO
+#: copy — the T1 model gets the instruction via the system prompt.
 TOTAL_HEIGHT_INSTRUCTION = (
     "When the part is a stack of features (a base plus a rim, a skirt plus "
     "a plate, a lid on a box — anything where the overall height is the "

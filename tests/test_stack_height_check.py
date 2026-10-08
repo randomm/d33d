@@ -223,6 +223,26 @@ def test_declared_stack_sum_unbalanced_brackets_abstains():
     assert declared_stack_sum(scad) is None
 
 
+def test_declared_stack_sum_deep_nesting_does_not_recurse():
+    """Issue #409 (crash regression): a deeply nested, balanced
+    expression in a model-authored parameter block (thousands of parens)
+    must not raise ``RecursionError`` out of the design loop — the
+    evaluator's depth cap turns the over-deep declaration into a clean
+    skip (abstain), exactly like any other unresolvable declaration."""
+    deep = "total_height = " + "(" * 5000 + "1" + ")" * 5000 + " + a;"
+    assert declared_stack_sum(deep) is None
+
+    # The check itself must not raise either — it abstains the same way.
+    assert stack_height_check(deep, 4.0) is None
+
+    # Nested but shallow parenthesisation still evaluates (the cap does
+    # not degrade normal expressions) — both operands bare parameters.
+    nested = "a = 4;\nb = 2;\ntotal_height = (a + b);\ncube([a, a, a]);\n"
+    total, refs = declared_stack_sum(nested)
+    assert total == 6.0
+    assert set(refs) == {"a", "b"}
+
+
 def test_is_height_name_tokens():
     """The height-name token test: height/thickness/drop/skirt/rim/lip/
     base/total/overall qualify; width/depth/count do not (``width`` is
@@ -265,25 +285,6 @@ def test_declared_stack_sum_no_declaration_line_abstains():
 # ---------------------------------------------------------------------------
 # The comparison: declared sum vs measured Z
 # ---------------------------------------------------------------------------
-
-
-def test_stack_height_check_fires_v65_fixture():
-    """Issue #409 (v65 repro): the real QA lid's SCAD declares a stack
-    of 11 mm; a measured Z of 4 (the rendered slab) disagrees by 7 mm
-    > max(20% of 11, 5) → FIRES with the detection tuple."""
-    v65 = _scad("v65-lid-difference-inversion.scad")
-    det = stack_height_check(v65, 4.0)
-    assert det is not None
-    declared, measured = det
-    assert declared == 11.0
-    assert measured == 4.0
-
-
-def test_stack_height_check_passes_correct_lid_fixture():
-    """Issue #409: the correct lid declares the same stack (11 mm) and
-    measures 11 mm → the diff is 0 ≤ the threshold → PASSES (None)."""
-    lid = _scad("lid-correct-union.scad")
-    assert stack_height_check(lid, 11.0) is None
 
 
 def test_stack_height_check_threshold_is_disagrees_major():

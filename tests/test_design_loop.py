@@ -3171,13 +3171,6 @@ def test_through_hole_v2_edit_existing_hole(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def _stack_scad_llm(scad: str) -> LLMResult:
-    """A T1-shaped design response carrying a SCAD whose parameter block
-    declares a derived height sum (the stack-height check's candidate).
-    """
-    return _scad_llm(scad)
-
-
 def _run_stack_loop(
     scad: str,
     bbox_z: float,
@@ -3192,7 +3185,7 @@ def _run_stack_loop(
     untagged, so the stack check — not the bbox gate — is the only gate
     under test."""
     render = _render()
-    llm_script = llm_script if llm_script is not None else [_stack_scad_llm(scad)]
+    llm_script = llm_script if llm_script is not None else [_scad_llm(scad)]
     seen = seen_prompts if seen_prompts is not None else []
     stated = (20.0, 20.0, stated_h)
 
@@ -3224,7 +3217,7 @@ def test_stack_height_v65_fires_geometrically_wrong():
     from pathlib import Path
 
     v65 = (Path(__file__).parent / "fixtures" / "scad" / "v65-lid-difference-inversion.scad").read_text()
-    llm = [_stack_scad_llm(v65)]
+    llm = [_scad_llm(v65)]
     seen: list[str] = []
     result = _run_stack_loop(v65, 4.0, llm_script=llm, seen_prompts=seen)
     assert result.status == "exhausted"
@@ -3274,7 +3267,7 @@ def test_stack_height_repair_then_correct_lid_passes_within_cap():
 
     def llm_fn(role, messages, system):
         text = messages[0]["content"][0]["text"]
-        return _stack_scad_llm(lid if "REPAIR directive" in text else v65)
+        return _scad_llm(lid if "REPAIR directive" in text else v65)
 
     stated = (20.0, 20.0, 0.0)
 
@@ -3318,7 +3311,7 @@ def test_stack_height_gate_driven_repair_suppresses():
     # Stated H = 50 (the bbox gate fires: 50 vs 4 — bit 2 fails), but the
     # SCAD has no W/D params matching the stated, so bit 5 abstains. The
     # gate routes a repair, suppressing the stack check.
-    llm = [_stack_scad_llm(v65)]
+    llm = [_scad_llm(v65)]
     stated = (20.0, 20.0, 50.0)
 
     def render_fn(scad_src, defines):
@@ -3379,7 +3372,7 @@ def test_stack_height_repair_scad_source_equals_iteration_scad():
     from pathlib import Path
 
     v65 = (Path(__file__).parent / "fixtures" / "scad" / "v65-lid-difference-inversion.scad").read_text()
-    llm = [_stack_scad_llm(v65)]
+    llm = [_scad_llm(v65)]
     result = _run_stack_loop(v65, 4.0, llm_script=llm)
     first = result.iterations[0]
     assert first.repair is not None
@@ -3482,7 +3475,7 @@ def test_stack_height_imported_part_abstains():
     from d33d.stack_height_check import declared_stack_sum
 
     assert declared_stack_sum(scad) is not None
-    llm = [_stack_scad_llm(scad)]
+    llm = [_scad_llm(scad)]
 
     def render_fn(scad_src, defines):
         return _render()

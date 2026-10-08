@@ -25,7 +25,10 @@ loop orchestrates; this module owns the check's logic), mirroring
 module returning a tuple or ``None``, the caller folding it into the
 repair dict). The deferred-import wrapper lives in ``design_loop``
 (the module cannot import ``design_prompts`` at top level — the #317
-circular-import break applies the same way).
+circular-import break applies the same way). The ``_DECL_RE`` here is
+its own parser (issue #409): it matches any right-hand side, not just
+literals, so derived sums are in scope — ``extract_named_params`` in
+``d33d.design_loop`` reads literal right-hand sides only.
 """
 
 from __future__ import annotations
@@ -43,6 +46,17 @@ __all__ = [
     "is_height_name",
     "stack_height_check",
 ]
+
+#: The evaluator's nesting cap (issue #409, lens review): the
+#: parenthesised-atom evaluator recurses once per paren level, and a
+#: model-authored parameter block could carry a deeply nested, balanced
+#: expression (thousands of parens) — without a cap that recursion
+#: escapes the design loop as a ``RecursionError``. Past the cap an
+#: atom is unreadable (``None`` — a clean skip, like any other
+#: unresolvable declaration). The cap is comfortably above any depth a
+#: genuine SCAD parameter block reaches (a human-authored sum of named
+#: components is a handful of levels at most).
+_EVAL_MAX_DEPTH: int = 200
 
 #: Name tokens that mark a HEIGHT parameter (issue #409, operator
 #: decision 2026-10-05). A declaration's name qualifies when ANY of its
@@ -130,27 +144,33 @@ def _strip(scad: str) -> str:
     return _STRING_RE.sub('""', s)
 
 
-def _eval_atom(expr: str, env: dict[str, float]) -> float | None:
+def _eval_atom(expr: str, env: dict[str, float], depth: int = 0) -> float | None:
     """An atom: a parenthesized expression (fully balanced), a decimal
     literal, or a bare identifier in ``env``. ``None`` otherwise —
-    function calls, strings, vectors are not readable atoms."""
+    function calls, strings, vectors are not readable atoms. Past
+    :data:`_EVAL_MAX_DEPTH` levels of parenthesisation the atom is
+    unreadable too (the cap keeps a deeply nested, balanced model
+    expression from escaping the design loop as a ``RecursionError``).
+    """
     e = expr.strip()
     if e.startswith("(") and e.endswith(")"):
-        depth = 0
+        if depth >= _EVAL_MAX_DEPTH:
+            return None
+        depth_c = 0
         ok = True
-        for i, ch in enumerate(e):
+        for ch in e:
             if ch == "(":
-                depth += 1
+                depth_c += 1
             elif ch == ")":
-                depth -= 1
-                if depth < 0:
+                depth_c -= 1
+                if depth_c < 0:
                     ok = False
                     break
             if not ok:
                 break
-        if not ok or depth != 0:
+        if not ok or depth_c != 0:
             return None
-        return _eval_add(e[1:-1], env)
+        return _eval_add(e[1:-1], env, depth + 1)
     if _NUMBER_RE.fullmatch(e):
         return float(e)
     if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", e) and e in env:
@@ -158,35 +178,35 @@ def _eval_atom(expr: str, env: dict[str, float]) -> float | None:
     return None
 
 
-def _eval_mul(expr: str, env: dict[str, float]) -> float | None:
+def _eval_mul(expr: str, env: dict[str, float], depth: int = 0) -> float | None:
     """One level of the precedence chain: ``*``/``/`` (and a unary
     minus) over :func:`_eval_atom` operands."""
     e = expr.strip()
     if e.startswith("-") and not _NUMBER_RE.fullmatch(e):
-        inner = _eval_mul(e[1:], env)  # recurse: `--a` stays in this level
+        inner = _eval_mul(e[1:], env, depth)  # recurse: `--a` stays in this level
         return -inner if inner is not None else None
-    depth = 0
+    depth_c = 0
     splits: list[int] = []
     for i, ch in enumerate(e):
         if ch == "(":
-            depth += 1
+            depth_c += 1
         elif ch == ")":
-            depth -= 1
-            if depth < 0:
+            depth_c -= 1
+            if depth_c < 0:
                 return None
-        elif depth == 0 and ch in "*/":
+        elif depth_c == 0 and ch in "*/":
             splits.append(i)
     if not splits:
-        return _eval_atom(e, env)
+        return _eval_atom(e, env, depth)
     parts = [e[: splits[0]]]
     for a, b in itertools.pairwise(splits):
         parts.append(e[a + 1 : b])
     parts.append(e[splits[-1] + 1 :])
-    acc = _eval_atom(parts[0], env)
+    acc = _eval_atom(parts[0], env, depth)
     if acc is None:
         return None
     for op, part in zip(splits, parts[1:]):
-        r = _eval_atom(part, env)
+        r = _eval_atom(part, env, depth)
         if r is None:
             return None
         if e[op] == "*":
@@ -198,35 +218,37 @@ def _eval_mul(expr: str, env: dict[str, float]) -> float | None:
     return acc
 
 
-def _eval_add(expr: str, env: dict[str, float]) -> float | None:
+def _eval_add(
+    expr: str, env: dict[str, float], depth: int = 0
+) -> float | None:
     """One level of the precedence chain: top-level ``+``/``-`` over
     :func:`_eval_mul` operands (a leading unary minus is not a split)."""
-    depth = 0
+    depth_c = 0
     splits: list[tuple[int, str]] = []
     for i, ch in enumerate(expr):
         if ch == "(":
-            depth += 1
+            depth_c += 1
         elif ch == ")":
-            depth -= 1
-            if depth < 0:
+            depth_c -= 1
+            if depth_c < 0:
                 return None
-        elif depth == 0 and ch in "+-":
+        elif depth_c == 0 and ch in "+-":
             if i == 0:
                 continue  # a leading unary minus belongs to the operand
             splits.append((i, ch))
     if not splits:
-        return _eval_mul(expr, env)
+        return _eval_mul(expr, env, depth)
     parts: list[str] = [expr[: splits[0][0]]]
     ops: list[str] = []
     for k, (i, op) in enumerate(splits):
         end = splits[k + 1][0] if k + 1 < len(splits) else len(expr)
         parts.append(expr[i + 1 : end])
         ops.append(op)
-    acc = _eval_mul(parts[0], env)
+    acc = _eval_mul(parts[0], env, depth)
     if acc is None:
         return None
     for op, part in zip(ops, parts[1:]):
-        r = _eval_mul(part, env)
+        r = _eval_mul(part, env, depth)
         if r is None:
             return None
         acc = acc + r if op == "+" else acc - r
@@ -234,19 +256,8 @@ def _eval_add(expr: str, env: dict[str, float]) -> float | None:
 
 
 def _bare_params_in(rhs: str, env: dict[str, float]) -> tuple[str, ...]:
-    """The DISTINCT positive parameter identifiers named in ``rhs``.
-
-    Every identifier substring (``[A-Za-z_][A-Za-z0-9_]*``) is a candidate
-    — this does NOT exclude names appearing inside an arithmetic term
-    (``2*rim_width`` still yields ``rim_width``; a name is not part of a
-    number, so a ``2`` never counts). Each candidate must be a known
-    parameter resolving to a STRICTLY positive value (a zero or negative
-    parameter is not a stack component). The arithmetic-exclusion is NOT
-    done here: the caller's ``abs(value − sum(refs))`` equality check is
-    what rejects a sum like ``a = b + 2*c`` (where ``c`` is counted but the
-    term doubles it), so ``_bare_params_in`` collects every distinct
-    positive identifier and leaves the arithmetic judgment to that check.
-    """
+    """The DISTINCT positive parameter identifiers named in ``rhs`` (every
+    identifier substring that resolves to a strictly-positive value)."""
     out: list[str] = []
     seen: set[str] = set()
     for m in re.finditer(r"[A-Za-z_][A-Za-z0-9_]*", rhs):
@@ -347,6 +358,10 @@ def declared_stack_sum(scad_source: str) -> tuple[float, tuple[str, ...]] | None
         refs = _bare_params_in(rhs, env)
         if len(refs) < 2:
             continue
+        # The value == sum(refs) check is the arithmetic guard: arithmetic
+        # operands (e.g. `2*rim_width`) are still counted by
+        # _bare_params_in, but the equality rejects pseudo-sums like
+        # `a = b + 2*c` where the term doubles `c`.
         if abs(value - sum(env[r] for r in refs)) > 1e-9:
             continue
         if best is None or value > best[0]:
@@ -398,12 +413,9 @@ def stack_height_check(
         logger.info("stack-height check abstained: no measured Z (no mesh or bbox)")
         return None
     measured = float(measured_z)
-    from d33d.design_state import (
-        DISAGREES_MAJOR_THRESHOLD_MIN_MM,
-        DISAGREES_MAJOR_THRESHOLD_REL,
+    from d33d.design_state import (  # same semantics as bit 5: 20% base on declared, strict >
+        _disagrees_major_flag,
     )
-
-    tol = max(DISAGREES_MAJOR_THRESHOLD_REL * declared, DISAGREES_MAJOR_THRESHOLD_MIN_MM)
-    if abs(declared - measured) > tol:
+    if _disagrees_major_flag(measured, declared):
         return (declared, measured)
     return None
