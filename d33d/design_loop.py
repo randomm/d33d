@@ -986,6 +986,7 @@ def _through_hole_post_check(
     stl: str | None,
     through_baseline_genus: int | None,
     scad_source: str,
+    through_baseline_genus_source: str | None = None,
 ) -> tuple[str, str] | None:
     """Issue #386: the through-hole genus post-check (deferred-import
     wrapper, the #317 pattern).
@@ -994,11 +995,19 @@ def _through_hole_post_check(
     which resolves the baseline, runs the check, and routes the repair
     through ``route_repair``. Returns ``(evidence, instruction)`` on a
     fired repair, ``None`` when the check abstains or the hole passed.
+
+    ``through_baseline_genus_source`` (issue #418) is the adapter seam's
+    provenance string — forwarded to the check which logs it with every
+    decision so QA can see WHERE the baseline came from.
     """
     from d33d.through_hole_check import route_through_hole_repair
 
     return route_through_hole_repair(
-        request, stl, through_baseline_genus, scad_source
+        request,
+        stl,
+        through_baseline_genus,
+        scad_source,
+        through_baseline_genus_source,
     )
 
 
@@ -1653,6 +1662,7 @@ async def run_design_loop_async(
     part_scale: float | None = None,
     part_bbox_mm: tuple[float, float, float] | None = None,
     through_baseline_genus: int | None = None,
+    through_baseline_genus_source: str | None = None,
     on_progress_iteration: Any = "_current",
     renderer_check: Callable[[], bool] | None = None,
     image_check: Callable[[], dict[str, str] | None] | None = None,
@@ -2038,6 +2048,7 @@ async def run_design_loop_async(
                 render.stl,
                 through_baseline_genus,
                 scad_source,
+                through_baseline_genus_source,
             )
             if _through_routed is not None:
                 _evidence, _instruction = _through_routed
@@ -2385,6 +2396,7 @@ def run_design_loop(
     part_scale: float | None = None,
     part_bbox_mm: tuple[float, float, float] | None = None,
     through_baseline_genus: int | None = None,
+    through_baseline_genus_source: str | None = None,
     renderer_check: Callable[[], bool] | None = None,
     image_check: Callable[[], dict[str, str] | None] | None = None,
 ) -> DesignResult:
@@ -2415,6 +2427,7 @@ def run_design_loop(
             part_scale=part_scale,
             part_bbox_mm=part_bbox_mm,
             through_baseline_genus=through_baseline_genus,
+            through_baseline_genus_source=through_baseline_genus_source,
             renderer_check=renderer_check,
             image_check=image_check,
         )

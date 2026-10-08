@@ -40,6 +40,7 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "THROUGH_HOLE_INSTRUCTION",
     "is_through_request",
+    "requested_hole_count",
     "resolve_baseline_genus",
     "route_through_hole_repair",
     "through_hole_check",
@@ -85,6 +86,96 @@ def is_through_request(request: str) -> bool:
     return any(noun in words for noun in HOLE_NOUNS)
 
 
+#: The word forms that mark an EXISTING hole (the definite-article rule,
+#: issue #418): a bare ``the`` immediately before the hole phrase, or the
+#: verb forms the existing-hole requests use ("move the through-hole",
+#: "resize the hole").
+_EXISTING_HOLE_MARKERS = ("move", "moves", "reposition", "resize",
+                         "enlarge", "shrink", "widen", "narrow", "relocate",
+                         "repositioning", "resizing")
+
+
+def _request_is_existing_hole(request: str) -> bool:
+    """Issue #418: does the request target an EXISTING hole rather than
+    asking for a new one?
+
+    True (the existing-hole branch) when the hole phrase is preceded by
+    the definite article (``the``) — "make the through-hole 8 mm", "the
+    hole", "move the through-hole" — or when the request verb is an
+    existing-hole verb (``move`` / ``resize`` / ...). False (the
+    new-hole branch) for an indefinite article ("a hole", "an 8 mm
+    hole"), a stated count ("two holes"), or no article at all ("drill
+    a 6 mm hole through the middle" / "drill through the middle").
+
+    Runs only on text that already fired :func:`is_through_request`, so
+    the hole noun (or the hyphenated token) is present.
+    """
+    lower = request.lower()
+    # The definite article immediately before "hole" / "holes" / "bore"
+    # / "counterbore", or before the hyphenated through-hole token.
+    for noun in (*HOLE_NOUNS, *_HYPHENATED_TOKENS):
+        idx = lower.find(noun)
+        while idx != -1:
+            # Walk back over whitespace; the character(s) just before the
+            # noun must spell "the" (whole word) to count.
+            j = idx - 1
+            while j >= 0 and lower[j].isspace():
+                j -= 1
+            # Candidate "the" spans [j-2, j] inclusive.
+            if j >= 2:
+                span = lower[j - 2 : j + 1]
+                if span == "the":
+                    before = lower[j - 3] if j >= 3 else " "
+                    if not before.isalnum():
+                        return True
+            idx = lower.find(noun, idx + 1)
+    # Existing-hole verbs: the request acts on a hole that is already
+    # there ("move the through-hole", "resize the hole to 8 mm").
+    words = set(lower.split())
+    for marker in _EXISTING_HOLE_MARKERS:
+        if marker in words:
+            return True
+    return False
+
+
+def requested_hole_count(request: str) -> int:
+    """Issue #418: the number of holes the request asks for (``1`` when
+    no count is stated).
+
+    A stated count ("two holes", "3 holes", "four through-holes") — any
+    English number word up to ten, or an Arabic numeral — is the count;
+    everything else ("a hole", "the through-hole", no article) is ``1``.
+    """
+    import re
+
+    number_words = {
+        "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+        "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+    }
+    lower = request.lower()
+    # An Arabic numeral directly attached to a hole word: "2 holes",
+    # "3 through-holes", "2 bores" (the count word precedes the noun).
+    # The leading lookbehind rejects a digit that is part of a
+    # dimension ("2.5 mm holes") — only a standalone integer is a
+    # count, never the integer part of a decimal measurement.
+    m = re.search(
+        r"(?<!\d)\d+\s*(?:-)?\s*"
+        r"(?:holes?|bores?|counterbores?|through-holes?|thru-holes?)\b",
+        lower,
+    )
+    if m:
+        num_match = re.match(r"\s*(\d+)", m.group(0))
+        if num_match:
+            n = int(num_match.group(1))
+            if n >= 1:
+                return n
+    words = set(lower.split())
+    for word, n in number_words.items():
+        if word in words:
+            return n
+    return 1
+
+
 def _rendered_genus(stl: str | None) -> int | None:
     """The rendered mesh's total genus, via the shared
     :func:`d33d.part_mesh_topology.genus_from_stl` helper.
@@ -120,11 +211,11 @@ THROUGH_HOLE_INSTRUCTION = (
 
 def resolve_baseline_genus(through_baseline_genus: int | None) -> int | None:
     """The baseline genus for the through-hole check (issue #386, operator
-    decision 2026-10-05).
+    decision 2026-10-05; issue #418).
 
     * ``0`` — no explicit seam value: a NEW design (a baseline-less
       candidate; the ``design_loop_events`` chat seam omits the kwarg
-      when the project has no part).
+      only for a project that has neither a part nor any version).
     * the explicit seam value — the PARENT's baseline genus, resolved by
       the caller: for a v1 on an import the GENUS OF THE STORED, REPAIRED
       PART MESH (``{repo}/versions/{v1}/part.stl`` — the mesh the render
@@ -138,6 +229,11 @@ def resolve_baseline_genus(through_baseline_genus: int | None) -> int | None:
       bool) or negative count (the ``-1`` unknown sentinel) abstains the
       same way :func:`d33d.part_holes.part_has_hole_evidence` degrades
       it.
+
+    Issue #418: since the parent baseline applies to every v2+ edit
+    (designed or imported), the ``None``-in → ``0`` path is hit only by
+    a genuinely fresh design (no part, no version) — the seam no longer
+    omits the kwarg for a part-less project that has a rendered version.
     """
     if through_baseline_genus is None:
         return 0
@@ -155,6 +251,7 @@ def route_through_hole_repair(
     stl: str | None,
     through_baseline_genus: int | None,
     scad_source: str,
+    through_baseline_genus_source: str | None = None,
 ) -> tuple[str, str] | None:
     """Run the through-hole post-check and, on a miss, route the repair.
 
@@ -169,18 +266,35 @@ def route_through_hole_repair(
     A ``route_repair`` directive of ``None`` (unrepairable — the class is
     repairable by contract, so only a routing failure) also yields
     ``None``: the candidate proceeds rather than crashing the loop.
+
+    ``through_baseline_genus_source`` (issue #418) is the adapter seam's
+    provenance string for the baseline (e.g. "parent version v107 rendered
+    genus: 1"). It is forwarded to :func:`through_hole_check` which logs
+    it with every decision, so QA can see WHERE the baseline came from.
     """
     from d33d.failure_classes import ClassifiedFailure, route_repair
 
     baseline = resolve_baseline_genus(through_baseline_genus)
-    det = through_hole_check(request, stl, baseline)
+    det = through_hole_check(
+        request, stl, baseline, through_baseline_genus_source
+    )
     if det is None:
         return None
     base_g, genus = det
-    evidence = (
-        f"rendered mesh genus {genus} does not exceed the "
-        f"baseline genus {base_g} — the hole did not pass through"
-    )
+    if _request_is_existing_hole(request):
+        # Issue #418: an existing-hole request fails only when the genus
+        # FELL below the baseline — a hole that disappeared / never
+        # re-opened.
+        evidence = (
+            f"rendered mesh genus {genus} fell below the "
+            f"baseline genus {base_g} — the hole no longer passes "
+            f"through"
+        )
+    else:
+        evidence = (
+            f"rendered mesh genus {genus} does not exceed the "
+            f"baseline genus {base_g} — the hole did not pass through"
+        )
     classified = ClassifiedFailure(
         failure_class="geometrically_wrong",
         evidence=evidence,
@@ -202,8 +316,10 @@ def through_hole_check(
     request: str,
     stl: str | None,
     baseline_genus: int | None,
+    baseline_source: str | None = None,
 ) -> tuple[int, int] | None:
-    """The through-hole post-check (issue #386, operator decision 2026-10-05).
+    """The through-hole post-check (issue #386, operator decision
+    2026-10-05; issue #418 article rule).
 
     Runs on the ok-render branch of the loop, BEFORE the ``score.perfect``
     pass return (the loop calls :func:`route_through_hole_repair` — the
@@ -216,26 +332,78 @@ def through_hole_check(
     * ``stl`` loads and splits with at least one watertight component;
     * ``baseline_genus`` is known (``None`` → abstain).
 
-    Otherwise returns the DETECTION tuple ``(baseline_genus, genus)``
-    when the rendered mesh's total genus does NOT exceed the baseline
-    (a pocket over a new design: 0 ≤ 0; a pocket over a part whose own
-    hole count already matched the render: the hole did not pass
-    through). ``genus > baseline`` → ``None`` (the pass condition).
-    The caller (``d33d.design_loop``) folds this into the repair dict —
-    the EXISTING ``geometrically_wrong`` class, no new class — and routes
-    it through ``route_repair``.
+    The comparison is article-conditional (issue #418):
+
+    * a NEW-hole request (indefinite article or a stated count — "drill
+      a hole through", "add two holes through") requires the rendered
+      mesh's total genus to RISE by the requested count above the
+      baseline: ``genus >= baseline + count`` → ``None`` (pass);
+      otherwise the DETECTION tuple ``(baseline, genus)`` — a pocket over
+      a part whose own holes already matched the render means the new
+      hole did not pass through.
+    * an EXISTING-hole request (definite article — "the through-hole",
+      "make the hole 8 mm", "move the through-hole") requires the genus
+      not to FALL below the baseline: ``genus >= baseline`` → ``None``
+      (pass — an unchanged genus passes, a resize or move that preserves
+      the hole); ``genus < baseline`` → the DETECTION tuple (a hole that
+      closed).
+
+    ``baseline_source`` (issue #418) is the adapter seam's provenance
+    string for the baseline — it is logged with every decision (both
+    pass and fail) so QA can see WHERE the baseline came from, not just
+    the number; ``None`` names the raw value only.
+
+    The caller (``d33d.design_loop``) folds a detection tuple into the
+    repair dict — the EXISTING ``geometrically_wrong`` class, no new
+    class — and routes it through ``route_repair``.
     """
     if not is_through_request(request):
         return None
+    _src = baseline_source or "not set by the seam"
     if baseline_genus is None:
-        logger.info("through-hole check abstained: no baseline genus")
+        logger.info(
+            "through-hole check abstained: no baseline genus (source: %s)",
+            _src,
+        )
         return None
     if not isinstance(stl, str) or not stl:
-        logger.info("through-hole check abstained: render carries no STL path")
+        logger.info(
+            "through-hole check abstained: render carries no STL path "
+            "(baseline %s, source: %s)",
+            baseline_genus,
+            _src,
+        )
         return None
     genus = _rendered_genus(stl)
     if genus is None:
+        logger.info(
+            "through-hole check abstained: rendered genus could not be "
+            "measured (baseline %s, source: %s)",
+            baseline_genus,
+            _src,
+        )
         return None
-    if genus > baseline_genus:
+    if _request_is_existing_hole(request):
+        # Issue #418: existing hole — unchanged genus passes; only a
+        # fall below the baseline (a hole that closed) fails.
+        _verdict = "pass" if genus >= baseline_genus else "FAIL"
+        logger.info(
+            "through-hole check (existing hole): rendered genus %d vs "
+            "baseline genus %d — %s (source: %s)",
+            genus, baseline_genus, _verdict, _src,
+        )
+        if genus >= baseline_genus:
+            return None
+        return (baseline_genus, genus)
+    count = requested_hole_count(request)
+    # Issue #418: new hole(s) — the genus must rise by the requested
+    # count above the baseline.
+    _verdict = "pass" if genus >= baseline_genus + count else "FAIL"
+    logger.info(
+        "through-hole check (new hole ×%d): rendered genus %d vs baseline "
+        "genus %d — %s (source: %s)",
+        count, genus, baseline_genus, _verdict, _src,
+    )
+    if genus >= baseline_genus + count:
         return None
     return (baseline_genus, genus)
