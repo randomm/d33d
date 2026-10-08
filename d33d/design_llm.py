@@ -102,14 +102,13 @@ ROLE_TOOL_NAMES: dict[str, str] = {
 #: Issue #409 (task-prompt): the SINGLE source of the design-prompt
 #: instruction that asks the model to declare the part's overall height as
 #: a derived parameter named ``total_height`` when the part is a stack of
-#: features.  The instruction lives here (not in the loop prompt text) so
-#: the T0 tool schema and the T1 fenced-JSON path both carry the same
-#: wording.  The text is intentionally short and imperative — it names the
-#: parameter, the rule (derived = a literal sum of its component
-#: parameters), and the scope (only when the part IS a stack; a simple
-#: block with one height does not need it).  Complements #385's axis-tag
-#: rule: ``total_height`` is a derived parameter, not an axis parameter —
-#: it is the *sum* of the stacked components, never a single measurement.
+#: features.  Rendered from the constant by all three live prompt surfaces:
+#: the T0 tool schema's description (:data:`ROLE_TOOL_SCHEMAS`), the T1
+#: fenced-JSON reply-shape text in ``d33d.design_loop._design_messages``
+#: (the "Declare every parameter" list), and both design system prompts
+#: (``_design_system`` and ``d33d.design_prompts.design_prompt`` — the
+#: #317 single-definition pattern).  Complements #385's axis-tag rule:
+#: ``total_height`` is a derived parameter, never a single measurement.
 TOTAL_HEIGHT_INSTRUCTION = (
     "When the part is a stack of features (a base plus a rim, a skirt plus "
     "a plate, a lid on a box — anything where the overall height is the "
@@ -132,7 +131,10 @@ ROLE_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
         "type": "function",
         "function": {
             "name": "emit_design",
-            "description": "Emit the parametric OpenSCAD",
+            "description": (
+                "Emit the parametric OpenSCAD. "
+                + TOTAL_HEIGHT_INSTRUCTION
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {

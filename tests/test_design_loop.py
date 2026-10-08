@@ -42,7 +42,7 @@ import trimesh
 
 from d33d.config.catalogue import load_catalogue
 from d33d.config.probes import CapabilityResult
-from d33d.design_llm import LLMResult, send
+from d33d.design_llm import TOTAL_HEIGHT_INSTRUCTION, LLMResult, send
 from d33d.design_loop import (
     GATE_REASON_BITS,
     MAX_ITERATIONS,
@@ -1423,7 +1423,7 @@ def test_make_llm_fn_t0_body_carries_emit_design_tool_schema():
             "type": "function",
             "function": {
                 "name": "emit_design",
-                "description": "Emit the parametric OpenSCAD",
+                "description": "Emit the parametric OpenSCAD. " + TOTAL_HEIGHT_INSTRUCTION,
                 "parameters": {
                     "type": "object",
                     "properties": {

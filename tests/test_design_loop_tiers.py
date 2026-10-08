@@ -37,6 +37,7 @@ import pytest
 from d33d.config.probes import CapabilityResult
 from d33d.db import connect
 from d33d.design_llm import (
+    TOTAL_HEIGHT_INSTRUCTION,
     LLMResult,
     SenderError,
     llm_request_body,
@@ -57,7 +58,7 @@ DESIGN_TOOLS = [
         "type": "function",
         "function": {
             "name": "emit_design",
-            "description": "Emit the parametric OpenSCAD",
+            "description": "Emit the parametric OpenSCAD. " + TOTAL_HEIGHT_INSTRUCTION,
             "parameters": {
                 "type": "object",
                 "properties": {

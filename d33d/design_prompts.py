@@ -326,6 +326,9 @@ def design_prompt(
     lines.append(clearance_rows_line())
     lines.append(SCREW_CLEARANCE_INSTRUCTION)
 
+    # Issue #409 (task-prompt): the derived total_height instruction — the
+    # SAME constant the live loop prompt renders (single definition in
+    # d33d.design_llm, the #317 single-source pattern).
     lines.append(TOTAL_HEIGHT_INSTRUCTION)
 
     lines.append("")
