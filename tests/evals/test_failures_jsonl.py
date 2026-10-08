@@ -432,6 +432,56 @@ def test_failure_event_accepts_valid_class():
         FailureEvent.validate_failure_class(fc)
 
 
+def test_failure_event_accepts_pre_417_shape_without_attempt_fields():
+    """A ``FailureEvent`` with ``attempt_count=None`` and
+    ``per_attempt_latencies=None`` (the pre-#417 row shape) validates —
+    the two fields are optional (default ``None``) so existing rows
+    written before the deadline-kill archive gained them still read.
+    A future change that accidentally makes the fields required would
+    break this test."""
+    ev = FailureEvent(
+        photo=None,
+        region_mark=None,
+        request="make it a cube",
+        model="model-x",
+        prompt_version="",
+        output_scad="",
+        failure_class="design_loop_timed_out",
+        ts="2026-01-01T00:00:00+00:00",
+        event_id="abc123",
+    )
+    assert ev.attempt_count is None
+    assert ev.per_attempt_latencies is None
+
+
+def test_failure_event_attempt_fields_constraints_apply_when_present():
+    """The ``attempt_count`` / ``per_attempt_latencies`` constraints
+    (``ge=1`` / ``min_length=1``) apply only when the value IS present
+    (the ``None`` default is always accepted — see the pre-#417 shape
+    test above). A present value that violates the constraint raises:
+    ``attempt_count=0`` (the honest-absence path writes ``None``, never
+    ``0``) and an empty ``per_attempt_latencies`` list are both
+    rejected."""
+    with pytest.raises(ValidationError):
+        FailureEvent(
+            request="make it a cube",
+            model="model-x",
+            failure_class="design_loop_timed_out",
+            ts="2026-01-01T00:00:00+00:00",
+            event_id="abc123",
+            attempt_count=0,
+        )
+    with pytest.raises(ValidationError):
+        FailureEvent(
+            request="make it a cube",
+            model="model-x",
+            failure_class="design_loop_timed_out",
+            ts="2026-01-01T00:00:00+00:00",
+            event_id="abc123",
+            per_attempt_latencies=[],
+        )
+
+
 def test_make_failure_event_rejects_empty_request():
     """``make_failure_event`` rejects an empty ``request`` (the model's
     ``min_length=1`` validator)."""

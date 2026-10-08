@@ -442,14 +442,15 @@ export interface Envelope {
  * (issue #221, last-resort catch-all).
  *
  * Measured from the start of `streamEvents` (the fetch call) — NOT an
- * idle/per-frame timer. Must EXCEED the server-side derived total
- * (`DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS` × `MAX_ITERATIONS` = 120 s × 3
- * = 360 s, issue #417) with real margin so the server's clean,
- * structured "design_loop_timed_out" error frame normally arrives first;
- * this deadline fires only if the server deadline never reached the client
- * (e.g. a half-open connection or the server process died). 720 s (12 min)
- * is 2× the server's 360 s derived total — enough margin for a slow model
- * to finish all 3 attempts + the server's own deadline to fire, without
+ * idle/per-frame timer. Must EXCEED the server-side per-attempt deadline
+ * (`DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS` = 120 s, issue #417) with real
+ * margin so the server's clean, structured "design_loop_timed_out" error
+ * frame normally arrives first; this deadline fires only if the server
+ * deadline never reached the client (e.g. a half-open connection or the
+ * server process died). 720 s (12 min) is 6× the server's per-attempt
+ * 120 s deadline — enough margin for a slow model to finish all 3 attempts
+ * (the loop's per-attempt deadline returns the best-so-far candidate
+ * within 120 s per attempt) + the server's own deadline to fire, without
  * the 960 s (16 min) over-allocation that let a client (or a malicious
  * actor with a valid session) tie up a server-side design-loop task for
  * 16 min instead of 12 (issue #417 review, PERFORMANCE finding).

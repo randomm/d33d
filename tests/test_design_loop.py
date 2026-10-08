@@ -3951,3 +3951,48 @@ def test_loop_unknown_variable_render_is_repair_naming_variable():
     assert result.iterations[0].repair is not None
     assert result.iterations[0].repair["failure_class"] == "unknown_variable"
     assert "H" in result.iterations[0].repair["evidence"]
+
+
+def test_per_attempt_deadline_returns_best_so_far_exhausted():
+    """The loop's per-attempt deadline (issue #417): a design LLM call
+    that outlives ``attempt_timeout`` is cut off by ``asyncio.wait_for``
+    and the run ends with a best-so-far exhausted result whose
+    ``failure_reason`` is ``design_loop_timed_out`` — never a fabricated
+    empty result. This is the SOLE loop-level timeout (the adapter's
+    derived total is a margin over the same value; the httpx per-call
+    timeout is per-phase, not a total): a slow-but-not-hung call that
+    trickles tokens is bounded by the per-attempt deadline, not by the
+    httpx per-phase cap.
+
+    The deadline CANCELS the design call (``asyncio.wait_for`` cancels
+    the inner task, which interrupts the async httpx request — unlike the
+    render worker's subprocess timeout, the call does NOT run on to
+    completion in the background). A hanging ``llm_fn`` (an ``await
+    asyncio.sleep(999)`` that never resolves) proves the cancellation:
+    with a 0.2 s deadline the call returns in ~0.2 s, not ~999 s.
+    """
+
+    async def _hanging_llm(role, messages, system):
+        # A design call that never resolves (a hung LLM): the deadline
+        # must cut it off (cancel it), not wait for it.
+        await asyncio.sleep(999)
+        raise AssertionError("hanging llm_fn should have been cancelled")
+
+    result = asyncio.run(
+        run_design_loop_async(
+            photo=PHOTO,
+            stated_dims=STATED,
+            render_fn=lambda scad, defines: _render(),
+            llm_fn=_hanging_llm,
+            max_iterations=MAX_ITERATIONS,
+            attempt_timeout=0.2,
+        )
+    )
+    assert result.status == "exhausted"
+    assert result.failure_reason == "design_loop_timed_out"
+    # The deadline fired on the FIRST attempt (no candidate yet): the run
+    # ends with an honest empty-iteration result (``best`` ``None``, zero
+    # iterations) — never a fabricated pass. The adapter's "no version"
+    # path handles the honest zero-render case.
+    assert result.iterations_used == 0
+    assert result.best is None

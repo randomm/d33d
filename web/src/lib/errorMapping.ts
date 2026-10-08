@@ -314,17 +314,18 @@ export function displayDesignLoopError(
   // disclosure stands, nothing half-established is rendered).
   const rendererDetail = parseRendererDetail(data.renderer_detail);
   if (reason !== undefined) {
-    const mapped = (copy.failure.reasons as unknown as Record<string, string>)[reason];
+    const mapped = (copy.failure.reasons as Record<string, string>)[reason];
     // The slow-model timeout copy (issue #417): the server's measured
     // per-attempt latency and attempt count are on the frame (omit-not-
-    // null). When both are present, the headline is the templated
-    // "model is slow right now" copy with the measured values filled in
-    // — the words "stopped responding" no longer appear for this case.
-    // When the frame carries no measured values (a stall that never
-    // rendered), the headline falls back to the generic
-    // `design_loop_timed_out` reason sentence (which still says "ran
-    // past its time limit" — the cause is stated, just without a number
-    // the SPA has not established).
+    // null). When BOTH are present and valid (finite, count > 0), the
+    // headline is the templated "model is slow right now" copy (the
+    // `copy.failure.slowModelTimeout` sibling of `reasons` — the frame's
+    // `reason` is the string code `design_loop_timed_out`, whose sentence
+    // is the fallback in `reasons`). When the frame carries no measured
+    // values (a stall that never rendered), the headline falls back to the
+    // generic `design_loop_timed_out` reason sentence (which still says
+    // "ran past its time limit" — the cause is stated, just without a
+    // number the SPA has not established).
     let message = mapped ?? UNKNOWN_REASON_COPY;
     if (reason === "design_loop_timed_out") {
       const lat = data.attempt_latency_seconds;
@@ -336,9 +337,7 @@ export function displayDesignLoopError(
         Number.isFinite(cnt) &&
         cnt > 0
       ) {
-        message = (copy.failure.reasons as unknown as {
-          design_loop_slow_model: (seconds: number, count: number) => string;
-        }).design_loop_slow_model(lat, cnt);
+        message = copy.failure.slowModelTimeout(lat, cnt);
       }
     }
     // The carried-axis variant: the frame's `carried_axes` is the set the

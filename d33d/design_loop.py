@@ -393,13 +393,6 @@ class DesignResult:
     iterations_used: int = 0
     env_var: str | None = None
     renderer_detail: dict[str, str] | None = None
-    #: Provenance of the timeout-version path (issue #417): the adapter
-    #: stamps ``"timeout_kept"`` when it versions a candidate kept after
-    #: the adapter deadline fired (an unvalidated candidate — no render
-    #: artifact, no score, bbox ``None``). ``None`` on the ordinary
-    #: pass/exhausted path. Informational: downstream consumers read the
-    #: render/bbox fields (all honestly absent) rather than this flag.
-    design_source_origin: str | None = None
 
 
 #: Structured failure reasons for an exhausted loop, in bit order — each
@@ -1466,9 +1459,13 @@ def scad_looks_valid(scad: str) -> bool:
     and (3) contain at least one known OpenSCAD keyword
     (token-bounded). Prose that slipped past the fenced-JSON protocol
     (a chat response inside a fence, a refusal with a stray ``;``) fails
-    at least one leg; anything that fails is treated as empty SCAD so the
-    loop's empty_scad fail-fast path handles it — the render worker never
-    spends a run compiling garbage.
+    at least one leg.
+
+    The caller decides the degraded behavior: the design loop treats a
+    reject as empty SCAD (its ``empty_scad`` fail-fast path handles it —
+    the render worker never spends a run compiling garbage); the
+    adapter's timeout-kept path (``design_loop_events``) suppresses
+    version creation instead.
     """
     if ";" not in scad:
         return False
@@ -1621,6 +1618,10 @@ def _scad_from_result(result: LLMResult) -> str:
     if len(candidate.encode("utf-8", "replace")) > MAX_SCAD_SOURCE_BYTES:
         return ""
     if not scad_looks_valid(candidate):
+        # The heuristic's caller-contract sentence (issue #417 review): the
+        # loop's empty-scad fail-fast handles it here; the adapter's
+        # timeout-kept path (design_loop_events) instead suppresses version
+        # creation entirely (no empty-scad path downstream of that gate).
         return ""
     return candidate
 
@@ -1790,14 +1791,17 @@ async def run_design_loop_async(
     # 120 s — the same scale as the render worker's 120 s subprocess
     # timeout; tests pass a small value). ``None`` (or a non-positive
     # value) disables the deadline — the loop runs to its 3-attempt cap
-    # as before the fix. The deadline does NOT kill the worker thread
-    # (it cannot): a slow call that outlives the window is abandoned and
-    # runs on to completion in the background off the event loop (the
-    # same contract the render worker's subprocess timeout has one level
-    # down). With up to 3 attempts × budget each, a slow model therefore
-    # holds up to 3 ``to_thread`` workers per concurrent loop — size the
-    # default executor accordingly when running many concurrent design
-    # loops against a slow model.
+    # as before the fix. The deadline is the SOLE loop-level timeout
+    # (the adapter's derived total is the same value; the httpx per-call
+    # timeout is per-PHASE — connect/read/write/pool — not a total, so a
+    # slow-but-not-hung call that trickles tokens is bounded by the
+    # deadline, not by the per-phase httpx cap): it CANCELS the design
+    # call (the async httpx request is interrupted — unlike the render
+    # worker's subprocess timeout, a cancelled coroutine does NOT run on
+    # to completion in the background). With up to 3 attempts × budget
+    # each, a slow model therefore holds up to 3 ``to_thread`` workers
+    # per concurrent loop — size the default executor accordingly when
+    # running many concurrent design loops against a slow model.
     for iteration in range(1, max_iterations + 1):
         _stamp_on_progress_iteration(on_progress, iteration)
         scad_co = _call(
@@ -1824,13 +1828,15 @@ async def run_design_loop_async(
                 scad = await asyncio.wait_for(scad_co, timeout=attempt_timeout)
             except asyncio.TimeoutError:
                 # The per-attempt deadline fired on the design call
-                # (issue #417): the slow call is abandoned (it runs on
-                # to completion in the background, off the event loop —
-                # the loop cannot kill a worker thread), and the run
-                # ends WITH the best candidate rendered so far ("keep
-                # the best candidate, say the model is slow"), never a
-                # fabricated empty result. An empty-iteration deadline
-                # (no candidate yet) is the honest zero-render case the
+                # (issue #417): the slow call is CANCELLED (asyncio.
+                # wait_for cancels the inner task, which interrupts the
+                # async httpx request — unlike the render worker's
+                # subprocess timeout, the call does NOT run on to
+                # completion in the background), and the run ends WITH
+                # the best candidate rendered so far ("keep the best
+                # candidate, say the model is slow"), never a fabricated
+                # empty result. An empty-iteration deadline (no
+                # candidate yet) is the honest zero-render case the
                 # adapter's "no version" path handles.
                 logger.warning(
                     "design loop attempt %s exceeded the %ss per-attempt "

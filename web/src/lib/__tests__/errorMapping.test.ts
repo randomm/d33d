@@ -66,7 +66,7 @@ describe("errorMapping", () => {
       expect(FAILURE_REASONS).toContain(reason);
       // The copy deck has a sentence for it (part 1).
       expect(
-        (copy.failure.reasons as unknown as Record<string, string>)[reason],
+        (copy.failure.reasons as Record<string, string>)[reason],
         `copy.failure.reasons must have an entry for ${reason}`,
       ).toBeTruthy();
       // The mapping returns that sentence, not the fallback.
@@ -78,7 +78,7 @@ describe("errorMapping", () => {
       // (the env-var helper sentence is rendered by the failure turn from
       // the frame's `env_var`, never folded into the mapped headline).
       expect(display.message).toBe(
-        (copy.failure.reasons as unknown as Record<string, string>)[reason],
+        (copy.failure.reasons as Record<string, string>)[reason],
       );
       // The raw reason is present for part 4 (collapsed).
       expect(display.detail).toBe(reason);
@@ -300,11 +300,7 @@ describe("errorMapping", () => {
       attempt_latency_seconds: 60,
       attempt_count: 2,
     });
-    expect(display.message).toBe(
-      (copy.failure.reasons as unknown as {
-        design_loop_slow_model: (seconds: number, count: number) => string;
-      }).design_loop_slow_model(60, 2),
-    );
+    expect(display.message).toBe(copy.failure.slowModelTimeout(60, 2));
     expect(display.message).not.toContain("stopped responding");
     expect(display.message).toContain("about 60s an attempt");
     expect(display.message).toContain("stopped after 2 tries");
@@ -329,9 +325,7 @@ describe("errorMapping", () => {
   it("the design_loop_timed_out copy no longer contains 'stopped responding' when measured values are present (issue #417)", () => {
     // The words "stopped responding" must not appear in the slow-model
     // copy — the cause is now stated as "the model is slow right now".
-    const slowCopy = (copy.failure.reasons as unknown as {
-      design_loop_slow_model: (seconds: number, count: number) => string;
-    }).design_loop_slow_model(60, 2);
+    const slowCopy = copy.failure.slowModelTimeout(60, 2);
     expect(slowCopy).not.toContain("stopped responding");
     expect(slowCopy).toContain("The model is slow right now");
   });

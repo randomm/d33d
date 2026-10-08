@@ -1749,16 +1749,21 @@ class _DeadlineKeptResult:
     fake views, no fabricated score.
 
     ``design_source_origin="timeout_kept"`` (issue #417) marks the
-    provenance on the result — informational for a future reader, never
-    read by the version write path.
+    provenance on the result for a future reader; the timeout's
+    structured ``failure_reason`` (:data:`DESIGN_LOOP_TIMED_OUT_REASON`)
+    is what the archive and the terminal frame carry.
+
+    The attribute set is deliberately minimal: ``_resolve_version_create``
+    reads ``best`` (and the ``scad_source`` / ``params`` kwargs), the
+    archive reads ``status`` / ``failure_reason`` / ``best`` — nothing
+    else touches this stub, so a shape-mimic beyond that (``iterations``
+    etc.) would be dead weight.
     """
 
     def __init__(self) -> None:
         self.status = "exhausted"
         self.best = None
-        self.iterations = ()
         self.failure_reason = DESIGN_LOOP_TIMED_OUT_REASON
-        self.iterations_used = 0
         self.design_source_origin = "timeout_kept"
 
 
@@ -2282,14 +2287,18 @@ async def run_design_loop_with_events(
                     _attempt_started[_iter] = _loop.time()
                 if isinstance(_iter, int) and _iter > _attempt_count:
                     _attempt_count = _iter
-            # The loop's total wall-clock budget is the per-attempt deadline
-            # times the iteration cap (issue #417 — derived, never a flat
-            # literal): the loop's OWN per-attempt deadline does the actual
-            # cutting off (``run_design_loop_async`` returns the
-            # best-so-far exhausted result when an attempt outlives its
-            # window), so this adapter deadline is a cut-off margin over
-            # the derived total — a legitimately slow run that finishes
-            # within its budget is never cut off here.
+            # The loop's total wall-clock budget (issue #417 — derived,
+            # never a flat literal): the per-attempt deadline times the
+            # iteration cap. The loop's OWN per-attempt deadline is the
+            # sole enforcement point for a slow run (``run_design_loop_
+            # async`` returns the best-so-far exhausted result when an
+            # attempt outlives its window — the normal exhaustion path
+            # versioning nothing, as every other exhausted loop does);
+            # this adapter deadline is a pure CUT-OFF margin over the
+            # derived total (a stalled run that stops yielding frames
+            # before the per-attempt deadline fires is killed here with
+            # the kept-candidate path) — a legitimately slow run that
+            # finishes within its budget is never cut off here.
             _total_deadline = (
                 DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS * MAX_ITERATIONS
             )
@@ -2320,6 +2329,118 @@ async def run_design_loop_with_events(
                     latencies.append(max(0.0, (end if end is not None else _now) - start))
                 return latencies
 
+            async def _deadline_outcome(
+                latencies: list[float],
+                attempt_count: int,
+            ) -> tuple[list[tuple[str, dict[str, Any]]], int | None]:
+                """The adapter-deadline cut-off: archive → keep-version →
+                terminal frames (issue #417).
+
+                The adapter deadline (a pure margin over the derived total
+                — the loop's per-attempt deadline is the normal slow-run
+                path and returns a best-so-far exhausted result through
+                the ordinary exhaustion handling below, versioning nothing
+                as every other exhausted loop does) fires only for a run
+                that stopped yielding frames before the per-attempt
+                deadline fired. When the loop surfaced a SCAD
+                (``_last_scad_source`` — best-effort: the production frame
+                contract (per-view markers) does not carry one, so a
+                loop that emitted none versions nothing), store it as a
+                version via ``_resolve_version_create`` — a NEW path
+                (exhausted loops are NOT versioned today). The candidate
+                is unvalidated (no render, no score, no bbox — the
+                deadline killed the run), so the result passed in is an
+                honest ``_DeadlineKeptResult`` (status ``exhausted``,
+                ``best`` ``None``) — never a fabricated pass. The SCAD is
+                validated with the loop's own ``scad_looks_valid``
+                heuristic before the version is written (a partial /
+                truncated LLM output must not become a version whose
+                geometry file is garbage). Best-effort: a version-creation
+                failure logs and degrades to no version (the timeout frame
+                still fires); the version is the user-facing bonus, not
+                the guarantee.
+
+                Returns ``(frames, kept_version_id)`` — the terminal
+                frames in FINAL ORDER (photo notice(s),
+                version-created when a kept version was stored, terminal
+                error) and the kept version's id (``None`` when nothing
+                was kept).
+                """
+                _avg_latency = (
+                    sum(latencies) / len(latencies) if latencies else None
+                )
+                logger.warning(
+                    "design loop for project %s exceeded the %ss "
+                    "derived total deadline (per-attempt %ss × %s "
+                    "attempts; measured %r s per attempt) — emitting "
+                    "terminal design_loop_timed_out frame",
+                    project_id,
+                    _total_deadline,
+                    DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS,
+                    MAX_ITERATIONS,
+                    latencies,
+                )
+                _archive_deadline(attempt_count, latencies)
+                _kept_version_id: int | None = None
+                if _last_scad_source and scad_looks_valid(_last_scad_source):
+                    try:
+                        _kept_version_id = await _resolve_version_create(
+                            app,
+                            project_id,
+                            _DeadlineKeptResult(),
+                            user_message,
+                            stated_axes=stated_axes,
+                            scad_source=_last_scad_source,
+                            params=_scad_params(_last_scad_source),
+                        )
+                    except Exception:
+                        logger.exception(
+                            "kept-candidate version creation failed for "
+                            "project %s — emitting the timeout frame "
+                            "without a version",
+                            project_id,
+                        )
+                        _kept_version_id = None
+                _error_data: dict[str, Any] = {
+                    "message": (
+                        "Design loop timed out after "
+                        f"{int(_total_deadline)}s"
+                    ),
+                    "reason": DESIGN_LOOP_TIMED_OUT_REASON,
+                }
+                # The measured per-attempt latency (the SPA renders it in
+                # the slow-model copy: "about Ns an attempt" — rounded to
+                # a whole second; omit-not-null when no attempt was
+                # timed). Omitted when no attempt was observed (a stall
+                # that never rendered) — the copy then falls back to the
+                # budget constant. The slow-model copy requires BOTH this
+                # field and ``attempt_count`` (the SPA's invariant: never
+                # render a number the SPA has not established), so a
+                # frame with only the count degrades to the generic copy.
+                if _avg_latency is not None:
+                    _error_data["attempt_latency_seconds"] = (
+                        round(_avg_latency)
+                    )
+                if attempt_count > 0:
+                    _error_data["attempt_count"] = attempt_count
+                frames: list[tuple[str, dict[str, Any]]] = _yield_notice()
+                # Build the terminal frames in FINAL ORDER (issue #417
+                # review — the old ``insert(0, ...)`` silently reversed
+                # the order): [photo notice(s), version-created (when a
+                # kept version was stored), terminal error].
+                if _kept_version_id is not None:
+                    frames.append(
+                        (
+                            "progress",
+                            {
+                                "step": "version-created",
+                                "version_id": _kept_version_id,
+                            },
+                        )
+                    )
+                frames.append(("error", _error_data))
+                return frames, _kept_version_id
+
             while True:
                 if render_task.done():
                     break
@@ -2338,96 +2459,9 @@ async def run_design_loop_with_events(
                     # yielded after this one (the deadline frame is
                     # terminal by contract).
                     _latencies = _attempt_latencies(_attempt_count)
-                    _avg_latency = (
-                        sum(_latencies) / len(_latencies) if _latencies else None
+                    _deadline_frames, _kept_version_id = await _deadline_outcome(
+                        _latencies, _attempt_count
                     )
-                    logger.warning(
-                        "design loop for project %s exceeded the %ss "
-                        "derived total deadline (per-attempt %ss × %s "
-                        "attempts; measured %r s per attempt) — emitting "
-                        "terminal design_loop_timed_out frame",
-                        project_id,
-                        _total_deadline,
-                        DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS,
-                        MAX_ITERATIONS,
-                        _latencies,
-                    )
-                    _archive_deadline(_attempt_count, _latencies)
-                    # Issue #417 — the timeout-version path: when the
-                    # adapter's deadline fired and the loop surfaced a
-                    # SCAD (``_last_scad_source``), the adapter stores it
-                    # as a version via ``_resolve_version_create`` — a NEW
-                    # path (exhausted loops are NOT versioned today). The
-                    # candidate is unvalidated (no render, no score, no
-                    # bbox — the deadline killed the run), so the result
-                    # passed in is an honest ``_DeadlineKeptResult``
-                    # (status ``exhausted``, ``best`` ``None``) — never a
-                    # fabricated pass with a fake render / views / score.
-                    # The SCAD is validated with the loop's own
-                    # ``scad_looks_valid`` heuristic before the version is
-                    # written (a partial / truncated LLM output that the
-                    # deadline caught mid-stream must not become a version
-                    # whose geometry file is garbage). Best-effort: a
-                    # version-creation failure logs and degrades to no
-                    # version (the timeout frame still fires); the version
-                    # is the user-facing bonus, not the guarantee.
-                    _kept_version_id: int | None = None
-                    if _last_scad_source and scad_looks_valid(_last_scad_source):
-                        try:
-                            _kept_version_id = await _resolve_version_create(
-                                app,
-                                project_id,
-                                _DeadlineKeptResult(),
-                                user_message,
-                                stated_axes=stated_axes,
-                                scad_source=_last_scad_source,
-                                params=_scad_params(_last_scad_source),
-                            )
-                        except Exception:
-                            logger.exception(
-                                "kept-candidate version creation failed for "
-                                "project %s — emitting the timeout frame "
-                                "without a version",
-                                project_id,
-                            )
-                            _kept_version_id = None
-                    _error_data: dict[str, Any] = {
-                        "message": (
-                            "Design loop timed out after "
-                            f"{int(_total_deadline)}s"
-                        ),
-                        "reason": DESIGN_LOOP_TIMED_OUT_REASON,
-                    }
-                    # The measured per-attempt latency (the SPA renders it
-                    # in the slow-model copy: "about Ns an attempt" —
-                    # rounded to a whole second; omit-not-null when no
-                    # attempt was timed). Omitted when no attempt was
-                    # observed (a stall that never rendered) — the copy
-                    # then falls back to the budget constant.
-                    if _avg_latency is not None:
-                        _error_data["attempt_latency_seconds"] = (
-                            round(_avg_latency)
-                        )
-                    if _attempt_count > 0:
-                        _error_data["attempt_count"] = _attempt_count
-                    _deadline_frames: list[tuple[str, dict[str, Any]]] = (
-                        _yield_notice()
-                    )
-                    # Build the terminal frames in FINAL ORDER (issue #417
-                    # review — the old ``insert(0, ...)`` silently reversed
-                    # the order): [photo notice(s), version-created (when a
-                    # kept version was stored), terminal error].
-                    if _kept_version_id is not None:
-                        _deadline_frames.append(
-                            (
-                                "progress",
-                                {
-                                    "step": "version-created",
-                                    "version_id": _kept_version_id,
-                                },
-                            )
-                        )
-                    _deadline_frames.append(("error", _error_data))
                     for _f in _deadline_frames:
                         yield _f
                     # Cancel the ``to_thread`` render task AFTER the frame
