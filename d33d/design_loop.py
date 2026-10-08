@@ -66,7 +66,7 @@ from typing import Any, Literal
 from d33d.config.catalogue import Catalogue
 from d33d.config.probes import CapabilityResult
 from d33d.config.resolve import resolve_model
-from d33d.design_llm import LLMResult, send
+from d33d.design_llm import LLM_CALL_TIMEOUT_SECONDS, LLMResult, send
 from d33d.failure_classes import (
     REPAIRABLE_CLASSES,
     ClassifiedFailure,
@@ -393,6 +393,13 @@ class DesignResult:
     iterations_used: int = 0
     env_var: str | None = None
     renderer_detail: dict[str, str] | None = None
+    #: Provenance of the timeout-version path (issue #417): the adapter
+    #: stamps ``"timeout_kept"`` when it versions a candidate kept after
+    #: the adapter deadline fired (an unvalidated candidate — no render
+    #: artifact, no score, bbox ``None``). ``None`` on the ordinary
+    #: pass/exhausted path. Informational: downstream consumers read the
+    #: render/bbox fields (all honestly absent) rather than this flag.
+    design_source_origin: str | None = None
 
 
 #: Structured failure reasons for an exhausted loop, in bit order — each
@@ -1656,7 +1663,7 @@ async def run_design_loop_async(
     on_progress_iteration: Any = "_current",
     renderer_check: Callable[[], bool] | None = None,
     image_check: Callable[[], dict[str, str] | None] | None = None,
-    attempt_timeout: float | None = None,
+    attempt_timeout: float | None = LLM_CALL_TIMEOUT_SECONDS,
 ) -> DesignResult:
     """Run the bounded iterate-and-score design loop (async core).
 
@@ -1776,71 +1783,45 @@ async def run_design_loop_async(
     consecutive_no_improvement = 0
     iterations: list[IterationRecord] = []
 
-    # The per-attempt wall-clock deadline (issue #417): each iteration
-    # gets its OWN budget — the design LLM call + render + scoring — so
-    # three slow attempts are not cut off by one flat total. The budget
-    # is the adapter's ``DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS`` (120 s)
-    # read through the module (tests monkeypatch it); a negative or zero
-    # ``attempt_timeout`` disables the deadline (the loop then runs to
-    # its 3-attempt cap, as before the fix — used by tests that need the
-    # pre-#417 flat-total behaviour). The deadline does NOT kill the
-    # worker thread (it cannot); a slow call that outlives the window is
-    # simply never awaited to completion — the loop returns the
-    # best-so-far exhausted result instead, and the abandoned call runs
-    # on to completion in the background off the event loop (the same
-    # "the loop returns, the call finishes in the background" contract
-    # the render worker's subprocess timeout has one level down).
-    _attempt_budget: float | None = (
-        attempt_timeout if attempt_timeout is not None else None
-    )
-
+    # The per-attempt wall-clock deadline (issue #417): each design LLM
+    # call gets its OWN budget so three slow attempts are not cut off by
+    # one flat total. The budget is ``attempt_timeout`` (the production
+    # wiring defaults it to the loop's :data:`LLM_CALL_TIMEOUT_SECONDS`,
+    # 120 s — the same scale as the render worker's 120 s subprocess
+    # timeout; tests pass a small value). ``None`` (or a non-positive
+    # value) disables the deadline — the loop runs to its 3-attempt cap
+    # as before the fix. The deadline does NOT kill the worker thread
+    # (it cannot): a slow call that outlives the window is abandoned and
+    # runs on to completion in the background off the event loop (the
+    # same contract the render worker's subprocess timeout has one level
+    # down). With up to 3 attempts × budget each, a slow model therefore
+    # holds up to 3 ``to_thread`` workers per concurrent loop — size the
+    # default executor accordingly when running many concurrent design
+    # loops against a slow model.
     for iteration in range(1, max_iterations + 1):
         _stamp_on_progress_iteration(on_progress, iteration)
-        if _attempt_budget is None:
-            scad = await _call(
-                llm_fn,
-                "design",
-                _design_messages(
-                    photo=photo,
-                    chat_history=chat_history,
-                    stated=stated_dims,
-                    repair=repair,
-                    request=request,
-                    state_params=state_params,
-                    state_bbox=state_bbox,
-                    state_stated=state_stated,
-                    state_meta=state_meta,
-                    state_confirmed=state_confirmed,
-                    design_source=design_source,
-                    part_scale=part_scale,
-                ),
-                _design_system(stated_dims, part_scale),
-            )
-        else:
-            _attempt_started_at = time.monotonic()
+        scad_co = _call(
+            llm_fn,
+            "design",
+            _design_messages(
+                photo=photo,
+                chat_history=chat_history,
+                stated=stated_dims,
+                repair=repair,
+                request=request,
+                state_params=state_params,
+                state_bbox=state_bbox,
+                state_stated=state_stated,
+                state_meta=state_meta,
+                state_confirmed=state_confirmed,
+                design_source=design_source,
+                part_scale=part_scale,
+            ),
+            _design_system(stated_dims, part_scale),
+        )
+        if attempt_timeout is not None and attempt_timeout > 0:
             try:
-                scad = await asyncio.wait_for(
-                    _call(
-                        llm_fn,
-                        "design",
-                        _design_messages(
-                            photo=photo,
-                            chat_history=chat_history,
-                            stated=stated_dims,
-                            repair=repair,
-                            request=request,
-                            state_params=state_params,
-                            state_bbox=state_bbox,
-                            state_stated=state_stated,
-                            state_meta=state_meta,
-                            state_confirmed=state_confirmed,
-                            design_source=design_source,
-                            part_scale=part_scale,
-                        ),
-                        _design_system(stated_dims, part_scale),
-                    ),
-                    timeout=max(0.0, _attempt_budget - (time.monotonic() - _attempt_started_at)),
-                )
+                scad = await asyncio.wait_for(scad_co, timeout=attempt_timeout)
             except asyncio.TimeoutError:
                 # The per-attempt deadline fired on the design call
                 # (issue #417): the slow call is abandoned (it runs on
@@ -1856,7 +1837,7 @@ async def run_design_loop_async(
                     "deadline — returning the best-so-far candidate "
                     "(%d iteration(s) completed)",
                     iteration,
-                    _attempt_budget,
+                    attempt_timeout,
                     len(iterations),
                 )
                 return _exhausted(
@@ -1865,6 +1846,8 @@ async def run_design_loop_async(
                     best_score,
                     failure_reason="design_loop_timed_out",
                 )
+        else:
+            scad = await scad_co
         design_hash = scad.prompt_hash
         if log is not None:
             log("design", design_hash, scad.status)
