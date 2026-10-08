@@ -215,16 +215,18 @@ vi.mock('three', async () => {
 });
 
 vi.mock('three/addons/controls/OrbitControls.js', () => ({
-  OrbitControls: vi.fn().mockImplementation(() => ({
-    enableDamping: false,
-    dampingFactor: 0,
-    minDistance: 0,
-    maxDistance: Infinity,
-    update: vi.fn(),
-    dispose: vi.fn(),
-    addEventListener: vi.fn(),
-    removeEventListener: vi.fn(),
-  })),
+  OrbitControls: vi.fn().mockImplementation(function () {
+    return {
+      enableDamping: false,
+      dampingFactor: 0,
+      minDistance: 0,
+      maxDistance: Infinity,
+      update: vi.fn(),
+      dispose: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    };
+  }),
 }));
 
 // Mirror the real three.js loader behaviour: binary STL / GLB parse bytewise
@@ -233,7 +235,8 @@ vi.mock('three/addons/controls/OrbitControls.js', () => ({
 // component's catch path). A valid fixture is the committed binary file itself
 // (mini-box.stl / mini-model.glb), which passes the header check.
 vi.mock('three/addons/loaders/STLLoader.js', () => ({
-  STLLoader: vi.fn().mockImplementation(() => ({
+  STLLoader: vi.fn().mockImplementation(function () {
+    return {
     parse: vi.fn((buffer: ArrayBuffer) => {
       // Header/format validation mirrors the real STLLoader.isBinary exactly:
       // binary STL must match 80-byte header + face-count + face array, ASCII
@@ -262,11 +265,13 @@ vi.mock('three/addons/loaders/STLLoader.js', () => ({
       (geo as { getAttribute: (n: string) => unknown }).getAttribute = vi.fn(() => null);
       return geo;
     }),
-  })),
+    };
+  }),
 }));
 
 vi.mock('three/addons/loaders/GLTFLoader.js', () => ({
-  GLTFLoader: vi.fn().mockImplementation(() => ({
+  GLTFLoader: vi.fn().mockImplementation(function () {
+    return {
     parse: vi.fn(
       (
         buffer: ArrayBuffer,
@@ -297,7 +302,8 @@ vi.mock('three/addons/loaders/GLTFLoader.js', () => ({
         resolve({ scene: new Scene() });
       },
     ),
-  })),
+    };
+  }),
 }));
 
 // ---------------------------------------------------------------------------
