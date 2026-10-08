@@ -580,6 +580,38 @@ class TestFeatureVerbClauseAbstain:
         result = classify("add a 10 mm wide slot across the top, 5 mm deep")
         assert result.absolute == {}
 
+    def test_sub_clause_index_is_global_position(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """#413: classify() must pass each sub-clause its 0-based index in
+        the FLATTENED sub-clause list, not a local index within its
+        top-level clause. 'a 40 mm wide box and 50 mm deep, add a 5 mm
+        wide slot' flattens to three sub-clauses; the last one sits at
+        index 2, where feature_clause_start also points. A local index
+        (1) would break the at-or-after gate for a later feature clause.
+        The spy delegates to the real implementation, so output is
+        unchanged — this pins the index contract itself."""
+        import d33d.feature_clause as fc
+
+        # The gate reads ``feature_clause_suppresses`` through the module
+        # attribute, so patch it in the module namespace.
+        seen: list[tuple[str, int]] = []
+        real = fc.feature_clause_suppresses
+
+        def spy(clause, cue_words, **kw):
+            seen.append((clause, kw["sub_clause_index"]))
+            return real(clause, cue_words, **kw)
+
+        monkeypatch.setattr(fc, "feature_clause_suppresses", spy)
+        result = classify(
+            "a 40 mm wide box and 50 mm deep, add a 5 mm wide slot"
+        )
+        assert result.absolute == {"W": 40.0, "D": 50.0}
+        indices = {clause: idx for clause, idx in seen}
+        assert indices == {
+            "a 40 mm wide box": 0,
+            "50 mm deep": 1,
+            "add a 5 mm wide slot": 2,
+        }, f"global position contract broken: {seen}"
+
     def test_feature_verb_positions_never_state(self) -> None:
         """Position phrases ('15 mm from the left edge', '10 mm from the
         top', 'centred front to back') never state an axis — they have no

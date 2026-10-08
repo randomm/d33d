@@ -586,23 +586,25 @@ def classify(message: str) -> Cues:
     all_cue_words: list[str] = []
     all_mapped_numbers: set[float] = set()
 
-    for global_sub_idx, clause in enumerate(clauses):
-        # Try splitting on "and" within this clause.
-        sub_clauses = _split_on_and(clause)
-        for local_idx, sub in enumerate(sub_clauses):
-            abs_c, rel_c, glob_c, words_c = _classify_clause(
-                sub,
-                sub_clause_index=global_sub_idx + local_idx,
-                feature_clause_start=fc_start,
-            )
-            for axis, val in abs_c.items():
-                all_absolute[axis] = val
-                all_mapped_numbers.add(val)
-            all_relative |= rel_c
-            all_global |= glob_c
-            for w in words_c:
-                if w not in all_cue_words:
-                    all_cue_words.append(w)
+    for global_sub_idx, clause in enumerate(all_sub_clauses):
+        # Each sub-clause carries its GLOBAL 0-based index in the flattened
+        # list (issue #413) — the same coordinate space as
+        # ``feature_clause_start``. A per-top-level-clause (local) index
+        # would misplace the at-or-after gate once a top-level clause holds
+        # more than one sub-clause ("a 40 mm wide box and 50 mm deep, …").
+        abs_c, rel_c, glob_c, words_c = _classify_clause(
+            clause,
+            sub_clause_index=global_sub_idx,
+            feature_clause_start=fc_start,
+        )
+        for axis, val in abs_c.items():
+            all_absolute[axis] = val
+            all_mapped_numbers.add(val)
+        all_relative |= rel_c
+        all_global |= glob_c
+        for w in words_c:
+            if w not in all_cue_words:
+                all_cue_words.append(w)
 
     has_any_number = _has_number(message)
     has_percent: bool = False

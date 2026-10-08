@@ -269,8 +269,9 @@ def feature_clause_suppresses(
     ``feature_noun_re`` are passed in (rather than imported) to keep this
     module a leaf — the dependency direction to ``axis_lexicon`` is
     one-way. ``feature_clause_start`` is passed in from
-    ``axis_lexicon._classify_clause`` (the caller knows where the
-    feature clause begins in the full message).
+    ``axis_lexicon.classify`` (the caller has computed it over the full
+    message, so the two indices live in the same global coordinate
+    space).
     """
     has_feature_verb = _has_feature_verb(clause, feature_verb_re)
     has_feature_noun = feature_noun_re.search(clause) is not None
