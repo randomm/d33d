@@ -9,7 +9,9 @@ wires them into its wait loop.
 
 The adapter's safety net is a GENEROUS outer deadline (per-attempt budget
 × iteration cap + margin) that fires only for a run that stops yielding
-frames before the loop's own per-attempt deadline can. A slow model is
+frames before the loop's own per-attempt deadline can (the full two-tier
+timeout design is documented in
+``d33d.design_loop._await_with_per_attempt_deadline``). A slow model is
 handled by the loop, which returns its best-so-far result through the
 ordinary exhaustion path; the safety net never versions a candidate —
 it only archives and reports.

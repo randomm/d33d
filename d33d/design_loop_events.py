@@ -68,22 +68,15 @@ EMPTY_PHOTO_DATA_URI = (
     "SUVORK5CYII="
 )
 
-#: Wall-clock deadline for ONE design iteration (one attempt: the design
-#: LLM call + render + scoring), in seconds (issue #417). The per-attempt
-#: budget is the single named constant
+#: Wall-clock deadline for the design loop's per-attempt LLM CALL (issue
+#: #417), in seconds — the single named constant
 #: :data:`d33d.design_loop.DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS` (120 s)
-#: imported into this module — the loop's ``attempt_timeout`` default and
-#: this adapter's derived safety-net total both read it (one definition,
-#: issue #417). 120 s matches the render worker's own bounded-subprocess
-#: model (``render_worker.run_container``'s 120 s timeout) one level up —
-#: an attempt is never cut off mid-render — and equals the per-LLM-call
-#: hang guard (``d33d.design_llm.LLM_CALL_TIMEOUT_SECONDS``, 120 s): a
-#: slow model trips the INNER per-call timeout first (httpx raises
-#: ``httpx.TimeoutException``) and a hung one trips this OUTER deadline —
-#: both lead to the same keep-best ``design_loop_timed_out`` result. Must
-#: be read as a module-level constant inside the adapter's wait loop (so
-#: tests can ``monkeypatch.setattr`` it to a small value — the same
-#: pattern as ``versions_routes._DRAIN_TIMEOUT_SECONDS``), never inlined.
+#: imported into this module; the full two-tier timeout design is
+#: documented in one place:
+#: ``d33d.design_loop._await_with_per_attempt_deadline``. Must be read as
+#: a module-level constant inside the adapter's wait loop (so tests can
+#: ``monkeypatch.setattr`` it to a small value — the same pattern as
+#: ``versions_routes._DRAIN_TIMEOUT_SECONDS``), never inlined.
 
 #: The margin over the derived total (per-attempt × MAX_ITERATIONS, 360 s)
 #: the adapter's OUTER SAFETY NET deadline adds (issue #417): 60 s of
@@ -1837,10 +1830,10 @@ async def run_design_loop_with_events(
         )
         or request_text,
         "on_progress": _on_progress,
-        # Issue #417: the loop's per-attempt deadline — the loop is the
-        # SOLE owner of the time budget (each attempt is bounded by its
-        # own named constant); this adapter's deadline below is a
-        # generous outer safety net only.
+        # Issue #417: the loop's per-attempt LLM-call deadline (full
+        # design in d33d.design_loop._await_with_per_attempt_deadline);
+        # this adapter's deadline below is a generous outer safety net
+        # only.
         "attempt_timeout": DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS,
     }
 
@@ -2134,9 +2127,10 @@ async def run_design_loop_with_events(
             # user-visible guarantee (the hook's errors-swallowed
             # contract elsewhere).
 
-            # The loop's OWN per-attempt deadline (issue #417 — the loop
-            # is the SOLE owner of the time budget) does the actual
-            # cutting off for a slow model: ``run_design_loop_async``
+            # The loop's OWN per-attempt deadline (issue #417 — full
+            # design in
+            # d33d.design_loop._await_with_per_attempt_deadline) does the
+            # actual cutting off for a slow model: ``run_design_loop_async``
             # returns a best-so-far exhausted result with the structured
             # ``design_loop_timed_out`` reason, and the ordinary
             # exhaustion path below surfaces it (and version-creates the
@@ -2515,9 +2509,10 @@ async def run_design_loop_with_events(
         if mismatches is not None:
             error_data["mismatches"] = mismatches
         # Issue #417 — the timeout-version path: when the loop's own
-        # per-attempt deadline fired (the loop is the SOLE owner of the
-        # time budget — a slow model hits it, the adapter's deadline
-        # below never does) and the loop kept a rendered best candidate
+        # per-attempt LLM-call deadline fired (full design in
+        # d33d.design_loop._await_with_per_attempt_deadline — a slow
+        # model hits it, the adapter's deadline below never does) and
+        # the loop kept a rendered best candidate
         # (a real, scored ``IterationRecord`` — never unvalidated text),
         # version it BEFORE the terminal error frame — the same
         # frame order the adapter-deadline path uses (version-created
