@@ -3388,6 +3388,65 @@ def test_stack_height_repair_scad_source_equals_iteration_scad():
     assert first.repair["scad_source"] != ""
 
 
+def test_stack_height_h_tagged_total_height_no_double_fire():
+    """Issue #409 (axis interaction): when the model declares
+    ``total_height = 11;`` (a literal) and tags it with axis H in the
+    param metadata, bit 5 (axis_params_mismatch) fires FIRST (11 vs
+    measured Z 4 > threshold), routing the repair and setting
+    ``next_repair``. The stack check then abstains because
+    ``next_repair is not None`` — no double-fire. The repair evidence
+    is the bit-5 evidence (``axis_params_mismatch``), NOT the stack
+    check's ``declared stack sum`` evidence."""
+    # A SCAD with BOTH a literal total_height AND a derived sum. The
+    # literal total_height is what bit 5 sees (via _scad_params / extract_named_params).
+    # The derived sum (skirt_total_height) is what the stack check sees.
+    scad = (
+        "plate_thickness = 4;\n"
+        "rim_drop = 2;\n"
+        "skirt_height = 5;\n"
+        "base_height = plate_thickness + rim_drop;\n"
+        "skirt_total_height = base_height + skirt_height;\n"
+        "total_height = 11;\n"
+        "cube([20, 20, 4]);\n"
+    )
+    # Build an LLM result that also carries param_meta with total_height tagged H.
+    meta_llm = _scad_llm(scad)
+    # Override tool_calls to include parameters with total_height axis H.
+    meta_llm = LLMResult(
+        content=meta_llm.content,
+        tool_calls=(
+            {
+                "name": "emit_design",
+                "arguments": {
+                    "scad": scad,
+                    "parameters": [
+                        {"name": "total_height", "label": "Total height", "unit": "mm", "axis": "H", "reason": "overall stack"},
+                    ],
+                },
+            },
+        ),
+        prompt_hash=meta_llm.prompt_hash,
+        tier=meta_llm.tier,
+        status=meta_llm.status,
+        request_body=meta_llm.request_body,
+    )
+    stated = (20.0, 20.0, 0.0)
+    result = run_design_loop(
+        photo=PHOTO,
+        stated_dims=stated,
+        render_fn=lambda scad_src, defines: _render(),
+        llm_fn=lambda role, messages, system: meta_llm,
+        bbox_fn=lambda r: BboxInfo(20.0, 20.0, 4.0, 400.0),
+    )
+    first = result.iterations[0]
+    # A repair was routed (bit 5 or stack — one of them, not both).
+    assert first.repair is not None
+    # The evidence is NOT the stack check's "declared stack sum" — it is
+    # the axis_params_mismatch evidence (bit 5 fired first, set next_repair,
+    # suppressing the stack check).
+    assert "declared stack sum" not in first.repair["evidence"]
+
+
 def test_stack_height_imported_part_abstains():
     """Issue #409 (edge case, #383): when the project has an imported
     part (``part_scale`` is not None), the stack-height check abstains —

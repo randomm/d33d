@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Any
 
 from d33d.config.catalogue import Catalogue, resolve_call_params
+from d33d.design_llm import TOTAL_HEIGHT_INSTRUCTION
 from d33d.design_loop import _dim_axis_list
 from d33d.import_guard import PART_STL_NAME
 
@@ -119,17 +120,7 @@ SCREW_CLEARANCE_INSTRUCTION = (
     "the clearance in the parameter's reason."
 )
 
-#: The overall-height declaration instruction (issue #409): when the part
-#: is a stack of features, the model declares the part's overall height as
-#: a derived parameter named ``total_height`` (a sum of its stacked
-#: component parameters), so the loop's stack-height post-check has a
-#: declared sum to compare against the measured Z.
-TOTAL_HEIGHT_INSTRUCTION = (
-    "When the part is a stack of features (multiple features stacked "
-    "along the Z axis), declare the part's overall height as a derived "
-    "parameter named `total_height` — a sum of its stacked component "
-    "height parameters (e.g. `total_height = base_height + skirt_height`)."
-)
+
 
 
 def clearance_rows_line(table: dict[str, float] = METRIC_SCREW_CLEARANCE_MM) -> str:
