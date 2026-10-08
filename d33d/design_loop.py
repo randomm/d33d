@@ -66,7 +66,7 @@ from typing import Any, Literal
 from d33d.config.catalogue import Catalogue
 from d33d.config.probes import CapabilityResult
 from d33d.config.resolve import resolve_model
-from d33d.design_llm import TOTAL_HEIGHT_INSTRUCTION, LLMResult, send
+from d33d.design_llm import LLMResult, send
 from d33d.failure_classes import (
     REPAIRABLE_CLASSES,
     ClassifiedFailure,
@@ -1354,11 +1354,7 @@ def _design_messages(
         "characters>` — e.g. `// title: Bore to 38 mm`. Every stated "
         "dimension and any FDM tolerance must be a named parameter in a "
         "top variable block, never an inline literal. "
-        # Issue #409 (task-prompt): the derived total_height instruction —
-        # the SAME constant the T0 tool schema, _design_system and
-        # design_prompt render (the #317 single-source pattern).
-        + TOTAL_HEIGHT_INSTRUCTION
-        + " Name every parameter "
+        "Name every parameter "
         "with full words in snake_case — readable identifiers, not "
         "abbreviations (BAD: `fst` for a fillet size; GOOD: `fillet_size_top`). "
         "Reply with a single "

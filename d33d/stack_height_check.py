@@ -277,9 +277,15 @@ def declared_stack_sum(scad_source: str) -> tuple[float, tuple[str, ...]] | None
 
     When several qualify, the LARGEST wins (the declared overall height
     — a part's total outranks its sub-totals). ``None`` when no such
-    sum is readable (no declarations, unbalanced brackets, or a
-    declaration with an unreadable RHS — the abstain cases: a fabricated
-    stack is worse than no stack).
+    sum is readable (no declarations, unbalanced brackets — the abstain
+    cases: a fabricated stack is worse than no stack).
+
+    Declarations that do not resolve to a constant (function calls,
+    vectors, ``$``-variables, or names shadowed across module scopes)
+    are SKIPPED — the check evaluates what it can and abstains on the
+    individual declaration, never on the whole file. This keeps the gate
+    alive on real model SCADs that mix resolvable and unresolvable
+    declarations in the same parameter block.
     """
     s = _strip(scad_source)
     for open_c, close_c in (("(", ")"), ("[", "]"), ("{", "}")):
@@ -293,10 +299,11 @@ def declared_stack_sum(scad_source: str) -> tuple[float, tuple[str, ...]] | None
     for m in _DECL_RE.finditer(s):
         name, rhs = m.group(1), m.group(2).strip()
         if name in decls:
-            logger.info(
-                "stack-height check abstained: parameter %r declared twice", name
+            logger.debug(
+                "stack-height check: parameter %r declared twice, skipping",
+                name,
             )
-            return None
+            continue
         decls[name] = rhs
     if not decls:
         logger.info("stack-height check abstained: no parameter block")
@@ -306,13 +313,17 @@ def declared_stack_sum(scad_source: str) -> tuple[float, tuple[str, ...]] | None
     for name, rhs in decls.items():
         value = _eval_add(rhs, env)
         if value is None or math.isnan(value) or math.isinf(value):
-            logger.info(
-                "stack-height check abstained: declaration %r does not resolve "
-                "to a constant",
+            logger.debug(
+                "stack-height check: declaration %r does not resolve, skipping",
                 name,
             )
-            return None
+            continue
         env[name] = value
+    if not env:
+        logger.info(
+            "stack-height check abstained: no declaration resolves to a constant"
+        )
+        return None
 
     best: tuple[float, tuple[str, ...]] | None = None
     for name, rhs in decls.items():

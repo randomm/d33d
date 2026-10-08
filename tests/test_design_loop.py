@@ -3439,11 +3439,13 @@ def test_stack_height_h_tagged_total_height_no_double_fire():
         bbox_fn=lambda r: BboxInfo(20.0, 20.0, 4.0, 400.0),
     )
     first = result.iterations[0]
-    # A repair was routed (bit 5 or stack — one of them, not both).
+    # Bit 5 fired: the failure class is axis_params_mismatch (not
+    # geometrically_wrong), and the evidence is the bit-5 format
+    # ("Total height = 11 but the part measures 4 on H"), NOT the stack
+    # check's "declared stack sum" evidence.
+    assert first.failure_class == "axis_params_mismatch"
     assert first.repair is not None
-    # The evidence is NOT the stack check's "declared stack sum" — it is
-    # the axis_params_mismatch evidence (bit 5 fired first, set next_repair,
-    # suppressing the stack check).
+    assert "Total height = 11 but the part measures 4 on H" in first.repair["evidence"]
     assert "declared stack sum" not in first.repair["evidence"]
 
 

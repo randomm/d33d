@@ -121,8 +121,6 @@ SCREW_CLEARANCE_INSTRUCTION = (
 )
 
 
-
-
 def clearance_rows_line(table: dict[str, float] = METRIC_SCREW_CLEARANCE_MM) -> str:
     """One line of ``M4 = 4.5 mm`` rows, rendered from the table.
 

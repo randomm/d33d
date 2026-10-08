@@ -133,16 +133,31 @@ def test_declared_stack_sum_no_plus_abstains():
 
 def test_declared_stack_sum_unresolvable_rhs_abstains():
     """A declaration whose RHS is not a resolvable constant (a
-    function call, a vector) abstains — never a fabricated stack."""
+    function call, a vector) is SKIPPED — the check evaluates the
+    remaining declarations and finds the stack among them. A SCAD where
+    ALL declarations are unresolvable abstains entirely."""
+    # `r = sqrt(a)` is unresolvable (function call) — skipped. The
+    # remaining declarations resolve: total_height = a + b = 6.
     scad = (
         "a = 4;\nb = 2;\n"
         "r = sqrt(a);\n"
         "total_height = a + b;\n"
         "cube([a, a, a]);\n"
     )
-    assert declared_stack_sum(scad) is None
-    scad2 = "total_height = [1, 2] + 3;\n"
+    total, refs = declared_stack_sum(scad)
+    assert total == 6.0
+    assert set(refs) == {"a", "b"}
+    # A SCAD where the ONLY height-named sum depends on an unresolvable
+    # declaration abstains (the sum is not in the resolvable env).
+    scad2 = (
+        "r = sqrt(4);\n"
+        "total_height = r + 3;\n"
+        "cube([4, 4, 4]);\n"
+    )
     assert declared_stack_sum(scad2) is None
+    # A vector-only SCAD (no resolvable declarations at all) abstains.
+    scad3 = "total_height = [1, 2] + 3;\n"
+    assert declared_stack_sum(scad3) is None
 
 
 def test_declared_stack_sum_not_a_true_sum_abstains():
@@ -349,3 +364,66 @@ def test_fixture_gate_verdicts(z, expected):
     for fixture in ("v65-lid-difference-inversion.scad", "lid-correct-union.scad"):
         det = stack_height_check(_scad(fixture), z)
         assert det == expected, f"{fixture} @ Z={z}: {det!r} != {expected!r}"
+
+
+# ---------------------------------------------------------------------------
+# Over-abstention: unresolvable and duplicate declarations are SKIPPED,
+# not aborts — the gate stays alive on real model SCADs that mix
+# resolvable and unresolvable declarations in the same parameter block.
+# ---------------------------------------------------------------------------
+
+
+def test_declared_stack_sum_skips_unresolvable_and_finds_stack():
+    """A function call in one declaration does not abort the whole file —
+    the unresolvable declaration is skipped and the stack is found among
+    the remaining resolvable declarations (the v59 shape: a plate with a
+    derived hole_radius alongside a total_height sum)."""
+    scad = (
+        "plate_width = 120;\n"
+        "plate_thickness = 6;\n"
+        "screw_hole_diameter = 4;\n"
+        "screw_hole_clearance = 0.5;\n"
+        "hole_radius = (screw_hole_diameter + screw_hole_clearance) / 2;\n"
+        "base_height = 4;\n"
+        "skirt_height = 5;\n"
+        "total_height = base_height + skirt_height;\n"
+        "cube([plate_width, plate_width, total_height]);\n"
+    )
+    total, refs = declared_stack_sum(scad)
+    assert total == 9.0
+    assert set(refs) == {"base_height", "skirt_height"}
+
+
+def test_declared_stack_sum_skips_duplicate_declaration():
+    """A name declared twice: the first occurrence wins, the second is
+    skipped (the v100 shape: multi-line cylinder arguments that the
+    line-leading regex misreads as a re-declaration of ``center``)."""
+    scad = (
+        "part_width_mm = 120;\n"
+        "part_depth_mm = 80;\n"
+        "part_height_mm = 6;\n"
+        "cut_depth = part_depth_mm + 10;\n"
+        "base_height = 4;\n"
+        "skirt_height = 5;\n"
+        "total_height = base_height + skirt_height;\n"
+        "cylinder(d = part_width_mm, h = part_height_mm,\n"
+        "         center = true);\n"
+        "cube([part_width_mm, part_depth_mm, total_height]);\n"
+    )
+    # ``center`` appears twice (the multi-line cylinder args) — skipped.
+    # The stack is still found.
+    total, refs = declared_stack_sum(scad)
+    assert total == 9.0
+    assert set(refs) == {"base_height", "skirt_height"}
+
+
+def test_declared_stack_sum_all_unresolvable_abstains():
+    """A parameter block where NO declaration resolves to a constant
+    abstains (no env → no stack)."""
+    scad = (
+        "r = sqrt(4);\n"
+        "d = atan(1);\n"
+        "total_height = r + d;\n"
+        "cube([r, r, r]);\n"
+    )
+    assert declared_stack_sum(scad) is None
