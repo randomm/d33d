@@ -347,6 +347,64 @@ def test_requested_hole_count_parses_counts():
     assert requested_hole_count("make the through-hole 8 mm") == 1
 
 
+def test_requested_hole_count_is_adjacent_to_hole_noun():
+    """Issue #418 (lens finding 1): the count is the numeral or number
+    word IMMEDIATELY before the hole noun (single whitespace or a hyphen),
+    and never a number followed by a unit (mm, cm, in, ").
+
+    A dimension's digits must not leak in through the optional hyphen
+    separator ("drill 2mm holes" — 2 is a size, not a count), and a
+    later clause's count must not be taken ("drill a 2.5mm hole and
+    three holes" — one hole was requested). A plural with a stated size
+    and no count ("drill 2mm holes") means "some holes" — the default
+    for an unstated count is 1."""
+    # A dimension's digits do not leak in (2 is the size, not a count):
+    # unstated count -> default 1.
+    assert requested_hole_count("drill 2mm holes through") == 1
+    # A later clause's count is not the requested count (one hole):
+    assert requested_hole_count("drill a 2.5mm hole and three holes") == 1
+    # A later clause's count is not the requested count (single-space mm):
+    assert requested_hole_count("drill a 2.5 mm hole and three holes") == 1
+    # The legitimate pinned cases:
+    assert requested_hole_count("add 3 holes through") == 3
+    assert requested_hole_count("add three 5 mm holes through") == 3
+    assert requested_hole_count("drill a 2.5 mm hole through") == 1
+    assert requested_hole_count("add two holes through the lid") == 2
+
+
+def test_hole_vocabularies_are_shared():
+    """Issue #418 (lens finding 2): every token that can fire
+    ``is_through_request`` (HOLE_NOUNS plus the hyphenated tokens) is
+    ALSO inspected by ``_request_is_existing_hole`` and
+    ``requested_hole_count``. If the three functions source different
+    sets, one can classify a phrase the others treat as invisible — so
+    all three must route through the SAME shared tuple."""
+    import d33d.through_hole_check as thc
+
+    fire_set = set(thc._HOLE_VOCABULARY)
+    for name in ("HOLE_NOUNS", "_HYPHENATED_TOKENS"):
+        if hasattr(thc, name):
+            fire_set |= set(getattr(thc, name))
+
+    # _request_is_existing_hole must iterate the shared set, not a
+    # private copy of the tokens.
+    src_existing = thc._request_is_existing_hole.__code__.co_names
+    assert ("_HOLE_VOCABULARY" in src_existing or "HOLE_NOUNS" in src_existing), (
+        "_request_is_existing_hole must source its tokens from the shared "
+        "tuple, not a private copy"
+    )
+
+    # requested_hole_count must source its hole-noun pattern from the
+    # shared tuple (a global name), not only a private regex literal —
+    # otherwise a vocab token the count parser cannot see would be
+    # classified by the other two functions but invisible to the count.
+    code_globals = thc.requested_hole_count.__globals__
+    assert ("_HOLE_VOCABULARY" in code_globals or "HOLE_VOCABULARY" in code_globals), (
+        "requested_hole_count must source its hole-noun pattern from the "
+        "shared tuple, not a private regex literal"
+    )
+
+
 def test_check_logs_baseline_and_source(tmp_path, caplog):
     """Issue #418 (acceptance): each run logs the baseline used and the
     check's decision, so QA can see why the check passed or failed.
@@ -402,6 +460,59 @@ def test_route_through_hole_repair_accepts_source_kwarg(tmp_path):
     assert result is not None
     evidence, _instruction = result
     assert "fell below" in evidence
+
+
+def test_route_repair_no_directive_warning_names_baseline_source(tmp_path, caplog):
+    """Issue #418 (lens finding 3): when ``route_repair`` returns no
+    directive, the warning must name WHERE the baseline came from, using
+    the same ``source or "not set by the seam"`` pattern as the check's
+    decision logs."""
+    import logging
+
+    import d33d.failure_classes as fc
+    from d33d.through_hole_check import route_through_hole_repair
+
+    stl = _write_stl(tmp_path / "pocket.stl", _pocket_stl())
+    src = "parent version v109 rendered genus: 2"
+
+    original_route_repair = fc.route_repair
+    fc.route_repair = lambda classified, scad_source: None
+    try:
+        with caplog.at_level(logging.WARNING, logger="d33d.through_hole_check"):
+            # A new-hole through request whose genus does not rise (pocket =
+            # 0 over baseline 0): the check fires, routing is attempted,
+            # and route_repair returns no directive.
+            route_through_hole_repair(
+                "drill a hole through the plate",
+                stl,
+                0,
+                "W=20; cube([W,W,W]);",
+                src,
+            )
+    finally:
+        fc.route_repair = original_route_repair
+
+    warnings = [rec for rec in caplog.records if rec.levelno >= logging.WARNING]
+    assert warnings, "the no-directive warning must be logged"
+    assert any(src in rec.message for rec in warnings), (
+        "the no-directive warning must name the baseline source"
+    )
+
+    # No source (the seam omitted the kwarg): the warning says so honestly.
+    with caplog.at_level(logging.WARNING, logger="d33d.through_hole_check"):
+        fc.route_repair = lambda classified, scad_source: None
+        try:
+            route_through_hole_repair(
+                "drill a hole through the plate", stl, 0,
+                "W=20; cube([W,W,W]);",
+            )
+        finally:
+            fc.route_repair = original_route_repair
+    assert any(
+        "not set by the seam" in rec.message
+        for rec in caplog.records
+        if rec.levelno >= logging.WARNING
+    ), "the no-directive warning must say the source was not set"
 
 
 # ---------------------------------------------------------------------------

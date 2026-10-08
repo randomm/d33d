@@ -32,6 +32,7 @@ contains no "through", so no stripping is needed).
 from __future__ import annotations
 
 import logging
+import re
 
 from d33d.part_holes import HOLE_NOUNS
 
@@ -50,12 +51,34 @@ __all__ = [
 #: noun required) — whole-word, case-insensitive.
 _HYPHENATED_TOKENS = ("through-hole", "thru-hole")
 
+#: The bare hole nouns as whole-word, case-insensitive tokens (the
+#: ``is_through_request`` trigger set, unchanged from ``HOLE_NOUNS``).
+_BARE_HOLE_NOUNS = tuple(HOLE_NOUNS)
+
+#: The hole vocabulary shared by all three classification functions:
+#: every token that can fire ``is_through_request`` (the bare hole nouns
+#: from ``part_holes.HOLE_NOUNS`` plus the hyphenated through-hole tokens)
+#: is ALSO inspected by ``_request_is_existing_hole`` and
+#: ``requested_hole_count``. Routing all three through this one tuple
+#: prevents a token that one function classifies from being invisible to
+#: the others (issue #418, lens finding 2).
+_HOLE_VOCABULARY: tuple[str, ...] = (*HOLE_NOUNS, *_HYPHENATED_TOKENS)
+
+#: The ``_HOLE_VOCABULARY`` tokens as a single regex alternation — each
+#: token normalised to a regex-safe literal (the singular form with a
+#: trailing ``s`` stripped, so ``s?`` covers both forms; the hyphen
+#: escaped for regex use). Used by ``requested_hole_count`` for the
+#: adjacent-number parse.
+_HOLE_VOCABULARY_REGEX = r"(?:" + "|".join(
+    re.escape(t.rstrip("s")) + "s?" for t in _HOLE_VOCABULARY
+) + r")"
+
 
 def is_through_request(request: str) -> bool:
     """Does the CURRENT user message ask for a through-hole?
 
     Fires (case-insensitive, whole-word) when the message contains
-    ``through`` together with a hole noun from ``part_holes.HOLE_NOUNS``
+    ``through`` together with a bare hole noun from ``HOLE_NOUNS``
     (hole, holes, bore, counterbore), or the hyphenated token
     ``through-hole`` / ``thru-hole``.
 
@@ -83,7 +106,7 @@ def is_through_request(request: str) -> bool:
     words = set(lower.split())
     if "through" not in words:
         return False
-    return any(noun in words for noun in HOLE_NOUNS)
+    return any(noun in words for noun in _BARE_HOLE_NOUNS)
 
 
 def _request_is_existing_hole(request: str) -> bool:
@@ -106,7 +129,7 @@ def _request_is_existing_hole(request: str) -> bool:
     already fired :func:`is_through_request`.
     """
     lower = request.lower()
-    for noun in (*HOLE_NOUNS, *_HYPHENATED_TOKENS):
+    for noun in _HOLE_VOCABULARY:
         idx = lower.find(noun)
         while idx != -1:
             j = idx - 1
@@ -126,46 +149,42 @@ def requested_hole_count(request: str) -> int:
     """Issue #418: the number of holes the request asks for (``1`` when
     no count is stated).
 
-    A stated count ("two holes", "3 holes", "four through-holes") — any
-    English number word up to ten, or an Arabic numeral — is the count;
-    everything else ("a hole", "the through-hole", no article) is ``1``.
+    A stated count — the numeral or number word IMMEDIATELY before the
+    hole noun (single whitespace or a hyphen), e.g. "two holes",
+    "3 holes", "four through-holes" — is the count. A number followed by
+    a unit (mm, cm, in, ") is a SIZE, not a count ("drill 2mm holes"
+    and "drill a 2.5 mm hole" both leave the count unstated → ``1``),
+    and a number in a LATER clause ("drill a 2.5mm hole and three
+    holes") is not the requested count — the parser reads only the
+    immediate neighbourhood of the first hole noun. Everything else
+    ("a hole", "the through-hole", no article) is ``1``.
     """
-    import re
-
     number_words = {
         "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
         "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
     }
     lower = request.lower()
-    # A count is the number ADJACENT to the FIRST hole noun. A number in a
-    # different clause ("shrink the hole to 3 holes", "make the hole like
-    # two holes in a row") is incidental, not the requested count — the
-    # parser reads only the immediate neighbourhood of the first hole noun
-    # it finds, never a number word in a later clause.
-    hole_noun = (
-        r"(?:holes?|bores?|counterbores?|through-holes?|thru-holes?)"
-    )
-    first_hole = re.search(r"\b" + hole_noun + r"\b", lower)
+    noun = _HOLE_VOCABULARY_REGEX
+    first_hole = re.search(r"(?<![\w-])" + noun + r"s?\b", lower)
     if first_hole is None:
         return 1
-    # The substring from the start of the string up to and including the
-    # first hole noun — a count must be in this prefix, not after it.
     prefix = lower[: first_hole.end()]
+    # Units that make a number a dimension, not a count.
+    units = r"(?:mm|cm|in|inch|\")"
 
-    # 1. A number word directly before the first hole noun: "two holes",
-    #    "four through-holes".
+    # 1. A number word before the first hole noun that is NOT immediately
+    #    followed by a unit (a number + unit is a size, not a count):
+    #    "two holes", "three 5 mm holes", "four through-holes".
     for word, n in number_words.items():
-        if re.search(
-            r"\b" + word + r"\s*(?:-)?\s*" + hole_noun + r"\b",
-            prefix,
-        ):
+        if re.search(r"\b" + word + r"\b(?!" + units + r")", prefix):
             return n
 
-    # 2. An Arabic numeral directly before the first hole noun: "2 holes",
-    #    "3 through-holes". The lookbehind rejects a digit that is part of
-    #    a dimension ("2.5 mm holes").
+    # 2. An Arabic numeral before the first hole noun that is NOT followed
+    #    by a unit (a number + unit is a size, not a count) and is not a
+    #    decimal fraction (a dimension): "2 holes", "3 through-holes".
+    #    The lookbehind rejects a digit that is part of a longer number.
     m = re.search(
-        r"(?<!\d)(\d+)\s*(?:-)?\s*" + hole_noun + r"\b",
+        r"(?<![\d.\w-])(\d+)(?!\s*(?:" + units + r")|\d|\.\d)",
         prefix,
     )
     if m:
@@ -173,8 +192,8 @@ def requested_hole_count(request: str) -> int:
         if n >= 1:
             return n
 
-    # 3. No number adjacent to the first hole noun — any number elsewhere
-    #    in the message is in a different clause, not the count.
+    # 3. No number before the first hole noun — any number that IS
+    #    followed by a unit is a dimension, not the count.
     return 1
 
 
@@ -305,9 +324,10 @@ def route_through_hole_repair(
     directive = route_repair(classified=classified, scad_source=scad_source)
     if directive is None:
         logger.warning(
-            "through-hole check detected (baseline genus %d, rendered genus %d) "
+            "through-hole check detected (baseline genus %d, source: %s, rendered genus %d) "
             "but route_repair returned no directive — no repair routed",
             base_g,
+            through_baseline_genus_source or "not set by the seam",
             genus,
         )
         return None
