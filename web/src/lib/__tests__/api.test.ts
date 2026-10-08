@@ -1018,7 +1018,7 @@ describe("STREAM_TOTAL_TIMEOUT_MS constant", () => {
     // Client must exceed with real margin.
     expect(STREAM_TOTAL_TIMEOUT_MS).toBeGreaterThan(360_000);
     // Must have at least 60 s of margin (not just 1 ms more).
-    expect(STREAM_TOTAL_TIMEOUT_MS).toBeGreaterThanOrEqual(960_000);
+    expect(STREAM_TOTAL_TIMEOUT_MS).toBeGreaterThanOrEqual(720_000);
   });
 });
 

@@ -48,6 +48,7 @@ from d33d.design_loop import (
     _bbox_target,
     _gate_selection_extents,
     _scad_params,
+    scad_looks_valid,
 )
 from d33d.render_worker import VIEWS, RenderResult
 
@@ -88,9 +89,9 @@ DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS = 120.0
 #: one flat 180 s total, the bug issue #417 fixes); this constant is the
 #: derived total the adapter races against as a cut-off. The client-side
 #: ``STREAM_TOTAL_TIMEOUT_MS`` (``web/src/lib/api.ts``) must exceed it
-#: with margin (960 s > 360 s) so the server's structured
+#: with margin (720 s > 360 s) so the server's structured
 #: ``design_loop_timed_out`` frame normally arrives first.
-DESIGN_LOOP_TIMEOUT_SECONDS = DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS * 3.0
+DESIGN_LOOP_TIMEOUT_SECONDS = DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS * MAX_ITERATIONS
 
 #: The distinct structured reason code for a deadline-triggered terminal
 #: error frame. Deliberately NOT the render-worker's ``"timeout"``
@@ -1511,6 +1512,8 @@ async def _resolve_version_create(
     result: Any,
     user_message: str,
     stated_axes: dict[str, float] | None = None,
+    scad_source: str | None = None,
+    params: dict[str, Any] | None = None,
 ) -> int | None:
     """On a ``pass``: create the version and return its id — a passing
     loop ALWAYS materialises a version (issue #93), with whatever params
@@ -1544,6 +1547,14 @@ async def _resolve_version_create(
        model (the old guard returned ``None`` here, suppressing the
        version entirely).
 
+    ``scad_source`` / ``params`` (issue #417, the timeout-version path
+    only) override the ``best``-derived values: the adapter's deadline
+    path stores the last SCAD the loop's frames surfaced (no real loop
+    result — its ``_DeadlineKeptResult`` carries ``best = None`` by
+    design), passing the adapter's own measurements (the SCAD text + the
+    params ``_scad_params`` extracted from it) explicitly. ``None`` (the
+    default) keeps today's best-derived behaviour for every caller.
+
     The version ``name`` (issue #245) is derived from WHAT CHANGED, never
     from the raw user message (a question like "how tall is it now" used
     to become the version name). Name source, in strict precedence:
@@ -1567,31 +1578,54 @@ async def _resolve_version_create(
     The raw user message is still passed as the ``message`` field
     (provenance — the "triggering message excerpt" the timeline renders)
     and NEVER becomes the name. ``None`` is returned only when ``best``
-    itself is missing (a loop result that does not carry a candidate at
-    all — a contract violation that must not fabricate a version), never
-    when the parameter set is merely empty. The version ``message`` is the
-    user's chat text truncated to 200 characters (Python string slicing is
-    code-point-safe — no multi-byte split, unlike a raw byte slice)."""
+    itself is missing AND no explicit ``scad_source`` override was
+    supplied (a loop result that does not carry a candidate at all — a
+    contract violation that must not fabricate a version; the
+    timeout-kept path, which passes an explicit ``scad_source`` override,
+    is exempt — issue #417), never when the parameter set is merely
+    empty. The version ``message`` is the user's chat text truncated to
+    200 characters (Python string slicing is code-point-safe — no
+    multi-byte split, unlike a raw byte slice)."""
     best = getattr(result, "best", None)
-    if best is None:
+    # The timeout-kept path (issue #417) passes explicit ``scad_source`` /
+    # ``params`` overrides (the adapter's own measurements — its
+    # ``_DeadlineKeptResult`` carries ``best = None`` by design, so the
+    # best-derived read below would find nothing). An explicit override
+    # short-circuits the best-derivation for source + params; the
+    # ``best``-derived fields (bbox, render, param_meta) still read off
+    # ``best`` and degrade to ``None`` when it is absent.
+    has_explicit_source = (
+        scad_source is not None
+        and isinstance(scad_source, str)
+        and scad_source.strip() != ""
+    )
+    if best is None and not has_explicit_source:
         return None
     # The previous version, read ONCE up front (a single-row query): it is
     # both the param-diff baseline for the name (issue #245) and the
     # params fallback for the non-dict-params case below.
     latest = app.state.versions.latest_version(project_id)
-    named = best.params  # a declared IterationRecord field (issue #93)
+    named = best.params if best is not None else None  # a declared IterationRecord field (issue #93)
     if not isinstance(named, dict):
-        # The only reachable case for a real record: a defensive fallback
-        # that cannot actually fire — kept because the adapter is typed
-        # ``Any`` and a corrupt record (non-dict param set) must degrade
-        # to the latest-version snapshot rather than fabricate one.
-        named = dict(latest["params"]) if latest is not None else {}
+        # The explicit ``params`` override (issue #417, the timeout-kept
+        # path) wins when present; otherwise the best-derived params are
+        # used, falling back to the latest-version snapshot or ``{}``.
+        if params is not None and isinstance(params, dict):
+            named = dict(params)
+        else:
+            named = dict(latest["params"]) if latest is not None else {}
     # The candidate's OWN source (a declared field — ``best.scad_source``
     # is verified against the real ``IterationRecord``, not a stub's
     # assumed shape; an empty string / non-str yields no source file).
-    candidate_source = getattr(best, "scad_source", None)
-    if not isinstance(candidate_source, str) or not candidate_source.strip():
-        candidate_source = None
+    # The explicit ``scad_source`` override (issue #417, the timeout-kept
+    # path) wins when present; otherwise the best-derived source is read
+    # as before.
+    if has_explicit_source:
+        candidate_source = scad_source
+    else:
+        candidate_source = getattr(best, "scad_source", None)
+        if not isinstance(candidate_source, str) or not candidate_source.strip():
+            candidate_source = None
     # The version name (issue #245): WHAT CHANGED, never the raw message.
     # The model's ``// title:`` comment in the candidate's own SCAD wins
     # when present; otherwise a deterministic phrase from the param diff
@@ -1695,31 +1729,37 @@ class _DeadlinedLoopResult:
         return self
 
 
-class _SyntheticPassResult:
-    """A synthetic pass ``DesignResult`` for the timeout-version path
-    (issue #417).
+class _DeadlineKeptResult:
+    """The timeout-kept result for the adapter's deadline path (issue
+    #417).
 
-    When the adapter's deadline fires and a best candidate rendered,
-    the adapter synthesizes this result and passes it to
-    ``_resolve_version_create`` — the same path an exhausted loop takes
-    (except exhausted loops are NOT versioned today; this is a NEW
-    path). The ``best`` is a real ``IterationRecord`` with a real
-    ``RenderResult`` (the synthetic ok render the adapter builds from
-    the candidate's SCAD), so ``_resolve_version_create`` reads
-    ``best.scad_source``, ``best.params``, ``best.render`` (for the
-    thumbnail), and ``best.bbox`` (``None`` — the adapter's deadline
-    path has no measured bbox) without fabricating any of them.
+    A REAL :class:`~d33d.design_loop.DesignResult` with the ``exhausted``
+    status and a ``best`` of ``None`` — NOT a fabricated pass, so a
+    downstream reader can never mistake an unvalidated, never-rendered
+    candidate for a gate-passed one. ``_resolve_version_create`` and the
+    version helpers (``_version_bbox_extents`` / ``_version_param_meta`` /
+    ``_version_render_artifact_dir``) read off ``result.best`` and
+    degrade to ``None`` (no thumbnail, no artifact dir, NULL bbox) when
+    ``best`` is ``None`` — which is exactly the honest state of a
+    timeout-kept candidate. The version's ``scad_source`` / ``params``
+    come from ``kwargs`` (the adapter's own measurements: the last
+    SCAD the loop's frames surfaced + ``_scad_params`` extracted from it
+    — the same SCAD the loop's own ``IterationRecord`` would have
+    carried if the attempt had completed), so no fabricated render, no
+    fake views, no fabricated score.
+
+    ``design_source_origin="timeout_kept"`` (issue #417) marks the
+    provenance on the result — informational for a future reader, never
+    read by the version write path.
     """
 
-    status = "pass"
-    failure_reason = None
-
-    def __init__(self, best: Any, iterations: tuple[Any, ...]) -> None:
-        self.best = best
-        self.iterations = iterations
-        self.iterations_used = (
-            best.iteration if hasattr(best, "iteration") else 1
-        )
+    def __init__(self) -> None:
+        self.status = "exhausted"
+        self.best = None
+        self.iterations = ()
+        self.failure_reason = DESIGN_LOOP_TIMED_OUT_REASON
+        self.iterations_used = 0
+        self.design_source_origin = "timeout_kept"
 
 
 async def run_design_loop_with_events(
@@ -2215,6 +2255,33 @@ async def run_design_loop_with_events(
                     )
 
             _last_scad_source: str = ""
+
+            def _observe_frame(_f: tuple[str, dict[str, Any]]) -> None:
+                """Track the last ``scad_source`` + per-attempt timing from
+                one yielded progress frame (issue #417). The loop stamps
+                the 1-based iteration index on its per-view markers
+                (issue #121's payload contract), so each attempt is timed
+                from its first frame to the next attempt's first frame
+                (or the deadline for the in-flight attempt) — the
+                timeout copy's "about N s an attempt" and the archive
+                row's per-attempt latencies are MEASURED values, never
+                fabricated. Called from every frame-pump branch (the
+                ``get_nowait`` path, the ``asyncio.wait`` path, and the
+                drain path) so the three paths can never drift.
+                """
+                nonlocal _last_scad_source, _attempt_count
+                _scad = _f[1].get("scad_source")
+                if isinstance(_scad, str) and _scad:
+                    _last_scad_source = _scad
+                _iter = _f[1].get("iteration")
+                if (
+                    isinstance(_iter, int)
+                    and 1 <= _iter <= MAX_ITERATIONS
+                    and _iter not in _attempt_started
+                ):
+                    _attempt_started[_iter] = _loop.time()
+                if isinstance(_iter, int) and _iter > _attempt_count:
+                    _attempt_count = _iter
             # The loop's total wall-clock budget is the per-attempt deadline
             # times the iteration cap (issue #417 — derived, never a flat
             # literal): the loop's OWN per-attempt deadline does the actual
@@ -2227,14 +2294,10 @@ async def run_design_loop_with_events(
                 DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS * MAX_ITERATIONS
             )
             _deadline = _loop.time() + _total_deadline
-            # Per-attempt wall-clock timing (issue #417): each yielded
-            # progress frame carries the 1-based iteration index the loop
-            # stamps on its per-view markers (issue #121's payload
-            # contract), so the adapter times each attempt from its first
-            # frame to the next attempt's first frame (or the deadline).
-            # The timeout copy ("about N s an attempt") and the archive
-            # row's per-attempt latencies are the MEASURED values, never
-            # fabricated.
+            # Per-attempt wall-clock timing (issue #417): ``_observe_frame``
+            # (defined above) records each attempt's first-frame timestamp
+            # and the running attempt count; the deadline path reads both
+            # to measure per-attempt latencies (never fabricated).
             _attempt_started: dict[int, float] = {}
             _attempt_count = 0
 
@@ -2265,18 +2328,7 @@ async def run_design_loop_with_events(
                 except asyncio.QueueEmpty:
                     _f = None
                 if _f is not None:
-                    _scad = _f[1].get("scad_source")
-                    if isinstance(_scad, str) and _scad:
-                        _last_scad_source = _scad
-                    _iter = _f[1].get("iteration")
-                    if (
-                        isinstance(_iter, int)
-                        and 1 <= _iter <= MAX_ITERATIONS
-                        and _iter not in _attempt_started
-                    ):
-                        _attempt_started[_iter] = _loop.time()
-                    if isinstance(_iter, int) and _iter > _attempt_count:
-                        _attempt_count = _iter
+                    _observe_frame(_f)
                     yield _f
                     continue
                 _remaining = _deadline - _loop.time()
@@ -2301,60 +2353,35 @@ async def run_design_loop_with_events(
                         _latencies,
                     )
                     _archive_deadline(_attempt_count, _latencies)
-                    # Issue #417 — the timeout-version path: when the loop
-                    # was killed mid-run but a best candidate rendered,
-                    # the adapter synthesizes a pass-equivalent result and
-                    # calls ``_resolve_version_create`` to store it (the
-                    # same path an exhausted loop takes — except exhausted
-                    # loops are NOT versioned today; this is a NEW path).
-                    # Only a candidate that actually rendered (has a real
-                    # ``RenderResult``, not the synthetic pre-flight
-                    # placeholder with ``render=None``) is versioned.
-                    # Best-effort: a version-creation failure logs and
-                    # degrades to no version (the timeout frame still
-                    # fires); the version is the user-facing bonus, not
-                    # the guarantee.
+                    # Issue #417 — the timeout-version path: when the
+                    # adapter's deadline fired and the loop surfaced a
+                    # SCAD (``_last_scad_source``), the adapter stores it
+                    # as a version via ``_resolve_version_create`` — a NEW
+                    # path (exhausted loops are NOT versioned today). The
+                    # candidate is unvalidated (no render, no score, no
+                    # bbox — the deadline killed the run), so the result
+                    # passed in is an honest ``_DeadlineKeptResult``
+                    # (status ``exhausted``, ``best`` ``None``) — never a
+                    # fabricated pass with a fake render / views / score.
+                    # The SCAD is validated with the loop's own
+                    # ``scad_looks_valid`` heuristic before the version is
+                    # written (a partial / truncated LLM output that the
+                    # deadline caught mid-stream must not become a version
+                    # whose geometry file is garbage). Best-effort: a
+                    # version-creation failure logs and degrades to no
+                    # version (the timeout frame still fires); the version
+                    # is the user-facing bonus, not the guarantee.
                     _kept_version_id: int | None = None
-                    if _last_scad_source:
+                    if _last_scad_source and scad_looks_valid(_last_scad_source):
                         try:
-                            from d33d.design_loop import (
-                                IterationRecord,
-                                Score,
-                                _scad_params,
-                            )
-                            from d33d.render_worker import RenderResult
-
-                            _kept_render = RenderResult(
-                                ok=True,
-                                exit_code=0,
-                                duration_ms=0,
-                                error_class="ok",
-                                stderr="",
-                                stl=None,
-                                csg=None,
-                                views=("v",) * 6,
-                            )
-                            _kept_record = IterationRecord(
-                                iteration=_attempt_count if _attempt_count > 0 else 1,
-                                scad_source=_last_scad_source,
-                                render=_kept_render,
-                                score=Score(
-                                    bits=(False,) * 5,
-                                    rank=0,
-                                    tiebreak=(False,) * 5,
-                                ),
-                                params=_scad_params(_last_scad_source),
-                            )
-                            _kept_result = _SyntheticPassResult(
-                                best=_kept_record,
-                                iterations=(),
-                            )
                             _kept_version_id = await _resolve_version_create(
                                 app,
                                 project_id,
-                                _kept_result,
+                                _DeadlineKeptResult(),
                                 user_message,
                                 stated_axes=stated_axes,
+                                scad_source=_last_scad_source,
+                                params=_scad_params(_last_scad_source),
                             )
                         except Exception:
                             logger.exception(
@@ -2386,12 +2413,20 @@ async def run_design_loop_with_events(
                     _deadline_frames: list[tuple[str, dict[str, Any]]] = (
                         _yield_notice()
                     )
+                    # Build the terminal frames in FINAL ORDER (issue #417
+                    # review — the old ``insert(0, ...)`` silently reversed
+                    # the order): [photo notice(s), version-created (when a
+                    # kept version was stored), terminal error].
                     if _kept_version_id is not None:
-                        _vc_frame: dict[str, Any] = {
-                            "step": "version-created",
-                            "version_id": _kept_version_id,
-                        }
-                        _deadline_frames.insert(0, ("progress", _vc_frame))
+                        _deadline_frames.append(
+                            (
+                                "progress",
+                                {
+                                    "step": "version-created",
+                                    "version_id": _kept_version_id,
+                                },
+                            )
+                        )
                     _deadline_frames.append(("error", _error_data))
                     for _f in _deadline_frames:
                         yield _f
@@ -2432,18 +2467,7 @@ async def run_design_loop_with_events(
                         # Sentinel: the render finished (the drain thread
                         # enqueued the ``None`` before the loop exited).
                         break
-                    _scad = _f[1].get("scad_source")
-                    if isinstance(_scad, str) and _scad:
-                        _last_scad_source = _scad
-                    _iter = _f[1].get("iteration")
-                    if (
-                        isinstance(_iter, int)
-                        and 1 <= _iter <= MAX_ITERATIONS
-                        and _iter not in _attempt_started
-                    ):
-                        _attempt_started[_iter] = _loop.time()
-                    if isinstance(_iter, int) and _iter > _attempt_count:
-                        _attempt_count = _iter
+                    _observe_frame(_f)
                     yield _f
                     continue
                 _get_task.cancel()
@@ -2464,18 +2488,7 @@ async def run_design_loop_with_events(
                 if _f is None:
                     # Sentinel: stop the drain, take the result.
                     break
-                _scad = _f[1].get("scad_source")
-                if isinstance(_scad, str) and _scad:
-                    _last_scad_source = _scad
-                _iter = _f[1].get("iteration")
-                if (
-                    isinstance(_iter, int)
-                    and 1 <= _iter <= MAX_ITERATIONS
-                    and _iter not in _attempt_started
-                ):
-                    _attempt_started[_iter] = _loop.time()
-                if isinstance(_iter, int) and _iter > _attempt_count:
-                    _attempt_count = _iter
+                _observe_frame(_f)
                 yield _f
             result = render_task.result()
         else:

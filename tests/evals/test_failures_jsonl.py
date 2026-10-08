@@ -1477,22 +1477,26 @@ def test_design_loop_deadline_archive_sees_asyncio_wait_frames(
 def test_design_loop_slow_model_timeout_keeps_candidate_and_versions(
     _eval_app_with_versions, tmp_path: Path, monkeypatch
 ):
-    """Issue #417: a scripted slow llm_fn that renders attempt 1 then
-    exceeds the per-attempt deadline on attempt 2 yields:
+    """Issue #417: a scripted slow-model loop that renders attempt 1
+    (emitting a progress frame carrying ``scad_source``) then exceeds
+    the per-attempt deadline on attempt 2 yields:
 
     (a) the attempt-1 candidate kept and stored as a version (via
-        ``_resolve_version_create`` — a new timeout-version path);
-    (b) a ``version-created`` progress frame before the terminal error;
+        ``_resolve_version_create`` — the timeout-version path);
+    (b) a ``version-created`` progress frame BEFORE the terminal error;
     (c) the terminal error frame with ``attempt_latency_seconds`` and
         ``attempt_count`` fields (the SPA renders the slow-model copy
         from these measured values);
     (d) a failures.jsonl row with the attempt count and per-attempt
-        latencies (the archive now carries the measured values).
+        latencies.
 
-    The per-attempt deadline is monkeypatched to a small value so the
-    test completes quickly; the stub loop emits a progress frame with
-    ``scad_source`` on attempt 1 (the rendered candidate), then stalls
-    on attempt 2 past the deadline.
+    The ``scad_source`` frame is injected from INSIDE the stub's
+    coroutine (which runs on a worker thread via ``asyncio.to_thread``)
+    via the captured queue — the same mechanism as
+    ``test_design_loop_deadline_archive_sees_asyncio_wait_frames`` —
+    so the adapter's ``_last_scad_source`` tracker sees it BEFORE the
+    deadline fires (the stub sleeps 0.3 s before injecting, well within
+    the 0.5 s total deadline window).
     """
     import asyncio as _asyncio
 
@@ -1507,41 +1511,8 @@ def test_design_loop_slow_model_timeout_keeps_candidate_and_versions(
         "d33d.design_loop_events.DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS", 0.5 / 3
     )
 
-    class _SlowModelLoop:
-        """A scripted slow-model loop: attempt 1 emits a progress frame
-        carrying ``scad_source`` (the rendered candidate) then a liveness
-        frame; attempt 2 stalls past the deadline. The ``model`` kwarg is
-        re-injected the same way as in the plain stall (the production
-        closure's contract)."""
-
-        def __call__(self, app=None, **kwargs):
-            async def _slow():
-                kwargs["model"] = "model-x"
-                on_progress = kwargs.get("on_progress")
-                # Attempt 1: the loop rendered a candidate — emit a
-                # progress frame carrying the scad_source (the adapter
-                # tracks this as ``_last_scad_source``).
-                if on_progress is not None:
-                    on_progress(
-                        "view-done",
-                        {"view": "view_01", "iteration": 1},
-                    )
-                # The adapter also records scad_source from progress frames
-                # that carry it directly. Inject a frame with scad_source
-                # via the frame queue (the adapter's ``_last_scad_source``
-                # reader) — the same mechanism the asyncio.wait test uses.
-                await _asyncio.sleep(0.1)
-                # Attempt 2: stall past the deadline. The adapter's
-                # deadline fires and cuts off the stream.
-                await _asyncio.sleep(10)
-
-            return _slow()
-
-    # Inject the scad_source frame directly on the queue (the same
-    # mechanism the asyncio.wait test uses) so the adapter's
-    # ``_last_scad_source`` sees it — the stub's ``on_progress`` only
-    # enqueues view markers (no scad_source field), so the adapter needs
-    # the direct injection to track the rendered candidate.
+    # Capture the adapter's internal _frame_queue instance by wrapping
+    # asyncio.Queue in the design_loop_events module namespace.
     _captured_queues: list = []
     _original_queue_cls = _asyncio.Queue
 
@@ -1551,6 +1522,48 @@ def test_design_loop_slow_model_timeout_keeps_candidate_and_versions(
             _captured_queues.append(self)
 
     monkeypatch.setattr("d33d.design_loop_events.asyncio.Queue", _SpyQueue)
+
+    class _SlowModelLoop:
+        """A scripted slow-model loop: attempt 1 surfaces a SCAD (via a
+        progress frame injected directly on the captured queue, the same
+        mechanism the asyncio.wait test uses), then attempt 2 stalls
+        past the deadline. The ``model`` kwarg is re-injected the same
+        way as in the plain stall (the production closure's contract)."""
+
+        def __call__(self, app=None, **kwargs):
+            async def _slow():
+                kwargs["model"] = "model-x"
+                # Attempt 1: the loop rendered a candidate. Inject a
+                # progress frame carrying ``scad_source`` directly on
+                # the captured queue (the adapter's ``_last_scad_source``
+                # reader) — the stub's ``on_progress`` only enqueues view
+                # markers (no scad_source field), so the direct injection
+                # is how the adapter tracks the rendered candidate.
+                # Sleep long enough for the adapter to have started its
+                # wait loop and taken an empty ``get_nowait`` (so the
+                # frame is consumed through the ``asyncio.wait`` path —
+                # the exact path the asyncio.wait test exercises).
+                await _asyncio.sleep(0.3)
+                if _captured_queues:
+                    # Inject the scad_source frame with an ``iteration``
+                    # stamp (the adapter's ``_observe_frame`` reads it to
+                    # track the attempt count — the same field the real
+                    # loop's per-view markers carry, issue #121).
+                    _captured_queues[-1].put_nowait(
+                        (
+                            "progress",
+                            {
+                                "step": "scad-ready",
+                                "scad_source": SCAD,
+                                "iteration": 1,
+                            },
+                        )
+                    )
+                # Attempt 2: stall past the deadline (the total deadline
+                # is 3 × 0.5/3 = 0.5 s; the 10 s sleep far exceeds it).
+                await _asyncio.sleep(10)
+
+            return _slow()
 
     app = _eval_app_with_versions
 
@@ -1575,27 +1588,46 @@ def test_design_loop_slow_model_timeout_keeps_candidate_and_versions(
             frames.append((event, data))
             if event in ("done", "error"):
                 break
-        # Inject the scad_source frame AFTER the adapter has started its
-        # wait loop (so it arrives via the asyncio.wait path, not
-        # get_nowait) — the same timing as the existing asyncio.wait test.
-        if _captured_queues:
-            _captured_queues[-1].put_nowait(
-                ("progress", {"step": "scad-ready", "scad_source": SCAD})
-            )
         return frames, pid
 
     frames, pid = _drive_stream(app, _call)
     assert frames and frames[-1][0] == "error", f"no terminal error frame: {frames}"
     error_data = frames[-1][1]
     assert error_data.get("reason") == DESIGN_LOOP_TIMED_OUT_REASON
-    # The slow-model copy data: attempt_count and attempt_latency_seconds
-    # are on the terminal frame (the SPA renders the slow-model copy from
-    # these measured values).
+
+    # (b) A ``version-created`` progress frame appears BEFORE the
+    # terminal error frame (the kept candidate was stored as a version).
+    vc_frames = [
+        (i, d)
+        for i, (e, d) in enumerate(frames)
+        if e == "progress" and d.get("step") == "version-created"
+    ]
+    assert vc_frames, (
+        f"no version-created frame before the terminal error: {frames}"
+    )
+    _vc_idx, vc_data = vc_frames[0]
+    assert isinstance(vc_data.get("version_id"), int), (
+        f"version-created frame missing version_id: {vc_data}"
+    )
+    # The version-created frame must come BEFORE the terminal error
+    # (the last frame).
+    assert _vc_idx < len(frames) - 1, (
+        f"version-created frame at index {_vc_idx} is not before the "
+        f"terminal error (total frames: {len(frames)})"
+    )
+
+    # (c) The terminal error frame carries the slow-model copy data.
     assert "attempt_count" in error_data, f"no attempt_count: {error_data}"
     assert error_data["attempt_count"] >= 1, (
         f"attempt_count should be >= 1, got {error_data['attempt_count']}"
     )
-    # The archive row carries the attempt count and per-attempt latencies.
+    # The scad_source frame must have been yielded to the client too
+    # (the adapter's ``_last_scad_source`` saw it before the deadline).
+    scad_frames = [d for e, d in frames if d.get("scad_source") == SCAD]
+    assert scad_frames, "scad_source frame was never yielded to the client"
+
+    # (d) The archive row carries the attempt count and per-attempt
+    # latencies (the kept candidate's SCAD is the row's output_scad).
     out = tmp_path / "failures.jsonl"
     assert out.exists(), "deadline did not archive a failures.jsonl row"
     row_events = read_failure_events(out)
@@ -1607,4 +1639,84 @@ def test_design_loop_slow_model_timeout_keeps_candidate_and_versions(
         assert ev.attempt_count == error_data["attempt_count"], (
             f"archive attempt_count {ev.attempt_count} != frame {error_data['attempt_count']}"
         )
+    # The archive row's output_scad is the kept candidate's SCAD.
+    assert ev.output_scad == SCAD, (
+        f"expected the kept candidate's SCAD in the archive row, "
+        f"got {ev.output_scad!r}"
+    )
+
+
+def test_design_loop_slow_model_timeout_no_version_on_zero_render(
+    _eval_app_with_versions, tmp_path: Path, monkeypatch
+):
+    """Issue #417 negative case: a timeout with ZERO rendered candidates
+    (the stall never surfaced a SCAD) ends WITHOUT a version — the
+    honest-absence path (no ``version-created`` frame, no version row).
+    The terminal error frame still fires with the structured reason.
+    """
+    import asyncio as _asyncio
+
+    from d33d.design_loop_events import (
+        DESIGN_LOOP_TIMED_OUT_REASON,
+        run_design_loop_with_events,
+    )
+
+    monkeypatch.setattr(
+        "d33d.design_loop_events.DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS", 0.5 / 3
+    )
+
+    class _StallLoop:
+        """A zero-render stall: the loop never surfaces a SCAD."""
+
+        def __call__(self, app=None, **kwargs):
+            async def _stall():
+                kwargs["model"] = "model-x"
+                await _asyncio.sleep(10)
+
+            return _stall()
+
+    app = _eval_app_with_versions
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "test project"})
+        assert r.status_code == 201, r.text
+        pid = r.json()["id"]
+        app.state.run_design_loop = _StallLoop()
+        app.state.failures_jsonl_path = tmp_path / "failures.jsonl"
+        app.state.model_id = "model-x"
+        source = run_design_loop_with_events(
+            app,
+            pid,
+            user_message="make it a cube",
+            stated_dims=None,
+            chat_history=(),
+            photo="data:image/png;base64,x",
+            request_text="make it a cube",
+        )
+        frames = []
+        async for event, data in source:
+            frames.append((event, data))
+            if event in ("done", "error"):
+                break
+        return frames, pid
+
+    frames, pid = _drive_stream(app, _call)
+    assert frames and frames[-1][0] == "error", f"no terminal error frame: {frames}"
+    error_data = frames[-1][1]
+    assert error_data.get("reason") == DESIGN_LOOP_TIMED_OUT_REASON
+    # NO version-created frame (zero rendered candidates → no version).
+    vc_frames = [
+        d for e, d in frames if e == "progress" and d.get("step") == "version-created"
+    ]
+    assert not vc_frames, (
+        f"unexpected version-created frame on zero-render timeout: {vc_frames}"
+    )
+    # The archive row exists but carries no SCAD (honest absence).
+    out = tmp_path / "failures.jsonl"
+    assert out.exists(), "deadline did not archive a failures.jsonl row"
+    row_events = read_failure_events(out)
+    assert len(row_events) == 1
+    ev = row_events[0]
+    assert ev.failure_class == DESIGN_LOOP_TIMED_OUT_REASON
+    assert ev.output_scad == ""
 

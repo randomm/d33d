@@ -46,7 +46,7 @@ const EXPORT_REASONS: Record<string, string> = {
   ...copy.failure.reasons,
   conflict: copy.export3mf.conflict,
   units_unsettled: copy.export3mf.unitsUnsettled,
-};
+} as unknown as Record<string, string>;
 
 function rawDetail(e: unknown): string | undefined {
   return e instanceof ApiError && typeof e.detail === "string"

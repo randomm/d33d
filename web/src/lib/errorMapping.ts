@@ -285,14 +285,18 @@ export function displayDesignLoopError(
      *  `design_loop_timed_out` frame field, omit-not-null): the average
      *  measured latency across the attempts that completed before the
      *  deadline fired. Used to fill in the slow-model copy's "about Ns
-     *  an attempt" clause. Malformed/absent → the generic reason
-     *  sentence stands (no number the SPA has not established). */
-    attempt_latency_seconds?: unknown;
+     *  an attempt" clause. The wire sends a `round()`-produced integer or
+     *  omits the field entirely; a malformed (non-finite) value is
+     *  dropped at the use site (the generic reason sentence stands — no
+     *  number the SPA has not established). */
+    attempt_latency_seconds?: number;
     /** The server's measured attempt count (issue #417, `design_loop_
      *  timed_out` frame field, omit-not-null): the number of design-loop
      *  iterations that started before the deadline fired. Used to fill
-     *  in the slow-model copy's "after N tries" clause. */
-    attempt_count?: unknown;
+     *  in the slow-model copy's "after N tries" clause. The wire sends an
+     *  `int` or omits the field entirely; a malformed value is dropped at
+     *  the use site (the generic reason sentence stands). */
+    attempt_count?: number;
   },
   envelopeLimits?: [number, number, number],
 ): DisplayError {
@@ -310,7 +314,7 @@ export function displayDesignLoopError(
   // disclosure stands, nothing half-established is rendered).
   const rendererDetail = parseRendererDetail(data.renderer_detail);
   if (reason !== undefined) {
-    const mapped = (copy.failure.reasons as Record<string, string>)[reason];
+    const mapped = (copy.failure.reasons as unknown as Record<string, string>)[reason];
     // The slow-model timeout copy (issue #417): the server's measured
     // per-attempt latency and attempt count are on the frame (omit-not-
     // null). When both are present, the headline is the templated
@@ -325,8 +329,16 @@ export function displayDesignLoopError(
     if (reason === "design_loop_timed_out") {
       const lat = data.attempt_latency_seconds;
       const cnt = data.attempt_count;
-      if (typeof lat === "number" && typeof cnt === "number" && cnt > 0) {
-        message = copy.failure.design_loop_slow_model(lat, cnt);
+      if (
+        typeof lat === "number" &&
+        Number.isFinite(lat) &&
+        typeof cnt === "number" &&
+        Number.isFinite(cnt) &&
+        cnt > 0
+      ) {
+        message = (copy.failure.reasons as unknown as {
+          design_loop_slow_model: (seconds: number, count: number) => string;
+        }).design_loop_slow_model(lat, cnt);
       }
     }
     // The carried-axis variant: the frame's `carried_axes` is the set the
