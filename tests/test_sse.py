@@ -388,8 +388,13 @@ def test_sse_loop_deadline_ends_stream_cleanly(app_with_streaming, monkeypatch):
         return raw, elapsed
 
     raw, elapsed = _run_async(app_with_streaming, _call)
-    # The deadline fired within the 0.15 s window (+ scheduling margin).
-    assert elapsed < 1.0, f"deadline did not fire promptly: {elapsed:.2f}s"
+    # The deadline fired within the derived total window (3 × 0.05 s
+    # = 0.15 s) plus a generous scheduling margin (the ``to_thread``
+    # worker thread must start, the adapter must enter its wait loop,
+    # and the deadline check must fire). 2 s is well above the 0.15 s
+    # deadline but far below the stub's 10 s sleep — a stuck stream
+    # (deadline not firing) would exceed this bound.
+    assert elapsed < 2.0, f"deadline did not fire promptly: {elapsed:.2f}s"
     events = parse_sse_stream(raw)
     assert events, "no events emitted"
     event_names = [e["event"] for e in events]

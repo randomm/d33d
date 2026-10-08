@@ -89,7 +89,7 @@ DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS = 120.0
 #: one flat 180 s total, the bug issue #417 fixes); this constant is the
 #: derived total the adapter races against as a cut-off. The client-side
 #: ``STREAM_TOTAL_TIMEOUT_MS`` (``web/src/lib/api.ts``) must exceed it
-#: with margin (960 s > 360 s) so the server's structured
+#: with margin (720 s > 360 s) so the server's structured
 #: ``design_loop_timed_out`` frame normally arrives first.
 DESIGN_LOOP_TIMEOUT_SECONDS = DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS * MAX_ITERATIONS
 
