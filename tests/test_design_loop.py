@@ -336,6 +336,86 @@ def test_score_bit5_non_numeric_ignored():
     assert s.bits[4] is False  # H still fails, note is ignored
 
 
+def test_score_bit5_import_feature_param_skipped():
+    """Issue #420 (score level): an import (``part_scale`` set) whose model
+    tags a feature param ("Groove depth" D = 2.0) against the part's
+    measured D 50 → bit 5 PASSES — the feature's size is not a part
+    mismatch on an import."""
+    s = score(
+        _render(),
+        (50.0, 50.0, 50.0),
+        bbox=BboxInfo(50.0, 50.0, 50.0, 125000.0),
+        scad_source="groove_depth = 2;\ncube([50, 50, 50]);\n",
+        param_meta={
+            "groove_depth": {"label": "Groove depth", "unit": "mm", "axis": "D"}
+        },
+        named_params={"groove_depth": 2.0},
+        part_scale=1.0,
+    )
+    assert s.bits[4] is True
+
+
+def test_score_bit5_scratch_feature_param_still_fails():
+    """Issue #420 scratch pin: the SAME "Groove depth" D = 2.0 vs
+    measured D 50 WITHOUT the import signal (``part_scale`` absent) still
+    FAILS bit 5 — scratch designs keep today's behaviour byte-identical.
+    This is the inverse of ``test_score_bit5_import_feature_param_skipped``."""
+    s = score(
+        _render(),
+        (50.0, 50.0, 50.0),
+        bbox=BboxInfo(50.0, 50.0, 50.0, 125000.0),
+        scad_source="groove_depth = 2;\ncube([50, 50, 50]);\n",
+        param_meta={
+            "groove_depth": {"label": "Groove depth", "unit": "mm", "axis": "D"}
+        },
+        named_params={"groove_depth": 2.0},
+    )
+    assert s.bits[4] is False
+
+
+def test_score_bit5_import_non_feature_param_still_fails():
+    """Issue #420 (score level): an import whose model tags a NON-feature
+    param ("Part height" H = 10) against the part's measured H 50 → bit
+    5 FAILS with per-param evidence — every other axis-tagged param on an
+    import still participates."""
+    s = score(
+        _render(),
+        (50.0, 50.0, 50.0),
+        bbox=BboxInfo(50.0, 50.0, 50.0, 125000.0),
+        scad_source="part_height = 10;\ncube([50, 50, 50]);\n",
+        param_meta={
+            "part_height": {"label": "Part height", "unit": "mm", "axis": "H"}
+        },
+        named_params={"part_height": 10.0},
+        part_scale=1.0,
+    )
+    assert s.bits[4] is False
+    assert _axis_param_mismatches(
+        BboxInfo(50.0, 50.0, 50.0, 125000.0),
+        {"part_height": 10.0},
+        {"part_height": {"label": "Part height", "unit": "mm", "axis": "H"}},
+        part_scale=1.0,
+    ) == [("Part height", 10.0, 50.0, "H")]
+
+
+def test_score_bit5_import_neutral_name_feature_label_skipped():
+    """Issue #420 (score level, label path): a neutral name ("feature_1")
+    with a feature label ("Groove depth") tagged D is skipped on an import
+    — the check runs over name AND label tokens."""
+    s = score(
+        _render(),
+        (50.0, 50.0, 50.0),
+        bbox=BboxInfo(50.0, 50.0, 50.0, 125000.0),
+        scad_source="feature_1 = 2;\ncube([50, 50, 50]);\n",
+        param_meta={
+            "feature_1": {"label": "Groove depth", "unit": "mm", "axis": "D"}
+        },
+        named_params={"feature_1": 2.0},
+        part_scale=1.0,
+    )
+    assert s.bits[4] is True
+
+
 def test_axis_param_mismatches_returns_per_param_evidence():
     """Issue #276: ``_axis_param_mismatches`` returns one
     ``(label, model, measured, axis)`` tuple per mismatching param, empty
@@ -374,6 +454,77 @@ def test_axis_param_mismatches_returns_per_param_evidence():
         {"h": {"axis": "H"}},
     )
     assert out == [("h", 20.0, 30.0, "H")]
+
+
+def test_axis_param_mismatches_import_skips_feature_param_by_name():
+    """Issue #420: on an import (``part_scale`` set), a feature param
+    (name carries a feature noun from ``axis_lexicon._FEATURE_NOUNS``)
+    is skipped by bit 5 — "Groove depth" tagged D = 2.0 vs measured D
+    50 does NOT mismatch (the feature's size is not the part's extent).
+    The scratch (no ``part_scale``) call on the same input still fails —
+    the exemption is import-only."""
+    bbox = BboxInfo(50.0, 50.0, 50.0, 125000.0)
+    params = {"groove_depth": 2.0}
+    meta = {"groove_depth": {"label": "Groove depth", "unit": "mm", "axis": "D"}}
+    # Import → the feature param is skipped → no mismatches.
+    assert _axis_param_mismatches(bbox, params, meta, part_scale=1.0) == []
+    # Scratch → byte-identical behaviour → the mismatch still fires.
+    assert _axis_param_mismatches(bbox, params, meta) == [
+        ("Groove depth", 2.0, 50.0, "D")
+    ]
+
+
+def test_axis_param_mismatches_import_skips_feature_label_on_neutral_name():
+    """Issue #420: the feature-noun check runs over the NAME and the
+    LABEL — a neutral name ("feature_1") with a feature label ("Groove
+    depth") is skipped on an import (the label's space-separated token
+    "groove" is in ``_FEATURE_NOUNS``); scratch keeps the mismatch."""
+    bbox = BboxInfo(50.0, 50.0, 50.0, 125000.0)
+    params = {"feature_1": 2.0}
+    meta = {"feature_1": {"label": "Groove depth", "unit": "mm", "axis": "D"}}
+    assert _axis_param_mismatches(bbox, params, meta, part_scale=1.0) == []
+    assert _axis_param_mismatches(bbox, params, meta) == [
+        ("Groove depth", 2.0, 50.0, "D")
+    ]
+
+
+def test_axis_param_mismatches_import_keeps_non_feature_param():
+    """Issue #420: every OTHER axis-tagged param on an import still
+    participates — "Part height" tagged H = 10 vs measured H 50 fires
+    with per-param evidence on an import (the model declares no W/D/H
+    params for the imported mesh itself; a param the model DID tag H
+    against the part's measured H is a genuine mismatch)."""
+    bbox = BboxInfo(50.0, 50.0, 50.0, 125000.0)
+    params = {"part_height": 10.0}
+    meta = {"part_height": {"label": "Part height", "unit": "mm", "axis": "H"}}
+    assert _axis_param_mismatches(bbox, params, meta, part_scale=1.0) == [
+        ("Part height", 10.0, 50.0, "H")
+    ]
+
+
+def test_axis_param_mismatches_import_position_exemption_stays_first():
+    """Issue #420 edge case: a position+feature compound name
+    ("groove_offset") is exempt on scratch AND import by the position
+    keyword — the unconditional #385 check runs before the feature-noun
+    check, and the feature exemption never un-exempts it."""
+    bbox = BboxInfo(50.0, 50.0, 50.0, 125000.0)
+    params = {"groove_offset": 2.0}
+    meta = {"groove_offset": {"label": "Groove offset", "unit": "mm", "axis": "D"}}
+    assert _axis_param_mismatches(bbox, params, meta) == []
+    assert _axis_param_mismatches(bbox, params, meta, part_scale=1.0) == []
+
+
+def test_axis_param_mismatches_import_length_word_is_not_a_feature():
+    """Issue #420 edge case: "depth"/"height"/"width" are length words,
+    not feature nouns — "total_depth" tagged D on an import still
+    participates (token-based check, never a substring match on the
+    whole name)."""
+    bbox = BboxInfo(50.0, 50.0, 50.0, 125000.0)
+    params = {"total_depth": 10.0}
+    meta = {"total_depth": {"label": "Total depth", "unit": "mm", "axis": "D"}}
+    assert _axis_param_mismatches(bbox, params, meta, part_scale=1.0) == [
+        ("Total depth", 10.0, 50.0, "D")
+    ]
 
 
 def test_no_improvement_is_named_predicate_on_rank():
@@ -3625,6 +3776,54 @@ def test_import_guard_no_part_project_no_guard():
     llm = [_import_scad_llm("W = 20;\ncube([W, 25, 30]);\n")]
     result = _run_import_loop(llm, part_scale=None, bbox=BboxInfo(20.0, 25.0, 30.0))
     assert result.iterations[0].failure_class is None
+
+
+def test_import_feature_param_mistagged_d_does_not_fail_bit5():
+    """Issue #420 (loop level): on an import (``part_scale=1.0``) the
+    model tags a feature param ("groove_depth", label "Groove depth",
+    axis D = 2.0) against a part whose measured D is 50 → bit 5 does NOT
+    fail: the loop does not exhaust on ``axis_params_mismatch`` and no
+    ``axis_params_mismatch`` repair is routed. The import guard passes
+    (import + matching scale), so the candidate passes the loop.
+
+    The LLM response carries the ``parameters`` meta array (the loop's
+    ``extract_param_meta`` reads it from the tool call) — the same shape
+    the production T1 response uses."""
+    scad = 'scale(1) import("part.stl");\ngroove_depth = 2;\nunion() { cube([50, 50, 50]); }\n'
+    llm = _llm_result(
+        content=_t1_tool_call_payload(
+            "emit_design",
+            {
+                "scad": scad,
+                "parameters": [
+                    {"name": "groove_depth", "label": "Groove depth", "unit": "mm", "axis": "D"}
+                ],
+            },
+        ),
+        tool_calls=(
+            {
+                "name": "emit_design",
+                "arguments": {
+                    "scad": scad,
+                    "parameters": [
+                        {"name": "groove_depth", "label": "Groove depth", "unit": "mm", "axis": "D"}
+                    ],
+                },
+            },
+        ),
+    )
+    result = _run_import_loop(
+        [llm], part_scale=1.0, bbox=BboxInfo(50.0, 50.0, 50.0, 125000.0), stated=(50.0, 50.0, 50.0)
+    )
+    # Bit 5 passed — the feature param was skipped on the import.
+    assert result.iterations[0].score.bits[4] is True
+    # No axis_params_mismatch repair was routed.
+    assert result.iterations[0].failure_class != "axis_params_mismatch"
+    assert result.iterations[0].repair is None
+    # The loop passed (all gates green, import guard clean).
+    assert result.status == "pass"
+    assert result.iterations_used == 1
+    assert result.iterations[0].repair is None
 
 
 def test_import_guard_catches_rebuild_when_part_scale_set():

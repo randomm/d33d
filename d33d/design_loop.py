@@ -782,6 +782,8 @@ def _axis_param_mismatches(
     bbox: BboxInfo | None,
     named_params: dict[str, float],
     param_meta: dict[str, Any],
+    *,
+    part_scale: float | None = None,
 ) -> list[tuple[str, float, float, str]]:
     """Bit 5 (issue #276) — the per-param evidence behind the bit.
 
@@ -806,6 +808,11 @@ def _axis_param_mismatches(
     params with a declared axis → ``[]`` (nothing to check). A param
     with no declared axis, a non-numeric value, or a zero/negative value
     is ignored.
+
+    Two exemptions (checked in this order, per param): the unconditional
+    position/offset exemption (issue #385, scratch AND import) and the
+    import-only feature-noun exemption (issue #420, ``part_scale`` is
+    ``not None``).
     """
     if bbox is None:
         return []
@@ -829,9 +836,18 @@ def _axis_param_mismatches(
             continue
         # Issue #385 (operator decision 2026-10-05): the import gate ignores
         # parameters whose names or labels mark them as positions or offsets
-        # (a mistagged position can't fail an import edit).
+        # (a mistagged position can't fail an import edit). Unconditional on
+        # scratch AND import — issue #420 leaves it untouched.
         label = _param_label(meta, name)
         if _is_position_param(name, label):
+            continue
+        # Issue #420: on an import the model axis-tags FEATURE parameters
+        # ("Groove depth" tagged D) — the feature's size vs the part's
+        # measured extent is not a mismatch. A name or label carrying a
+        # feature noun from ``d33d.axis_lexicon._FEATURE_NOUNS`` (imported
+        # by reference, never copied — issue #413 may mutate the set) is
+        # skipped on imports only; scratch keeps byte-identical bit 5.
+        if part_scale is not None and _is_feature_param(name, label):
             continue
         tol = max(
             DISAGREES_MAJOR_THRESHOLD_REL * value,
@@ -846,11 +862,44 @@ def _axis_params_match_geometry(
     bbox: BboxInfo,
     named_params: dict[str, float],
     param_meta: dict[str, Any],
+    part_scale: float | None = None,
 ) -> bool:
     """Bit 5 (issue #276): True iff every NUMERIC param with a declared
     axis (W/D/H) matches the measured bbox extent on that axis within the
-    disagrees-major threshold — ``not _axis_param_mismatches(...)``."""
-    return not _axis_param_mismatches(bbox, named_params, param_meta)
+    disagrees-major threshold — ``not _axis_param_mismatches(...)``.
+
+    ``part_scale`` is the issue #420 import signal (``not None`` → an
+    import project): it threads the feature-noun exemption through the
+    helper so the gate bit can never diverge from the repair evidence.
+    """
+    return not _axis_param_mismatches(bbox, named_params, param_meta, part_scale=part_scale)
+
+
+def _is_feature_param(name: str, label: str) -> bool:
+    """True iff the param's name or label tokens contain a feature noun
+    (issue #420): :func:`d33d.design_state._split_name_tokens` (deferred
+    import — the same lazy ``design_state`` import the helper uses for
+    the thresholds) over the name, and a space/underscore split over the
+    human-prose label, each piece on camelCase boundaries; any token in
+    :data:`d33d.axis_lexicon._FEATURE_NOUNS` (imported by reference, never
+    copied) is a feature marker.
+
+    Token-based by design: ``groove_depth`` is excluded by ``groove``, but
+    ``total_depth`` is not (``depth`` is a length word, not a feature
+    noun). Length words in ``_LENGTH_WORDS`` never trigger the exemption.
+    """
+    from d33d.axis_lexicon import _FEATURE_NOUNS
+    from d33d.design_state import _split_name_tokens
+
+    def _has_feature(token: str) -> bool:
+        return any(t in _FEATURE_NOUNS for t in _split_name_tokens(token))
+
+    if _has_feature(name):
+        return True
+    for raw in label.replace("_", " ").split():
+        if _has_feature(raw):
+            return True
+    return False
 
 
 def score(
@@ -862,6 +911,7 @@ def score(
     param_meta: dict[str, Any] | None = None,
     named_params: dict[str, float] | None = None,
     part_bbox_mm: tuple[float, float, float] | None = None,
+    part_scale: float | None = None,
 ) -> Score:
     """The pinned monotone-comparable improvement metric.
 
@@ -898,6 +948,17 @@ def score(
     ``GATE_REASON_BITS`` names are all unchanged while the abstention
     stays distinguishable from a measured pass.
 
+    ``part_bbox_mm``: the part's settled measured bbox (W, D, H) in mm —
+    an import project's part baseline (issue #332 sub-issue 3 / #383): the
+    bbox gate's target fills unconfirmed axes with the part's extent.
+
+    ``part_scale``: the settled import file→mm factor (``not None`` → an
+    import project; issue #420's import signal). It threads the
+    import-only feature-noun exemption into bit 5 (``_axis_param_mismatches
+``) so a feature param ("Groove depth" tagged D) can't fail the gate or
+    the repair evidence on an import; ``None`` (scratch) keeps bit 5
+    byte-identical.
+
     Per-axis semantics (issue #247): ``stated_dims`` is the per-axis
     confirmed set normalized into the triple — a partially confirmed run
     (e.g. only H) checks ONLY H and abstains on W/D. The frame contract
@@ -921,6 +982,7 @@ def score(
             bbox,
             named_params if named_params is not None else {},
             param_meta if param_meta is not None else {},
+            part_scale,
         ),
     )
     # An abstained axis is ANY unknown target, independent of whether the
@@ -1855,6 +1917,7 @@ async def run_design_loop_async(
             param_meta=extract_param_meta(scad),
             named_params=_scad_params(scad_source),
             part_bbox_mm=part_bbox_mm,
+            part_scale=part_scale,
         )
 
         # Failure routing: tagged, structured, NEVER terminal. Compile
@@ -1884,7 +1947,10 @@ async def run_design_loop_async(
             if any(not bit for bit in candidate_score.bits[1:]):
                 _mismatches = (
                     _axis_param_mismatches(
-                        bbox, _scad_params(scad_source), extract_param_meta(scad)
+                        bbox,
+                        _scad_params(scad_source),
+                        extract_param_meta(scad),
+                        part_scale=part_scale,
                     )
                     if not candidate_score.axis_params_match
                     else []
