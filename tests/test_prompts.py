@@ -97,6 +97,48 @@ def test_design_prompt_axis_schema_description() -> None:
     assert "hole_distance_from_left_edge" in axis_desc
 
 
+def test_design_prompt_total_height_instruction_in_schema() -> None:
+    """Issue #409 (task-prompt): the ``TOTAL_HEIGHT_INSTRUCTION`` constant
+    is the single source of the ``total_height`` derived-parameter
+    instruction.  The constant is exported from ``d33d.design_llm`` so the
+    loop prompt builders (``d33d.design_loop._design_system`` /
+    ``_design_messages``) can reference it — the same single-definition
+    pattern as ``SCREW_CLEARANCE_INSTRUCTION`` in ``design_prompts``.
+
+    The instruction text carries the key elements: the parameter name
+    (``total_height``), the rule (derived = a literal sum), and the scope
+    (only when the part IS a stack of features)."""
+    from d33d.design_llm import TOTAL_HEIGHT_INSTRUCTION
+
+    # The constant is importable and non-empty.
+    assert isinstance(TOTAL_HEIGHT_INSTRUCTION, str)
+    assert len(TOTAL_HEIGHT_INSTRUCTION) > 20
+    # The instruction names the parameter.
+    assert "total_height" in TOTAL_HEIGHT_INSTRUCTION
+    # It specifies the parameter is derived (a literal sum).
+    assert "derived" in TOTAL_HEIGHT_INSTRUCTION
+    assert "literal sum" in TOTAL_HEIGHT_INSTRUCTION or "sum" in TOTAL_HEIGHT_INSTRUCTION
+    # It scopes to stacked parts (not a blanket rule).
+    assert "stack" in TOTAL_HEIGHT_INSTRUCTION or "sum of" in TOTAL_HEIGHT_INSTRUCTION
+    # It is NOT an axis instruction (complements #385, does not replace it).
+    assert '"axis"' not in TOTAL_HEIGHT_INSTRUCTION
+
+
+def test_design_prompt_total_height_instruction_is_derived_not_axis() -> None:
+    """Issue #409 (task-prompt): the ``total_height`` instruction describes
+    a *derived* parameter (a sum of components), not an axis parameter —
+    the instruction must not say to tag it with axis H, and must clarify
+    it is a sum, not a single measurement."""
+    from d33d.design_llm import TOTAL_HEIGHT_INSTRUCTION
+
+    # It is a derived sum.
+    assert "sum" in TOTAL_HEIGHT_INSTRUCTION
+    # It does NOT instruct axis tagging (complements, not replaces, #385).
+    assert '"axis"' not in TOTAL_HEIGHT_INSTRUCTION
+    # It scopes to stacked parts (not a blanket rule for every part).
+    assert "stack" in TOTAL_HEIGHT_INSTRUCTION or "sum of" in TOTAL_HEIGHT_INSTRUCTION
+
+
 def _catalogue():
     env = {"TRAIL_OPENERS_LLM_KEY": "stub", "PAID_AZURE_LLM_KEY": "stub"}
     saved = {k: os.environ.get(k) for k in env}

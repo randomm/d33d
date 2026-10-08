@@ -49,6 +49,7 @@ from d33d.response_shape import response_message_shape
 
 __all__ = [
     "LLM_CALL_TIMEOUT_SECONDS",
+    "TOTAL_HEIGHT_INSTRUCTION",
     "Dialect",
     "LLMResult",
     "SenderError",
@@ -97,6 +98,27 @@ ROLE_TOOL_NAMES: dict[str, str] = {
     "classification": "emit_classification",
     "question": "emit_answer",
 }
+
+#: Issue #409 (task-prompt): the SINGLE source of the design-prompt
+#: instruction that asks the model to declare the part's overall height as
+#: a derived parameter named ``total_height`` when the part is a stack of
+#: features.  The instruction lives here (not in the loop prompt text) so
+#: the T0 tool schema and the T1 fenced-JSON path both carry the same
+#: wording.  The text is intentionally short and imperative — it names the
+#: parameter, the rule (derived = a literal sum of its component
+#: parameters), and the scope (only when the part IS a stack; a simple
+#: block with one height does not need it).  Complements #385's axis-tag
+#: rule: ``total_height`` is a derived parameter, not an axis parameter —
+#: it is the *sum* of the stacked components, never a single measurement.
+TOTAL_HEIGHT_INSTRUCTION = (
+    "When the part is a stack of features (a base plus a rim, a skirt plus "
+    "a plate, a lid on a box — anything where the overall height is the "
+    "sum of two or more named component heights), declare a derived "
+    "parameter named total_height in the top variable block as a literal "
+    "sum of those component parameters (e.g. total_height = base_height + "
+    "rim_height). Do NOT declare total_height for a part whose height is a "
+    "single named parameter already."
+)
 
 #: The OpenAI function-calling tool definition per role — the native ``tools``
 #: array the T0 request carries (the maker closures, 
