@@ -38,9 +38,11 @@ from collections.abc import Callable
 
 __all__ = [
     "_FEATURE_VERBS",
+    "_NON_NOUN_WORDS",
     "_is_bare_measurement",
     "feature_clause_start",
     "feature_clause_suppresses",
+    "in_clause_feature_noun_guard",
     "message_has_feature_noun",
 ]
 
@@ -125,23 +127,67 @@ def message_has_feature_noun(
     return any(feature_noun_re.search(c) for c in clauses)
 
 
-def _feature_noun_in_feature_context(clause: str, feature_noun_re: re.Pattern[str]) -> bool:
-    """True if the clause contains a feature noun in a "with a/an" or
-    "in a/an" phrase (issue #413).
+#: Words that are NOT nouns — the in-clause head-noun guard (issue #413)
+#: skips these when deciding whether a feature noun is the HEAD NOUN of
+#: the clause (no non-feature noun before it). Articles, prepositions,
+#: the mm unit words, and the axis words are not part nouns.
+_NON_NOUN_WORDS: frozenset[str] = frozenset(
+    {
+        "a", "an", "the", "with", "in", "on", "of", "and",
+        "or", "for", "to", "at", "by", "mm", "cm", "m",
+        "inch", "inches", "millimetre", "millimetres",
+        "millimeter", "millimeters", "tall", "high",
+        "height", "wide", "width", "deep", "depth",
+        "taller", "shorter", "higher", "lower", "wider",
+        "narrower", "deeper", "shallower",
+    }
+)
 
-    This is used by the in-clause feature-noun guard to suppress the
-    clause's absolute cue when the feature noun is a SUBORDINATE FEATURE
-    (introduced by "with a/an" or "in a/an"). The cross-clause guard
-    handles the case where the feature noun is the HEAD NOUN of the
-    clause.
+
+def in_clause_feature_noun_guard(
+    clause: str,
+    feature_noun_re: re.Pattern[str],
+    part_nouns: frozenset[str],
+) -> bool:
+    """The in-clause feature-noun guard (issue #261, narrowed on #413).
+
+    True when the clause's number is a FEATURE SIZE, not a part dimension,
+    so the clause's absolute cue must be suppressed. The guard fires when
+    the feature noun is in a "with a/an" / "in a/an" phrase (a
+    SUBORDINATE FEATURE) OR when the feature noun is the HEAD NOUN of the
+    clause (no non-feature noun before it). Part nouns (lid, spacer)
+    are NOT true feature nouns — they name the whole part, so the guard
+    does NOT fire for them.
+
+    ``part_nouns`` is passed in (rather than imported) so this module
+    stays a leaf.
     """
     m = feature_noun_re.search(clause)
-    if m is None:
+    if m is None or m.group(0).lower() in part_nouns:
         return False
     prefix = clause[: m.start()]
-    return bool(
-        re.search(r"\b(?:with|in)\s+(?:a|an)\b", prefix, re.IGNORECASE)
-    )
+    with_match = re.search(r"\b(?:with|in)\s+(?:a|an)\b", prefix, re.IGNORECASE)
+    if with_match is not None:
+        # The number is part of the "with a/an" phrase if the LAST number
+        # in the clause sits after the phrase's start.
+        last_num_pos = -1
+        for num_m in re.finditer(r"\d+", clause):
+            last_num_pos = num_m.end()
+        return last_num_pos > with_match.end()
+    # Not in a "with a/an" phrase: the feature noun is suppressed when it
+    # is the HEAD NOUN — no non-feature noun appears before it.
+    for w in prefix.split():
+        w_clean = w.strip(".,;:!?()[]{}\"'")
+        if not w_clean:
+            continue
+        if feature_noun_re.search(w_clean):
+            continue
+        if w_clean.isdigit():
+            continue
+        if w_clean.lower() in _NON_NOUN_WORDS:
+            continue
+        return False  # a non-feature noun precedes — the feature noun is not the head
+    return True
 
 
 def feature_clause_suppresses(
@@ -202,10 +248,14 @@ def feature_clause_suppresses(
     has_feature_verb = any(
         feature_verb_re(v).search(clause) for v in _FEATURE_VERBS
     )
+    has_feature_noun = feature_noun_re is not None and feature_noun_re.search(clause)
     # A feature verb followed by a part-referencing pronoun ("it", "this",
-    # "that") is a part-level statement, not a feature clause:
-    # "cut it to 15 mm tall" → cutting the part's height, not a feature.
-    if has_feature_verb:
+    # "that") is a part-level statement, not a feature clause — UNLESS a
+    # feature noun follows later in the same clause. "cut it to 15 mm tall"
+    # → cutting the part's height, not a feature (states H=15). But
+    # "add this 10 mm wide slot" → the "slot" feature noun makes it a
+    # feature clause (states nothing — the 10 is the slot's width).
+    if has_feature_verb and not has_feature_noun:
         for v in _FEATURE_VERBS:
             m = feature_verb_re(v).search(clause)
             if m:
@@ -214,7 +264,6 @@ def feature_clause_suppresses(
                     first_word_after = after_verb.split()[0].lower()
                     if first_word_after in ("it", "this", "that"):
                         return False  # part-level statement, not a feature
-    has_feature_noun = feature_noun_re is not None and feature_noun_re.search(clause)
     return (
         feature_clause_start >= 0
         and (

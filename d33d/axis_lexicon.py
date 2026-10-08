@@ -52,8 +52,6 @@ __all__ = [
 # Feature-clause rules (issue #398) — see ``d33d.feature_clause``.
 
 # ---------------------------------------------------------------------------
-# Closed word sets
-# ---------------------------------------------------------------------------
 
 #: The canonical named-parameter axes for the W/D/H stated-dimension triple
 #: (mm). Defined here, at the bottom of the import graph (issue #393):
@@ -63,37 +61,18 @@ __all__ = [
 DIMENSION_AXES: tuple[str, ...] = ("W", "D", "H")
 
 ABSOLUTE_WORDS: dict[str, str] = {
-    "tall": "H",
-    "high": "H",
-    "height": "H",
-    "wide": "W",
-    "width": "W",
-    "deep": "D",
-    "depth": "D",
+    "tall": "H", "high": "H", "height": "H", "wide": "W", "width": "W",
+    "deep": "D", "depth": "D",
 }
 
 RELATIVE_WORDS: dict[str, str] = {
-    "taller": "H",
-    "shorter": "H",
-    "higher": "H",
-    "lower": "H",
-    "wider": "W",
-    "narrower": "W",
-    "deeper": "D",
-    "shallower": "D",
+    "taller": "H", "shorter": "H", "higher": "H", "lower": "H",
+    "wider": "W", "narrower": "W", "deeper": "D", "shallower": "D",
 }
 
 GLOBAL_WORDS: frozenset[str] = frozenset(
-    {
-        "bigger",
-        "smaller",
-        "scale",
-        "scaled",
-        "resize",
-        "resized",
-        "half the size",
-        "twice the size",
-    }
+    {"bigger", "smaller", "scale", "scaled", "resize", "resized",
+     "half the size", "twice the size"}
 )
 
 _RELATIVE = RELATIVE_WORDS
@@ -101,18 +80,8 @@ _GLOBAL = GLOBAL_WORDS
 
 # Words that must NOT trigger any axis (pinned by tests).
 _EXCLUDED: frozenset[str] = frozenset(
-    {
-        "long",
-        "length",
-        "thick",
-        "thickness",
-        "diameter",
-        "bore",
-        "lift",
-        "sit",
-        "reach",
-        "clear",
-    }
+    {"long", "length", "thick", "thickness", "diameter", "bore",
+     "lift", "sit", "reach", "clear"}
 )
 
 # Feature nouns (closed set, issue #261): words that name a FEATURE on
@@ -151,8 +120,6 @@ _FEATURE_NOUNS: frozenset[str] = frozenset(
         "bolts",
         "magnet",
         "magnets",
-        "spacer",
-        "spacers",
         "grid",
         "grids",
         "lid",
@@ -170,13 +137,14 @@ FEATURE_NOUN_RE = re.compile(
     r"(?<!\w)(?:" + "|".join(_FEATURE_NOUNS) + r")(?!\w)", re.IGNORECASE
 )
 
-#: The feature nouns that can ALSO name a whole printed part (issue #305
-#: task-a, operator decision: exactly {"lid"}; widening is a follow-up).
-#: Stays in ``_FEATURE_NOUNS`` (the lexicon's single-number path is
-#: unchanged: "a 7 mm lid" still states nothing); the triple/pair path
-#: (``dimension_protocol._extract_triple``) uses it for its conditional
-#: primary-object suppression. Pinned by ``tests/test_axis_lexicon.py``
-#: (the subset pin).
+#: The nouns that can ALSO name a whole printed part (issue #305 task-a;
+#: issue #413 added "spacer"/"spacers"). "lid" stays in ``_FEATURE_NOUNS``
+#: (the in-clause guard skips part nouns, so the lexicon's single-number
+#: path is unchanged: "a 7 mm lid" still states nothing); the triple/pair
+#: path (``dimension_protocol._extract_triple``) uses this set for its
+#: conditional primary-object suppression. "spacer"/"spacers" are NOT in
+#: ``_FEATURE_NOUNS`` (issue #413 operator decision). Pinned by
+#: ``tests/test_axis_lexicon.py`` (the part-noun pin).
 _PART_NOUNS: frozenset[str] = frozenset({"lid", "spacer", "spacers"})
 
 #: The mating connectors (issue #314): words and phrases that introduce the
@@ -468,60 +436,14 @@ def _classify_clause(
             # entirely in the mating part's zone. No absolute cue.
             return ({}, relative, global_, cue_words)
 
-    # Feature-noun in-clause guard (issue #261, narrowed on #413): the
-    # number is a feature size, not a part dimension, when the feature
-    # noun is in a "with a/an" / "in a/an" phrase (subordinate feature)
-    # OR when the feature noun is the HEAD NOUN of the clause (no
-    # non-feature noun before it). Part nouns (lid, spacer) are NOT
-    # true feature nouns — they name the whole part, so the in-clause
-    # guard does NOT fire for them.
-    if FEATURE_NOUN_RE.search(clause):
-        m = FEATURE_NOUN_RE.search(clause)
-        if m and m.group(0).lower() not in _PART_NOUNS:
-            prefix = clause[: m.start()]
-            in_with_phrase = bool(
-                re.search(r"\b(?:with|in)\s+(?:a|an)\b", prefix, re.IGNORECASE)
-            )
-            if in_with_phrase:
-                # Check if the number is AFTER "with a" (part of the
-                # "with a" phrase) or BEFORE it (not part of the phrase).
-                # Find the position of "with a" in the prefix.
-                with_match = re.search(r"\b(?:with|in)\s+(?:a|an)\b", prefix, re.IGNORECASE)
-                if with_match:
-                    # Find the last number in the clause.
-                    last_num_pos = -1
-                    for num_m in re.finditer(r"\d+", clause):
-                        last_num_pos = num_m.end()
-                    # The number is part of the "with a" phrase if it's
-                    # after "with a" ends.
-                    if last_num_pos > with_match.end():
-                        return ({}, relative, global_, cue_words)
-            # Not in a "with a/an" phrase: check if the feature noun is
-            # the head noun (no non-feature noun before it).
-            _NON_NOUN_WORDS = {
-                "a", "an", "the", "with", "in", "on", "of", "and",
-                "or", "for", "to", "at", "by", "mm", "cm", "m",
-                "inch", "inches", "millimetre", "millimetres",
-                "millimeter", "millimeters", "tall", "high",
-                "height", "wide", "width", "deep", "depth",
-                "taller", "shorter", "higher", "lower", "wider",
-                "narrower", "deeper", "shallower",
-            }
-            found_non_feature_noun = False
-            for w in prefix.split():
-                w_clean = w.strip(".,;:!?()[]{}\"'")
-                if not w_clean:
-                    continue
-                if FEATURE_NOUN_RE.search(w_clean):
-                    continue
-                if w_clean.isdigit():
-                    continue
-                if w_clean.lower() in _NON_NOUN_WORDS:
-                    continue
-                found_non_feature_noun = True
-                break
-            if not found_non_feature_noun:
-                return ({}, relative, global_, cue_words)
+    # Feature-noun in-clause guard (issue #261, narrowed on #413) — see
+    # ``d33d.feature_clause.in_clause_feature_noun_guard``. The number is a
+    # feature size, not a part dimension, when the feature noun is a
+    # SUBORDINATE FEATURE ("with a/an" / "in a/an") or the HEAD NOUN of
+    # the clause. Part nouns (lid, spacer) are NOT true feature nouns —
+    # they name the whole part, so the guard does NOT fire for them.
+    if feature_clause.in_clause_feature_noun_guard(clause, FEATURE_NOUN_RE, _PART_NOUNS):
+        return ({}, relative, global_, cue_words)
 
     # Feature-clause suppression (issue #398, narrowed on #413) — see
     # ``d33d.feature_clause``. Relative/global cues are KEPT (a release
