@@ -3075,13 +3075,13 @@ def test_through_hole_repair_then_through_mesh_passes_within_cap(tmp_path):
 
 
 def test_through_hole_baseline_comparison(tmp_path):
-    """Issue #386 (operator decision 2026-10-05): the baseline
-    comparison — a part whose stored hole count is 1 (baseline 1): a
-    pocket render (genus 0) does not exceed it (fires, geometrically_
-    wrong); a through render (genus 1) does NOT exceed it either
-    (EXCEED is strict — a single hole on a one-hole part still fires).
-    The baseline comes from the explicit ``through_baseline_genus``
-    seam (the route's part-report reader, not re-parsed here)."""
+    """Issue #386 / #418 (article rule): the baseline comparison with a
+    NEW-hole request (indefinite article — "drill a 6 mm hole through")
+    over a part whose baseline is 1: a pocket render (genus 0) must
+    fail (0 < 1); a through render (genus 1) does NOT rise above the
+    baseline (1 does not exceed 1 → FAIL); a through render over a zero
+    baseline passes (1 exceeds 0). The baseline comes from the explicit
+    ``through_baseline_genus`` seam."""
     pocket_stl = str(tmp_path / "pocket.stl")
     through_stl = str(tmp_path / "through.stl")
     _box_minus_cylinder(blind=True).export(pocket_stl)
@@ -3118,8 +3118,8 @@ def _box_with_n_through_holes(n: int) -> trimesh.Trimesh:
 
 
 def test_through_hole_plate_genus_3_pocket_fails_through_passes(tmp_path):
-    """Issue #386 (operator decision 2026-10-05, case ii): an imported
-    plate with genus 3 (three existing through-holes). A pocket render
+    """Issue #386 / #418 (case ii, new-hole request): an imported plate
+    with genus 3 (three existing through-holes). A pocket render
     (genus 3 — the pocket did not add a hole) must FAIL (3 does not
     exceed 3). A through-hole render (genus 4 — one new hole added) must
     PASS (4 exceeds 3)."""
@@ -3139,17 +3139,39 @@ def test_through_hole_plate_genus_3_pocket_fails_through_passes(tmp_path):
 
 
 def test_through_hole_v2_edit_existing_hole(tmp_path):
-    """Issue #386 (operator decision 2026-10-05, case iii): a v2 edit
-    on a design whose v1 already has one hole (baseline 1). A pocket
-    render (genus 0) must FAIL. A through render (genus 1) does NOT
-    exceed the baseline — must also FAIL (EXCEED is strict). A render
-    with genus 2 (two through-holes) exceeds the baseline — PASSES."""
-    req = "drill another 6 mm hole through the middle"
+    """Issue #386 / #418 (case iii, v2 edit — article rule): a v2 edit
+    that targets the EXISTING hole (definite article — "make the
+    through-hole 8 mm") on a design whose v1 already has one hole
+    (baseline 1). A pocket render (genus 0) must FAIL (the hole closed
+    — genus fell below the baseline). A through render (genus 1 — the
+    hole resized in place) must PASS (an unchanged genus passes).
+    A render with genus 2 also passes (the genus rose)."""
+    req = "make the through-hole 8 mm"
     pocket_stl = str(tmp_path / "pocket.stl")
     _box_minus_cylinder(blind=True).export(pocket_stl)
     result = _run_through_loop(pocket_stl, req, through_baseline_genus=1)
     assert result.status == "exhausted"
     assert result.iterations[0].failure_class == "geometrically_wrong"
+    through_stl = str(tmp_path / "through.stl")
+    _box_minus_cylinder(blind=False).export(through_stl)
+    result = _run_through_loop(through_stl, req, through_baseline_genus=1)
+    assert result.status == "pass"
+    assert result.iterations_used == 1
+    genus2_stl = str(tmp_path / "genus2.stl")
+    _box_with_n_through_holes(2).export(genus2_stl)
+    result = _run_through_loop(genus2_stl, req, through_baseline_genus=1)
+    assert result.status == "pass"
+    assert result.iterations_used == 1
+
+
+def test_through_hole_v2_edit_new_hole_over_existing(tmp_path):
+    """Issue #418 (v2 edit — article rule, NEW-hole request): a v2 edit
+    that asks for a NEW hole (indefinite article — "drill a 6 mm hole
+    through the middle") over a design whose parent has one hole
+    (baseline 1). A through render of genus 1 (no new hole) must FAIL
+    (the genus did not rise); a genus-2 render (one new hole) must
+    PASS."""
+    req = "drill a 6 mm hole through the middle"
     through_stl = str(tmp_path / "through.stl")
     _box_minus_cylinder(blind=False).export(through_stl)
     result = _run_through_loop(through_stl, req, through_baseline_genus=1)
