@@ -1459,13 +1459,10 @@ def scad_looks_valid(scad: str) -> bool:
     and (3) contain at least one known OpenSCAD keyword
     (token-bounded). Prose that slipped past the fenced-JSON protocol
     (a chat response inside a fence, a refusal with a stray ``;``) fails
-    at least one leg.
-
-    The caller decides the degraded behavior: the design loop treats a
-    reject as empty SCAD (its ``empty_scad`` fail-fast path handles it —
-    the render worker never spends a run compiling garbage); the
-    adapter's timeout-kept path (``design_loop_events``) suppresses
-    version creation instead.
+    at least one leg. Both callers treat a reject as absent SCAD: the
+    loop's ``empty_scad`` fail-fast never spends a render run compiling
+    garbage, and the adapter's timeout-kept version gate (issue #417)
+    never persists a truncated stream as a version.
     """
     if ";" not in scad:
         return False
@@ -1618,10 +1615,6 @@ def _scad_from_result(result: LLMResult) -> str:
     if len(candidate.encode("utf-8", "replace")) > MAX_SCAD_SOURCE_BYTES:
         return ""
     if not scad_looks_valid(candidate):
-        # The heuristic's caller-contract sentence (issue #417 review): the
-        # loop's empty-scad fail-fast handles it here; the adapter's
-        # timeout-kept path (design_loop_events) instead suppresses version
-        # creation entirely (no empty-scad path downstream of that gate).
         return ""
     return candidate
 
@@ -1632,10 +1625,20 @@ def _scad_from_result(result: LLMResult) -> str:
 
 
 async def _call(fn: Any, *args: Any) -> Any:
-    """Invoke an injected callable that may be sync or async."""
+    """Invoke an injected callable that may be sync or async.
+
+    An async callable is invoked in its OWN task (not awaited inline):
+    the loop's per-attempt deadline (issue #417) wraps the awaited
+    future with ``asyncio.wait_for``, and ``wait_for`` must be able to
+    CANCEL the in-flight call on expiry — an inline ``await`` leaves no
+    task to cancel, so the deadline would never fire for a hanging
+    coroutine. (A sync callable still runs inline — it has no cancel
+    path of its own; its boundedness is the render worker's subprocess
+    timeout, not this deadline.)
+    """
     result = fn(*args)
     if asyncio.iscoroutine(result):
-        result = await result
+        return await asyncio.ensure_future(result)
     return result
 
 
@@ -1784,24 +1787,17 @@ async def run_design_loop_async(
     consecutive_no_improvement = 0
     iterations: list[IterationRecord] = []
 
-    # The per-attempt wall-clock deadline (issue #417): each design LLM
-    # call gets its OWN budget so three slow attempts are not cut off by
-    # one flat total. The budget is ``attempt_timeout`` (the production
-    # wiring defaults it to the loop's :data:`LLM_CALL_TIMEOUT_SECONDS`,
-    # 120 s — the same scale as the render worker's 120 s subprocess
-    # timeout; tests pass a small value). ``None`` (or a non-positive
-    # value) disables the deadline — the loop runs to its 3-attempt cap
-    # as before the fix. The deadline is the SOLE loop-level timeout
-    # (the adapter's derived total is the same value; the httpx per-call
-    # timeout is per-PHASE — connect/read/write/pool — not a total, so a
-    # slow-but-not-hung call that trickles tokens is bounded by the
-    # deadline, not by the per-phase httpx cap): it CANCELS the design
-    # call (the async httpx request is interrupted — unlike the render
-    # worker's subprocess timeout, a cancelled coroutine does NOT run on
-    # to completion in the background). With up to 3 attempts × budget
-    # each, a slow model therefore holds up to 3 ``to_thread`` workers
-    # per concurrent loop — size the default executor accordingly when
-    # running many concurrent design loops against a slow model.
+    # The per-attempt wall-clock deadline (issue #417): each design
+    # iteration gets its OWN budget (``attempt_timeout`` — production
+    # defaults it to :data:`LLM_CALL_TIMEOUT_SECONDS`, 120 s) so three
+    # slow attempts are never cut off by one flat total, and no single
+    # LLM call may hang forever. The loop is the SOLE owner of the time
+    # budget: on expiry it returns the best-so-far rendered candidate
+    # through the SAME result path an exhausted loop uses (a real,
+    # scored ``IterationRecord`` — never fabricated), and the adapter's
+    # derived total (per-attempt × MAX_ITERATIONS + margin, issue #417)
+    # is a pure outer safety net that fires only for a run that stops
+    # yielding frames before the loop's own deadline can.
     for iteration in range(1, max_iterations + 1):
         _stamp_on_progress_iteration(on_progress, iteration)
         scad_co = _call(
@@ -1824,34 +1820,23 @@ async def run_design_loop_async(
             _design_system(stated_dims, part_scale),
         )
         if attempt_timeout is not None and attempt_timeout > 0:
-            try:
-                scad = await asyncio.wait_for(scad_co, timeout=attempt_timeout)
-            except asyncio.TimeoutError:
-                # The per-attempt deadline fired on the design call
-                # (issue #417): the slow call is CANCELLED (asyncio.
-                # wait_for cancels the inner task, which interrupts the
-                # async httpx request — unlike the render worker's
-                # subprocess timeout, the call does NOT run on to
-                # completion in the background), and the run ends WITH
-                # the best candidate rendered so far ("keep the best
-                # candidate, say the model is slow"), never a fabricated
-                # empty result. An empty-iteration deadline (no
-                # candidate yet) is the honest zero-render case the
-                # adapter's "no version" path handles.
-                logger.warning(
-                    "design loop attempt %s exceeded the %ss per-attempt "
-                    "deadline — returning the best-so-far candidate "
-                    "(%d iteration(s) completed)",
-                    iteration,
-                    attempt_timeout,
-                    len(iterations),
-                )
-                return _exhausted(
-                    iterations,
-                    best,
-                    best_score,
-                    failure_reason="design_loop_timed_out",
-                )
+            # The deadline can fire: ``_await_with_per_attempt_deadline``
+            # returns ``LLMResult`` on success, the best-so-far
+            # exhausted ``DesignResult`` on expiry (the loop's own
+            # per-attempt deadline — issue #417). The type union is
+            # handled here: a ``DesignResult`` is the terminal result
+            # itself.
+            _scad_or_result = await _await_with_per_attempt_deadline(
+                scad_co,
+                timeout=attempt_timeout,
+                iteration=iteration,
+                on_timeout=lambda it=iterations, b=best, s=best_score: _exhausted(
+                    it, b, s, failure_reason="design_loop_timed_out"
+                ),
+            )
+            if isinstance(_scad_or_result, DesignResult):
+                return _scad_or_result
+            scad = _scad_or_result
         else:
             scad = await scad_co
         design_hash = scad.prompt_hash
@@ -1862,6 +1847,25 @@ async def run_design_loop_async(
         # call and carried onto the iteration record(s) this call builds.
         _confirm_first, _confirm_sentence = extract_confirm_hints(scad)
         scad_source = _scad_from_result(scad)
+        # The loop's own SCAD-bearing progress frame (issue #417): the
+        # adapter's deadline path versions the best-so-far candidate via
+        # this frame — a REAL candidate the loop actually produced
+        # (rendered, scored, bbox measured below), never unvalidated
+        # text. The per-view markers (issue #121) never carry the
+        # source; this one does (payload: ``scad_source`` + 1-based
+        # ``iteration``). Emitted on every iteration (including the
+        # fail-fast empty-SCAD record) so the adapter's tracker holds
+        # the LAST candidate the loop produced; the adapter's
+        # ``scad_looks_valid`` gate suppresses the version on an empty
+        # or truncated source (honest absence).
+        if on_progress is not None:
+            try:
+                on_progress(
+                    "scad-ready",
+                    {"scad_source": scad_source, "iteration": iteration},
+                )
+            except Exception:  # the hook is best-effort (the run never dies on it)
+                logger.debug("scad-ready on_progress hook failed", exc_info=True)
         if not scad_source.strip():
             # Fail fast: an empty/blank SCAD would burn a whole render run
             # on nothing. A distinct structured error (not a render class)
@@ -2539,6 +2543,42 @@ def _container_error_stop(
         failure_reason="container_error",
         iterations_used=len(iterations),
     )
+
+
+async def _await_with_per_attempt_deadline(
+    scad_co: Any,
+    *,
+    timeout: float,
+    iteration: int,
+    on_timeout: Callable[[], DesignResult],
+) -> LLMResult:
+    """Await one design LLM call under the loop's per-attempt deadline
+    (issue #417 — the loop is the SOLE owner of the time budget).
+
+    The budget is per ATTEMPT (never a flat whole-loop total), so three
+    slow attempts are not cut off by one 180 s lid, and no single LLM
+    call may hang forever: the call is bounded by ``asyncio.wait_for``,
+    which CANCELS the coroutine on expiry (the in-flight httpx request
+    is interrupted — an async call cancelled in the event loop does not
+    run on to completion in the background; the ``to_thread`` worker
+    thread it awaited on is a different lifetime, bounded by the render
+    worker's own 120 s subprocess timeout one level down).
+
+    On expiry the run ends WITH the best-so-far rendered candidate
+    (``on_timeout`` builds the best-so-far exhausted result — the same
+    result path an exhausted loop uses, with the structured
+    ``design_loop_timed_out`` reason), never a fabricated empty result.
+    """
+    try:
+        return await asyncio.wait_for(scad_co, timeout=timeout)
+    except TimeoutError:
+        logger.warning(
+            "design loop attempt %s exceeded the %ss per-attempt deadline "
+            "— returning the best-so-far candidate",
+            iteration,
+            timeout,
+        )
+        return on_timeout()
 
 
 def _exhausted(

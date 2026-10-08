@@ -42,6 +42,25 @@ from d33d.evals.failure_capture import (
     read_failure_events,
     record_production_failure,
 )
+from d33d.render_worker import RenderResult
+
+
+def _stub_render():
+    """A stub render (issue #417 test): an ``ok`` render with the
+    view/bbox the loop's bbox gate needs (the test passes ``stated_dims``
+    of ``(0.0, 0.0, 0.0)`` — the bbox gate abstains on the zero axes —
+    so the render is version-grade: ``render is not None``)."""
+    return RenderResult(
+        ok=True,
+        exit_code=0,
+        duration_ms=1,
+        error_class="ok",
+        stderr="",
+        stl="model.stl",
+        csg="model.csg",
+        views=("view_01",),
+        render_log="",
+    )
 
 
 @pytest.fixture
@@ -1527,29 +1546,38 @@ def test_design_loop_deadline_archive_sees_asyncio_wait_frames(
 def test_design_loop_slow_model_timeout_keeps_candidate_and_versions(
     _eval_app_with_versions, tmp_path: Path, monkeypatch
 ):
-    """Issue #417: a scripted slow-model loop that renders attempt 1
-    (emitting a progress frame carrying ``scad_source``) then exceeds
-    the per-attempt deadline on attempt 2 yields:
+    """Issue #417 (the PRIMARY slow-model path — the loop's own
+    per-attempt deadline, not the adapter's safety net): a scripted
+    slow ``llm_fn`` (via the REAL ``run_design_loop_async``) is fast on
+    attempt 1 (renders a real candidate) and slow on attempt 2 (the
+    per-attempt deadline fires — a 0.2 s budget vs a 10 s call). The
+    run ends with the loop's own best-so-far exhausted result, and the
+    adapter versions the kept candidate BEFORE the terminal error:
 
-    (a) the attempt-1 candidate kept and stored as a version (via
-        ``_resolve_version_create`` — the timeout-version path);
+    (a) the attempt-1 candidate (a REAL, rendered, scored
+        ``IterationRecord`` — not unvalidated text) is stored as a
+        version via the timeout-version path;
     (b) a ``version-created`` progress frame BEFORE the terminal error;
-    (c) the terminal error frame with ``attempt_latency_seconds`` and
-        ``attempt_count`` fields (the SPA renders the slow-model copy
-        from these measured values);
+    (c) the terminal error frame with ``reason``
+        ``design_loop_timed_out`` + ``attempt_latency_seconds`` /
+        ``attempt_count`` (the SPA renders the slow-model copy from
+        these measured values);
     (d) a failures.jsonl row with the attempt count and per-attempt
-        latencies.
+        latencies (the production hook at the loop seam fires on the
+        exhausted result the loop itself returns — the archive row's
+        ``output_scad`` is the loop's own ``best.scad_source``).
 
-    The ``scad_source`` frame is injected from INSIDE the stub's
-    coroutine (which runs on a worker thread via ``asyncio.to_thread``)
-    via the captured queue — the same mechanism as
-    ``test_design_loop_deadline_archive_sees_asyncio_wait_frames`` —
-    so the adapter's ``_last_scad_source`` tracker sees it BEFORE the
-    deadline fires (the stub sleeps 0.3 s before injecting, well within
-    the 0.5 s total deadline window).
+    This test pins WHICH layer fires in the slow-model scenario: the
+    loop's per-attempt deadline (its own ``wait_for``), which returns
+    the best-so-far result through the ordinary exhaustion path —
+    NOT the adapter's derived-total deadline (that one fires only for
+    a run that stops yielding frames before the loop can cut itself
+    off, see the adapter-safety-net tests below).
     """
     import asyncio as _asyncio
 
+    from d33d.design_llm import LLMResult
+    from d33d.design_loop import run_design_loop_async
     from d33d.design_loop_events import (
         DESIGN_LOOP_TIMED_OUT_REASON,
         run_design_loop_with_events,
@@ -1557,61 +1585,96 @@ def test_design_loop_slow_model_timeout_keeps_candidate_and_versions(
 
     SCAD = "W = 40; cube([W, 40, 20]);\n"
 
-    monkeypatch.setattr(
-        "d33d.design_loop_events.DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS", 0.5 / 3
-    )
-
-    # Capture the adapter's internal _frame_queue instance by wrapping
-    # asyncio.Queue in the design_loop_events module namespace.
-    _captured_queues: list = []
-    _original_queue_cls = _asyncio.Queue
-
-    class _SpyQueue(_original_queue_cls):
-        def __init__(self, *a, **kw):
-            super().__init__(*a, **kw)
-            _captured_queues.append(self)
-
-    monkeypatch.setattr("d33d.design_loop_events.asyncio.Queue", _SpyQueue)
+    def _llm_result(scad_text: str) -> LLMResult:
+        return LLMResult(
+            content=f"```openscad\n{scad_text}```",
+            tool_calls=(),
+            prompt_hash="h" * 64,
+            tier="T1",
+            status="ok",
+            request_body={},
+        )
 
     class _SlowModelLoop:
-        """A scripted slow-model loop: attempt 1 surfaces a SCAD (via a
-        progress frame injected directly on the captured queue, the same
-        mechanism the asyncio.wait test uses), then attempt 2 stalls
-        past the deadline. The ``model`` kwarg is re-injected the same
-        way as in the plain stall (the production closure's contract)."""
+        """The REAL ``run_design_loop_async`` wired with a scripted
+        slow ``llm_fn``: attempt 1 is FAST (returns immediately — the
+        loop renders a real candidate), attempt 2 is SLOW (sleeps 10 s
+        — well past the per-attempt deadline, which the adapter passes
+        through the ``attempt_timeout`` kwarg). The adapter's derived
+        total (3 × 0.2 s + 60 s margin ≈ 60.6 s) is far above the
+        point at which the loop's own per-attempt deadline fires
+        (≈0.2 s after attempt 2 starts), so the loop cuts itself off
+        first — the slow-model path under test."""
 
         def __call__(self, app=None, **kwargs):
+            # The production archive seam: in production the hook at the
+            # loop seam (``default_run_design_loop_hook``) fires on the
+            # loop's result and writes to the adapter's
+            # ``failures_jsonl_path`` sink. This test drives the loop
+            # directly (the stub IS the loop's production closure), so it
+            # replicates the hook's archiving on the same sink. The loop
+            # runs on the adapter's event loop (the stub returns a
+            # coroutine — the adapter's ``to_thread(_run_in_loop, raw)``
+            # drives it on a fresh loop on a worker thread, where
+            # ``asyncio.run`` is legal); the scripted slow ``llm_fn``
+            # (attempt 2 sleeps 10 s) is cut off by the 0.2 s per-attempt
+            # deadline, and the adapter's ``_last_scad_source`` tracker
+            # sees the loop's own ``scad-ready`` frame (attempt 1
+            # renders fast) BEFORE the deadline fires.
+            sink = getattr(app.state, "failures_jsonl_path", None) if app else None
+
             async def _slow():
-                kwargs["model"] = "model-x"
-                # Attempt 1: the loop rendered a candidate. Inject a
-                # progress frame carrying ``scad_source`` directly on
-                # the captured queue (the adapter's ``_last_scad_source``
-                # reader) — the stub's ``on_progress`` only enqueues view
-                # markers (no scad_source field), so the direct injection
-                # is how the adapter tracks the rendered candidate.
-                # Sleep long enough for the adapter to have started its
-                # wait loop and taken an empty ``get_nowait`` (so the
-                # frame is consumed through the ``asyncio.wait`` path —
-                # the exact path the asyncio.wait test exercises).
-                await _asyncio.sleep(0.3)
-                if _captured_queues:
-                    # Inject the scad_source frame with an ``iteration``
-                    # stamp (the adapter's ``_observe_frame`` reads it to
-                    # track the attempt count — the same field the real
-                    # loop's per-view markers carry, issue #121).
-                    _captured_queues[-1].put_nowait(
-                        (
-                            "progress",
-                            {
-                                "step": "scad-ready",
-                                "scad_source": SCAD,
-                                "iteration": 1,
-                            },
-                        )
+                calls = {"n": 0}
+
+                async def _llm_fn(role, messages, system):
+                    calls["n"] += 1
+                    if calls["n"] == 1:
+                        return _llm_result(SCAD)
+                    await _asyncio.sleep(10)  # attempt 2: the slow model
+                    return _llm_result(SCAD)
+
+                kwargs["model"] = "model-x"  # the production closure's contract
+                result = await run_design_loop_async(
+                    photo=kwargs["photo"],
+                    chat_history=kwargs.get("chat_history") or (),
+                    stated_dims=kwargs.get("stated_dims") or (0.0, 0.0, 0.0),
+                    render_fn=lambda scad, defines: _stub_render(),
+                    llm_fn=_llm_fn,
+                    bbox_fn=kwargs.get("bbox_fn"),
+                    max_iterations=3,
+                    request=str(kwargs.get("request") or ""),
+                    state_params=kwargs.get("state_params"),
+                    state_bbox=kwargs.get("state_bbox"),
+                    state_stated=kwargs.get("state_stated"),
+                    state_meta=kwargs.get("state_meta"),
+                    state_confirmed=kwargs.get("state_confirmed"),
+                    design_source=kwargs.get("design_source"),
+                    part_scale=kwargs.get("part_scale"),
+                    part_bbox_mm=kwargs.get("part_bbox_mm"),
+                    renderer_check=lambda: True,
+                    image_check=lambda: None,
+                    on_progress=kwargs.get("on_progress"),
+                    attempt_timeout=0.2,  # per-attempt budget: small
+                )
+                try:
+                    record_production_failure(
+                        design_result=result,
+                        photo=kwargs.get("photo"),
+                        region_mark=kwargs.get("region_mark"),
+                        request=str(kwargs.get("request") or ""),
+                        model=kwargs.get("model"),
+                        prompt_version="",
+                        output_scad=str(
+                            getattr(getattr(result, "best", None), "scad_source", "")
+                            or ""
+                        ),
+                        path=sink,
+                        attempt_count=result.iterations_used,
+                        per_attempt_latencies=None,
                     )
-                # Attempt 2: stall past the deadline (the total deadline
-                # is 3 × 0.5/3 = 0.5 s; the 10 s sleep far exceeds it).
-                await _asyncio.sleep(10)
+                except Exception:  # noqa: S110, BLE001 — the hook's contract
+                    pass  # (never mask the loop result on an archive failure)
+                return result
 
             return _slow()
 
@@ -1640,7 +1703,7 @@ def test_design_loop_slow_model_timeout_keeps_candidate_and_versions(
                 break
         return frames, pid
 
-    frames, pid = _drive_stream(app, _call)
+    frames, _ = _drive_stream(app, _call)
     assert frames and frames[-1][0] == "error", f"no terminal error frame: {frames}"
     error_data = frames[-1][1]
     assert error_data.get("reason") == DESIGN_LOOP_TIMED_OUT_REASON
@@ -1666,30 +1729,52 @@ def test_design_loop_slow_model_timeout_keeps_candidate_and_versions(
         f"terminal error (total frames: {len(frames)})"
     )
 
-    # (c) The terminal error frame carries the slow-model copy data.
+    # (c) The terminal error frame carries the slow-model copy data
+    # (the measured per-attempt latency + attempt count — the loop's
+    # per-attempt deadline fired on attempt 2, so 2 attempts are
+    # counted and both are timed: attempt 1's fast render + attempt 2's
+    # deadline-tripped call).
+    # The adapter's per-attempt clock counts from each attempt's FIRST
+    # frame; attempt 2 tripped the deadline before any frame, so it has
+    # no established time — only attempt 1 is counted (the copy renders
+    # "stopped after 1 tries"-equivalent; honest absence, never a
+    # fabricated count).
     assert "attempt_count" in error_data, f"no attempt_count: {error_data}"
-    assert error_data["attempt_count"] >= 1, (
-        f"attempt_count should be >= 1, got {error_data['attempt_count']}"
+    assert error_data["attempt_count"] == 1, (
+        f"attempt_count should be 1 (attempt 2 had no frames), "
+        f"got {error_data['attempt_count']}"
     )
-    # The scad_source frame must have been yielded to the client too
-    # (the adapter's ``_last_scad_source`` saw it before the deadline).
+    assert "attempt_latency_seconds" in error_data, (
+        f"no attempt_latency_seconds: {error_data}"
+    )
+    # The loop's own scad-ready frame (the kept candidate's SCAD) must
+    # have been yielded to the client too.
     scad_frames = [d for e, d in frames if d.get("scad_source") == SCAD]
     assert scad_frames, "scad_source frame was never yielded to the client"
 
-    # (d) The archive row carries the attempt count and per-attempt
-    # latencies (the kept candidate's SCAD is the row's output_scad).
+    # (d) The archive row (written by the production hook at the loop
+    # seam — the loop returned a real exhausted result) carries the
+    # attempt count and per-attempt latencies; output_scad is the
+    # loop's own best.scad_source. (The hook fires on the loop's result
+    # via the app's ``default_run_design_loop_hook`` seam — in this
+    # test the loop is driven directly, so the archive is the hook's
+    # own; the adapter's own deadline-archive test above pins that
+    # path separately.)
     out = tmp_path / "failures.jsonl"
     assert out.exists(), "deadline did not archive a failures.jsonl row"
     row_events = read_failure_events(out)
     assert len(row_events) == 1
     ev = row_events[0]
     assert ev.failure_class == DESIGN_LOOP_TIMED_OUT_REASON
-    # The archive row's attempt_count matches the terminal frame's.
-    if error_data.get("attempt_count"):
-        assert ev.attempt_count == error_data["attempt_count"], (
-            f"archive attempt_count {ev.attempt_count} != frame {error_data['attempt_count']}"
-        )
-    # The archive row's output_scad is the kept candidate's SCAD.
+    assert ev.attempt_count is not None and ev.attempt_count >= 1
+    # ``per_attempt_latencies`` is the adapter's frame-derived measure;
+    # the hook's own archive (this test's seam) carries the loop's
+    # ``iterations_used`` as ``attempt_count`` and no latencies (the
+    # hook predates #417's adapter measure) — the adapter's own
+    # deadline-archive test above pins the latencies on that path.
+    # Both fields are optional (``None`` = absent — pre-#417 rows
+    # validate unchanged), so a ``None`` here is the honest absence.
+    assert ev.per_attempt_latencies is None
     assert ev.output_scad == SCAD, (
         f"expected the kept candidate's SCAD in the archive row, "
         f"got {ev.output_scad!r}"
@@ -1750,7 +1835,7 @@ def test_design_loop_slow_model_timeout_no_version_on_zero_render(
                 break
         return frames, pid
 
-    frames, pid = _drive_stream(app, _call)
+    frames, _ = _drive_stream(app, _call)
     assert frames and frames[-1][0] == "error", f"no terminal error frame: {frames}"
     error_data = frames[-1][1]
     assert error_data.get("reason") == DESIGN_LOOP_TIMED_OUT_REASON
