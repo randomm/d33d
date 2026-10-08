@@ -49,7 +49,7 @@ from d33d.design_loop import (
     _gate_selection_extents,
     scad_looks_valid,
 )
-from d33d.loop_timeout import AttemptTracker
+from d33d.loop_timeout import AttemptTracker, archive_deadline
 from d33d.render_worker import VIEWS, RenderResult
 
 logger = logging.getLogger(__name__)
@@ -87,8 +87,8 @@ DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS = 120.0
 #: deadline has already cut off (returning its best-so-far result through
 #: the ordinary exhaustion path) is never cut off twice by the adapter.
 #: The adapter deadline stays below the client's
-#: ``STREAM_TOTAL_TIMEOUT_MS`` (``web/src/lib/api.ts``, 720 s) with margin
-#: (360 + 60 = 420 s < 720 s) so the server's structured frame arrives
+#: ``STREAM_TOTAL_TIMEOUT_MS`` (``web/src/lib/api.ts``, 480 s) with margin
+#: (360 + 60 = 420 s < 480 s) so the server's structured frame arrives
 #: before the client's generic "stream interrupted" kill.
 ADAPTER_DEADLINE_MARGIN_SECONDS = 60.0
 
@@ -100,7 +100,7 @@ ADAPTER_DEADLINE_MARGIN_SECONDS = 60.0
 #: one flat 180 s total, the bug issue #417 fixes); this constant is the
 #: derived total the adapter races against as a cut-off. The client-side
 #: ``STREAM_TOTAL_TIMEOUT_MS`` (``web/src/lib/api.ts``) must exceed it
-#: with margin (720 s > 360 s) so the server's structured
+#: with margin (480 s > 360 s) so the server's structured
 #: ``design_loop_timed_out`` frame normally arrives first.
 DESIGN_LOOP_TIMEOUT_SECONDS = DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS * MAX_ITERATIONS
 
@@ -1677,36 +1677,6 @@ async def _resolve_version_create(
     return int(version["id"])
 
 
-class _DeadlinedLoopResult:
-    """A synthetic exhausted ``DesignResult`` for the deadline-kill
-    archive (issue #396).
-
-    A whole-loop timeout (the ``run_design_loop_with_events`` deadline
-    cutting off a stalled loop) produces NO real loop result — the
-    loop never returned, so the hook the app wires at the loop seam
-    (``record_production_failure``) never sees it, and the timeout
-    would never reach ``failures.jsonl``. This stub carries just what
-    the hook reads (``status``, ``failure_reason``, ``best``) so the
-    deadline path can archive the stall with the loop-level
-    :data:`DESIGN_LOOP_TIMED_OUT_REASON` class and the best available
-    candidate text, never a fabricated full result.
-    """
-
-    status = "exhausted"
-    failure_reason = DESIGN_LOOP_TIMED_OUT_REASON
-
-    def __init__(self, scad: str = "") -> None:
-        self.scad_source = scad
-
-    @property
-    def best(self) -> Any:
-        # The hook reads ``best.scad_source`` for the archive row; a
-        # stall has no candidate of its own, so the row carries the
-        # last SCAD the loop's frames surfaced (``""`` when nothing
-        # rendered).
-        return self
-
-
 
 
 async def run_design_loop_with_events(
@@ -2134,83 +2104,6 @@ async def run_design_loop_with_events(
             # here is logged and swallowed — the deadline frame is the
             # user-visible guarantee (the hook's errors-swallowed
             # contract elsewhere).
-            def _archive_deadline(
-                attempt_count: int = 0,
-                latencies: list[float] | None = None,
-            ) -> None:
-                sink = getattr(app.state, "failures_jsonl_path", None)
-                if sink is None:
-                    return
-                try:
-                    from d33d.evals.failure_capture import (
-                        record_production_failure,
-                    )
-
-                    # The request text the loop was handed (the same
-                    # ``request`` kwarg the hook archives for
-                    # result-based failures); a blank request degrades
-                    # to the user's message.
-                    request = str(kwargs.get("request") or user_message or "")
-                    # The model id the app's production closure injects
-                    # for the hook (the ``model`` kwarg it pops before
-                    # the real loop runs — the hook archives it, the
-                    # loop never sees it): a bare-string id, an object
-                    # with a ``.model`` field, or ``None``.
-                    # Fallback: ``app.state.model_id`` — a plain
-                    # ``create_app`` without the closure (a test stub)
-                    # carries no ``model`` kwarg, so the archive reads
-                    # it from ``app.state`` instead (set by the test
-                    # harness; production always resolves the model via
-                    # the closure, so the kwarg path is the live one).
-                    raw_model = kwargs.get("model")
-                    model_id = getattr(raw_model, "model", None)
-                    if not isinstance(model_id, str) or not model_id:
-                        model_id = (
-                            raw_model
-                            if isinstance(raw_model, str) and raw_model
-                            else None
-                        )
-                    if not model_id:
-                        model_id = getattr(app.state, "model_id", None)
-                    if not model_id:
-                        # A row with an unidentifiable model is not
-                        # foldable — skip rather than fabricate an id
-                        # (the deadline frame still fires).
-                        logger.warning(
-                            "failures.jsonl deadline archive skipped for "
-                            "project %s: no model id available",
-                            project_id,
-                        )
-                        return
-                    # The last SCAD source the loop's frames have
-                    # surfaced (a token frame, on a pass, or a
-                    # progress frame carrying ``scad_source``) — the
-                    # stall has no result, so the best available
-                    # candidate text is ``""`` when nothing rendered.
-                    # Invariant: ``_attempt_tracker.last_scad_source``
-                    # is updated on every yielded frame carrying a truthy
-                    # ``scad_source``, on both the ``get_nowait`` and
-                    # ``asyncio.wait`` paths; ``output_scad`` reads it
-                    # at deadline time.
-                    output_scad = _attempt_tracker.last_scad_source
-                    record_production_failure(
-                        design_result=_DeadlinedLoopResult(scad=output_scad),
-                        photo=photo,
-                        region_mark=kwargs.get("region_mark"),
-                        request=request,
-                        model=model_id,
-                        prompt_version="",
-                        output_scad=output_scad,
-                        path=sink,
-                        attempt_count=attempt_count if attempt_count > 0 else None,
-                        per_attempt_latencies=list(latencies) if latencies else None,
-                    )
-                except Exception:
-                    logger.exception(
-                        "failures.jsonl deadline archive failed for "
-                        "project %s; emitting the timeout frame anyway",
-                        project_id,
-                    )
 
             # The loop's OWN per-attempt deadline (issue #417 — the loop
             # is the SOLE owner of the time budget) does the actual
@@ -2268,7 +2161,16 @@ async def run_design_loop_with_events(
                     ADAPTER_DEADLINE_MARGIN_SECONDS,
                     _latencies,
                 )
-                _archive_deadline(_attempt_count, _latencies)
+                archive_deadline(
+                    app,
+                    project_id,
+                    kwargs=kwargs,
+                    photo=photo,
+                    attempt_tracker=_attempt_tracker,
+                    deadline_reason=DESIGN_LOOP_TIMED_OUT_REASON,
+                    attempt_count=_attempt_count,
+                    latencies=_latencies,
+                )
                 _avg_latency = (
                     sum(_latencies) / len(_latencies) if _latencies else None
                 )

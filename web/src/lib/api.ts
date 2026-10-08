@@ -453,7 +453,7 @@ export interface Envelope {
  * value is the catch-all for a dead stream, not a second timeout.
  *
  * Overridable via `ApiClientOptions.streamTotalTimeoutMs` for tests
- * (the 720 s production value is untestable as-is).
+ * (the 480 s production value is untestable as-is).
  */
 export const STREAM_TOTAL_TIMEOUT_MS = 480_000;
 
