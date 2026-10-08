@@ -180,11 +180,22 @@ def _eval_atom(expr: str, env: dict[str, float], depth: int = 0) -> float | None
 
 def _eval_mul(expr: str, env: dict[str, float], depth: int = 0) -> float | None:
     """One level of the precedence chain: ``*``/``/`` (and a unary
-    minus) over :func:`_eval_atom` operands."""
+    minus) over :func:`_eval_atom` operands. A leading unary-minus run
+    is counted ITERATIVELY (parity-preserving — ``--a`` reads as ``a``),
+    never recursively: a model-authored chain of thousands of ``-``
+    would otherwise recurse once per ``-`` and escape the design loop
+    as a ``RecursionError``."""
     e = expr.strip()
-    if e.startswith("-") and not _NUMBER_RE.fullmatch(e):
-        inner = _eval_mul(e[1:], env, depth)  # recurse: `--a` stays in this level
-        return -inner if inner is not None else None
+    i = 0
+    while e[i : i + 1] == "-":
+        i += 1
+    if i > 0:
+        inner = _eval_mul(e[i:], env, depth)
+        if inner is None:
+            return None
+        return -inner if i % 2 else inner
+    if i == len(e):
+        return None  # a bare run of minuses is not an expression
     depth_c = 0
     splits: list[int] = []
     for i, ch in enumerate(e):

@@ -25,6 +25,7 @@ from pathlib import Path
 import pytest
 
 from d33d.stack_height_check import (
+    _eval_mul,
     declared_stack_sum,
     is_height_name,
     stack_height_check,
@@ -476,3 +477,37 @@ def test_declared_stack_sum_height_named_vector_declaration_no_crash():
         "cube([W, D, 4]);\n"
     )
     assert declared_stack_sum(only_vector) is None
+
+
+# ---------------------------------------------------------------------------
+# Recursion safety: every evaluator path must be bounded
+# ---------------------------------------------------------------------------
+
+
+def test_unary_minus_chain_does_not_recurse_unbounded():
+    """Issue #409 (adversarial round 2, PM-flagged gap): ``_eval_mul``'s
+    unary-minus branch used to recurse once per leading ``-`` WITHOUT
+    advancing ``depth``, so a direct call with a long minus chain raised
+    ``RecursionError`` (the public API was safe because ``_eval_add``
+    splits on every top-level ``-`` first — but ``_eval_mul`` was not
+    self-contained safe; a future caller passing a long minus chain
+    directly would crash the design loop). The leading minuses are now
+    counted iteratively, so any chain length is safe and parity-preserving:
+    ``--a`` → ``a``, ``-a`` → ``-a``."""
+    # Direct call: a long minus chain must not raise RecursionError.
+    assert _eval_mul("-" * 996 + "a", {"a": 4.0}) == 4.0
+    assert _eval_mul("-" * 999 + "a", {"a": 4.0}) == -4.0
+    assert _eval_mul("-" * 5000 + "a", {"a": 4.0}) == 4.0
+
+    # Short chains keep their exact semantics.
+    assert _eval_mul("-a", {"a": 4.0}) == -4.0
+    assert _eval_mul("--a", {"a": 4.0}) == 4.0
+    assert _eval_mul("a", {"a": 4.0}) == 4.0
+    # Unresolvable operand stays None (not 0, not a crash).
+    assert _eval_mul("-" * 996 + "missing", {"a": 4.0}) is None
+
+    # The PM's exact repro through the PUBLIC API: a 5000-long minus chain
+    # before a real stack sum must abstain cleanly, never raise.
+    deep = "total_height = " + "-" * 5000 + "a + b;\na = 4;\nb = 7;\n"
+    assert declared_stack_sum(deep) is None
+    assert stack_height_check(deep, 4.0) is None
