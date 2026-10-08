@@ -86,42 +86,32 @@ def is_through_request(request: str) -> bool:
     return any(noun in words for noun in HOLE_NOUNS)
 
 
-#: The word forms that mark an EXISTING hole (the definite-article rule,
-#: issue #418): a bare ``the`` immediately before the hole phrase, or the
-#: verb forms the existing-hole requests use ("move the through-hole",
-#: "resize the hole").
-_EXISTING_HOLE_MARKERS = ("move", "moves", "reposition", "resize",
-                         "enlarge", "shrink", "widen", "narrow", "relocate",
-                         "repositioning", "resizing")
-
-
 def _request_is_existing_hole(request: str) -> bool:
     """Issue #418: does the request target an EXISTING hole rather than
     asking for a new one?
 
-    True (the existing-hole branch) when the hole phrase is preceded by
-    the definite article (``the``) — "make the through-hole 8 mm", "the
-    hole", "move the through-hole" — or when the request verb is an
-    existing-hole verb (``move`` / ``resize`` / ...). False (the
-    new-hole branch) for an indefinite article ("a hole", "an 8 mm
-    hole"), a stated count ("two holes"), or no article at all ("drill
-    a 6 mm hole through the middle" / "drill through the middle").
+    True (the existing-hole branch) ONLY when the hole phrase is preceded
+    by the definite article (``the``) — "make the through-hole 8 mm", "the
+    hole", "move the through-hole". False (the new-hole branch) for an
+    indefinite article ("a hole", "an 8 mm hole"), a stated count ("two
+    holes"), or no article at all ("drill a 6 mm hole through the middle",
+    "resize a hole through the plate").
 
-    Runs only on text that already fired :func:`is_through_request`, so
-    the hole noun (or the hyphenated token) is present.
+    The classification is article-conditional, NOT verb-conditional: an
+    existing-hole verb (``move`` / ``resize`` / …) that appears without a
+    definite article before the hole phrase does NOT select the existing-hole
+    branch — "resize a hole through the plate" is a NEW-hole request, and a
+    marker verb in a different clause ("move the plate", "resize the lid")
+    has no hole noun at all and is not a trigger. Runs only on text that
+    already fired :func:`is_through_request`.
     """
     lower = request.lower()
-    # The definite article immediately before "hole" / "holes" / "bore"
-    # / "counterbore", or before the hyphenated through-hole token.
     for noun in (*HOLE_NOUNS, *_HYPHENATED_TOKENS):
         idx = lower.find(noun)
         while idx != -1:
-            # Walk back over whitespace; the character(s) just before the
-            # noun must spell "the" (whole word) to count.
             j = idx - 1
             while j >= 0 and lower[j].isspace():
                 j -= 1
-            # Candidate "the" spans [j-2, j] inclusive.
             if j >= 2:
                 span = lower[j - 2 : j + 1]
                 if span == "the":
@@ -129,12 +119,6 @@ def _request_is_existing_hole(request: str) -> bool:
                     if not before.isalnum():
                         return True
             idx = lower.find(noun, idx + 1)
-    # Existing-hole verbs: the request acts on a hole that is already
-    # there ("move the through-hole", "resize the hole to 8 mm").
-    words = set(lower.split())
-    for marker in _EXISTING_HOLE_MARKERS:
-        if marker in words:
-            return True
     return False
 
 
@@ -153,26 +137,44 @@ def requested_hole_count(request: str) -> int:
         "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
     }
     lower = request.lower()
-    # An Arabic numeral directly attached to a hole word: "2 holes",
-    # "3 through-holes", "2 bores" (the count word precedes the noun).
-    # The leading lookbehind rejects a digit that is part of a
-    # dimension ("2.5 mm holes") — only a standalone integer is a
-    # count, never the integer part of a decimal measurement.
+    # A count is the number ADJACENT to the FIRST hole noun. A number in a
+    # different clause ("shrink the hole to 3 holes", "make the hole like
+    # two holes in a row") is incidental, not the requested count — the
+    # parser reads only the immediate neighbourhood of the first hole noun
+    # it finds, never a number word in a later clause.
+    hole_noun = (
+        r"(?:holes?|bores?|counterbores?|through-holes?|thru-holes?)"
+    )
+    first_hole = re.search(r"\b" + hole_noun + r"\b", lower)
+    if first_hole is None:
+        return 1
+    # The substring from the start of the string up to and including the
+    # first hole noun — a count must be in this prefix, not after it.
+    prefix = lower[: first_hole.end()]
+
+    # 1. A number word directly before the first hole noun: "two holes",
+    #    "four through-holes".
+    for word, n in number_words.items():
+        if re.search(
+            r"\b" + word + r"\s*(?:-)?\s*" + hole_noun + r"\b",
+            prefix,
+        ):
+            return n
+
+    # 2. An Arabic numeral directly before the first hole noun: "2 holes",
+    #    "3 through-holes". The lookbehind rejects a digit that is part of
+    #    a dimension ("2.5 mm holes").
     m = re.search(
-        r"(?<!\d)\d+\s*(?:-)?\s*"
-        r"(?:holes?|bores?|counterbores?|through-holes?|thru-holes?)\b",
-        lower,
+        r"(?<!\d)(\d+)\s*(?:-)?\s*" + hole_noun + r"\b",
+        prefix,
     )
     if m:
-        num_match = re.match(r"\s*(\d+)", m.group(0))
-        if num_match:
-            n = int(num_match.group(1))
-            if n >= 1:
-                return n
-    words = set(lower.split())
-    for word, n in number_words.items():
-        if word in words:
+        n = int(m.group(1))
+        if n >= 1:
             return n
+
+    # 3. No number adjacent to the first hole noun — any number elsewhere
+    #    in the message is in a different clause, not the count.
     return 1
 
 

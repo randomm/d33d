@@ -402,3 +402,73 @@ def test_route_through_hole_repair_accepts_source_kwarg(tmp_path):
     assert result is not None
     evidence, _instruction = result
     assert "fell below" in evidence
+
+
+# ---------------------------------------------------------------------------
+# Issue #418 round-1 (adversarial): the article classifier must be
+# article-conditional (not verb-conditional), and the count parser must be
+# clause-local (a number word in a different clause is not the requested
+# hole count). Both were attack vectors: a verb marker anywhere in the
+# message, or a number word in a different clause, would silently select
+# the laxer branch.
+# ---------------------------------------------------------------------------
+
+
+def test_article_existing_hole_verb_marker_without_definite_article(tmp_path):
+    """Issue #418 (adversarial finding 1): a request that contains an
+    existing-hole verb (``resize`` / ``move``) but NO definite article
+    before the hole phrase is a NEW-hole request — the laxer existing-hole
+    branch must not be selected. A pocket render (genus 0) over a parent
+    baseline 1 must FAIL (a new hole did not pass), not silently pass.
+
+    "move the plate" and "resize the lid" have no hole noun at all (no
+    trigger — OUT_OF_DIFF); the real attack surface is a through-hole
+    request that carries a marker verb without "the".
+    """
+    stl = _write_stl(tmp_path / "pocket.stl", _pocket_stl())
+    # A marker verb + the hyphenated token, but NO "the" before it:
+    # indefinite article — this is a NEW hole, not the existing one.
+    assert through_hole_check("add a through-hole to the plate", stl, 1) == (1, 0)
+    # A marker verb + a hole noun, no "the": new-hole branch, pocket fails.
+    assert through_hole_check("resize a hole through the plate", stl, 1) == (1, 0)
+
+
+def test_article_ambiguous_make_it_a_through_hole(tmp_path):
+    """Issue #418 (adversarial minor note): "make it a through-hole" is
+    ambiguous — the indefinite article ("a") marks a NEW hole, so the
+    new-hole branch applies and the genus must rise by 1. A genus-1 render
+    over a baseline-0 parent passes (1 >= 0 + 1); over a baseline-1 parent
+    it fails (1 < 1 + 1). This pins the sane default (the indefinite
+    article, not the verb, decides)."""
+    stl = _write_stl(tmp_path / "through.stl", _through_stl())
+    # New design (baseline 0), one through-hole rendered: 1 >= 0 + 1 → pass.
+    assert through_hole_check("make it a through-hole", stl, 0) is None
+    # A parent that already has a hole (baseline 1): a new hole requires
+    # the genus to rise; 1 < 2 → fail.
+    assert through_hole_check("make it a through-hole", stl, 1) == (1, 1)
+
+
+def test_article_no_article_drill_another_hole(tmp_path):
+    """Issue #418 (adversarial minor note): "drill another hole through" is
+    a NEW-hole request with NO article at all ("another" is a determiner,
+    not an article). It must take the new-hole branch and require a genus
+    rise of 1 — the sane default. Pinned: a genus-1 render over a
+    baseline-0 parent passes; over a baseline-1 parent it fails."""
+    stl = _write_stl(tmp_path / "through.stl", _through_stl())
+    assert through_hole_check("drill another hole through the plate", stl, 0) is None
+    assert through_hole_check("drill another hole through the plate", stl, 1) == (1, 1)
+
+
+def test_requested_hole_count_is_clause_local():
+    """Issue #418 (adversarial finding 2): a number word or Arabic numeral
+    in a DIFFERENT clause is not the requested hole count. "shrink the hole
+    to 3 holes" and "make the hole like two holes in a row" both describe
+    ONE existing hole and the number is incidental — the count must be 1,
+    not 3 or 2. The parser reads the number immediately ADJACENT to the
+    hole noun, not any number word in the message."""
+    assert requested_hole_count("shrink the hole to 3 holes") == 1
+    assert requested_hole_count("make the hole like two holes in a row") == 1
+    # The legitimate count cases still parse (adjacent number + hole noun):
+    assert requested_hole_count("add two holes through") == 2
+    assert requested_hole_count("drill 3 holes through the plate") == 3
+    assert requested_hole_count("four through-holes in a row") == 4
