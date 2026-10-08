@@ -18,6 +18,7 @@ from d33d.fill_recut import (
     FRILL_POINT_AT_NO_DIM_TEMPLATE,
     FRILL_POINT_AT_TEMPLATE,
     _fmt_size,
+    no_match_hole_reply,
     boundary_sentence,
     fill_and_recut_instruction,
     fill_recut_trigger,
@@ -25,7 +26,7 @@ from d33d.fill_recut import (
     is_clean_yes,
     own_feature_names,
 )
-from d33d.hole_select import holes_in_mm, select_measured_hole
+from d33d.hole_select import NoMatchHole, holes_in_mm, select_measured_hole
 from d33d.part_holes import HOLE_NOUNS, no_hole_reply, part_has_hole_evidence
 from d33d.part_units import USABLE_UNIT_STATUSES
 
@@ -39,7 +40,7 @@ def fill_recut_turn(
     pre-routes (the unsettled-part guard runs first, upstream).
 
     Returns ``{"kind": "answer", "answer": <sentence>, "run_loop": bool,
-    "outcome": "fresh_offer" | "decline" | "accept" | "no_feature"}``
+    "outcome": "fresh_offer" | "decline" | "accept" | "no_feature" | "no_match"}``
     when the turn is handled here (the caller registers the sentence as a
     ``kind: "answer"`` done frame — and, when ``run_loop`` is True, runs
     the design loop with the ``instruction`` field appended to the
@@ -142,6 +143,7 @@ def fill_recut_turn(
                     move_direction=trigger.get("direction"),
                 )
                 point_at_fallback = False
+                no_match = False
 
                 if trigger["noun"] in HOLE_NOUNS:
                     # Issue #396 (round 2): the stored holes are in FILE
@@ -180,15 +182,17 @@ def fill_recut_turn(
                             holes, message, bbox_mm,
                             trigger_size=trigger["size"],
                         )
-                        if selected is not None:
-                            offer_dict["center"] = selected.get("center")
-                            offer_dict["axis"] = selected.get("axis")
-                            offer_dict["diameter_mm"] = selected.get("diameter_mm")
-                        else:
+                        if selected is None:
                             # Ambiguous or no qualifier matched: use the
                             # point-at copy (never an instruction without
                             # a location).
                             point_at_fallback = True
+                        elif isinstance(selected, NoMatchHole):
+                            no_match = True
+                        else:
+                            offer_dict["center"] = selected.get("center")
+                            offer_dict["axis"] = selected.get("axis")
+                            offer_dict["diameter_mm"] = selected.get("diameter_mm")
 
                 if point_at_fallback:
                     dim_str = _fmt_size(trigger["size"])
@@ -200,6 +204,21 @@ def fill_recut_turn(
                         sentence = FRILL_POINT_AT_NO_DIM_TEMPLATE.format(
                             noun=trigger["noun"]
                         )
+
+                if no_match:
+                    # Issue #414: the user named a hole by position but no
+                    # measured hole matches — say so and list the measured
+                    # holes (diameter + centre). No recut offer is made
+                    # (nothing is stored server-side), so the done frame
+                    # carries no offer flag (the ``outcome`` is not
+                    # ``fresh_offer``) and no design loop runs.
+                    sentence = no_match_hole_reply(trigger["noun"], holes)
+                    return {
+                        "kind": "answer",
+                        "answer": sentence,
+                        "run_loop": False,
+                        "outcome": "no_match",
+                    }
 
                 versions.set_pending_offer(project_id, offer_dict)
                 return {

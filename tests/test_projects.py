@@ -2942,6 +2942,94 @@ def test_offer_ambiguous_holes_point_at_fallback(app_with_projects) -> None:
     assert "center" not in offer, f"ambiguous offer must not carry center: {offer}"
 
 
+def test_offer_center_hole_no_match_lists_measured_holes(app_with_projects) -> None:
+    """Issue #414: a part whose measured holes are all corner holes (no
+    centre hole) + "make the center hole 38 mm" → the reply says no
+    matching hole exists and lists each measured hole's Ø and centre.
+    No pending offer is stored (no recut offer for a hole that does not
+    exist), so the done frame carries no ``fill_recut_offer`` flag."""
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "NoMatchHole"})
+        pid = r.json()["id"]
+        conn = app_with_projects.state.conn
+        # The QA v36 shape: three Ø4 holes at the corners of a 120×80
+        # plate — none anywhere near the centre (60, 40). Nearest hole
+        # is 61 mm from the centre, far beyond the 30 mm match
+        # threshold, so the selection returns NoMatchHole.
+        holes_report = {
+            "hole_count": 3,
+            "holes": [
+                {"center": [8.0, 72.0, 3.0], "axis": [0.0, 0.0, 1.0], "diameter_mm": 4.0},
+                {"center": [112.0, 8.0, 3.0], "axis": [0.0, 0.0, 1.0], "diameter_mm": 4.0},
+                {"center": [112.0, 72.0, 3.0], "axis": [0.0, 0.0, 1.0], "diameter_mm": 4.0},
+            ],
+            "bbox_file_units": [120.0, 80.0, 6.0],
+        }
+        conn.raw.execute(
+            "UPDATE projects SET part_filename='part.stl', part_format='stl', "
+            "part_unit='mm', part_unit_status='settled', part_scale=1.0, part_report=? "
+            "WHERE id=?",
+            (json.dumps(holes_report), pid),
+        )
+        conn.commit()
+        r2 = await client.post(
+            f"/api/projects/{pid}/chat", json={"message": "make the center hole 38 mm"}
+        )
+        frames = await _drive_event_source(app_with_projects, client, pid)
+        svc = app_with_projects.state.versions
+        return r2.status_code, pid, frames, svc.get_pending_offer(pid)
+
+    status, _pid, frames, offer = _run_async(app_with_projects, _call)
+    assert status == 202, status
+    done = [d for e, d in frames if e == "done"]
+    assert done, f"no done frame: {frames}"
+    msg = done[0].get("message", "")
+    # The reply says no center hole was found and lists the measured holes.
+    assert "I don't see a hole" in msg, f"expected no-match reply, got: {msg}"
+    assert "at that spot" in msg, f"expected no-match lead, got: {msg}"
+    # Each measured hole is listed with its Ø and centre (mm).
+    assert "Ø4 mm at (8, 72)" in msg, f"missing hole 1 in list: {msg}"
+    assert "Ø4 mm at (112, 8)" in msg, f"missing hole 2 in list: {msg}"
+    assert "Ø4 mm at (112, 72)" in msg, f"missing hole 3 in list: {msg}"
+    # The point-at fallback must NOT fire (it's for ambiguous picks, not
+    # for no-match).
+    assert "Point at the" not in msg, f"no-match must not use point-at copy: {msg}"
+    # No pending offer is stored — no recut offer for a hole that does not
+    # exist. The done frame carries no offer flag (outcome is "no_match",
+    # not "fresh_offer").
+    assert offer is None, (
+        f"no-match must NOT store a pending offer, got: {offer}"
+    )
+    assert done[0].get("fill_recut_offer") is not True, (
+        f"no-match done frame must not carry the offer flag: {done[0]}"
+    )
+
+
+def test_fill_recut_no_match_lead_matches_copy_ts() -> None:
+    """Issue #414 — the ``FRILL_NO_MATCH_LEAD`` template equals
+    ``copy.ts``'s ``fillRecut.noMatchLead`` with the same substitutions
+    (the two-way parity pin, mirroring the existing FRILL_* pins)."""
+    import re
+
+    from d33d import fill_recut
+
+    m = re.search(
+        r'noMatchLead:[^(]*\([^)]*\)[^(]*=>\s*`([^`]*)`',
+        _copy_ts_text(),
+        re.DOTALL,
+    )
+    assert m is not None, "copy.ts must define fillRecut.noMatchLead"
+    ts_template = m.group(1)
+    assert "${noun}" in ts_template, f"copy.ts noMatchLead must carry ${noun}: {ts_template!r}"
+    assert "${holes}" in ts_template, f"copy.ts noMatchLead must carry ${holes}: {ts_template!r}"
+    ts_rendered = ts_template.replace("${noun}", "hole").replace("${holes}", "Ø4 mm at (8, 72)")
+    assert fill_recut.FRILL_NO_MATCH_LEAD.format(noun="hole", holes="Ø4 mm at (8, 72)") == ts_rendered, (
+        f"backend: {fill_recut.FRILL_NO_MATCH_LEAD.format(noun='hole', holes='Ø4 mm at (8, 72)')!r}\n"
+        f"copy.ts: {ts_rendered!r}"
+    )
+
+
 def test_import_succeeds_when_measure_holes_raises(app_with_projects) -> None:
     """Issue #396 (round 2): the import must NEVER fail because hole
     measurement is hard to measure. Monkeypatch

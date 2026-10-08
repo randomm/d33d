@@ -84,26 +84,32 @@ def _section_interior_rings(
     polygons = [p for p in flat.polygons_closed if abs(p.area) > 1e-12]
     if not polygons:
         return []
-    # The 2D frame's origin is the PLANE ORIGIN (the body's centre on the
-    # in-plane axes, 0 on the slice axis) — the in-plane coordinates are
-    # relative to it. The frame's local X axis is the transform's first
-    # column, its local Y axis the second, so a 2D point (u, v) maps to
-    # the 3D point ``origin + u * col0 + v * col1`` (the two in-plane
-    # components are the body-frame coordinates on the two non-slice
-    # axes).
+    # The 2D frame's origin is NOT the plane origin — ``to_2D`` projects
+    # the section onto its fitted plane with a frame whose origin is the
+    # fitted plane's own point (trimesh's ``to_3D`` transform encodes it
+    # in the 4th column). The in-plane coordinates (u, v) are relative to
+    # THAT origin, so a 2D point maps back through the full affine
+    # transform ``tf @ [u, v, 0, 1]`` — adding the plane origin by hand
+    # (``origin + u * col0 + v * col1``) dropped the transform's
+    # translation and offset every measured centre by a constant (the
+    # gap between the fitted origin and the plane origin — zero for a
+    # part centred on the origin, which is why the bug only showed on
+    # parts like the QA v36 plate).
     tf = np.asarray(tf, dtype=float)
-    col0 = tf[:3, 0]
-    col1 = tf[:3, 1]
-    or3 = np.asarray(origin, dtype=float)
     slots = [i for i in range(3) if i != axis_index]
     # The largest-area contour is the outer face outline; every other
     # contour is an interior ring — one per hole.
     polygons.sort(key=lambda p: abs(p.area), reverse=True)
     rings: list[tuple[float, float, float]] = []
     for poly in polygons[1:]:
-        rp = poly.representative_point()
-        u, v = float(rp.x), float(rp.y)
-        p3 = or3 + u * col0 + v * col1
+        # The centre is the polygon's area centroid mapped through the
+        # transform — NOT ``representative_point()``, which for a
+        # symmetric section (a circular hole) returns a point on the
+        # boundary (a trimesh quirk), offsetting the measured centre by
+        # the hole radius (issue #414's fixture caught this: a Ø4 hole
+        # at y=8 measured y=9.0).
+        cx, cy = poly.centroid.x, poly.centroid.y
+        p3 = (tf @ np.array([cx, cy, 0.0, 1.0]))[:3]
         diameter = math.sqrt(4.0 * abs(poly.area) / math.pi)
         rings.append((float(p3[slots[0]]), float(p3[slots[1]]), diameter))
     return rings

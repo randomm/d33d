@@ -90,6 +90,16 @@ FRILL_POINT_AT_NO_DIM_TEMPLATE = (
     "Point at the {noun} on the part and I'll fill it and cut a new one there."
 )
 
+#: The no-match reply (issue #414): the user named a hole by position
+#: ("the center hole") but no measured hole matches — the reply says so
+#: and lists the measured holes (diameter + centre). The per-hole list is
+#: built by :func:`no_match_hole_reply` (the hole entries are never part
+#: of the template — the copy.ts mirror carries only the lead-in).
+FRILL_NO_MATCH_LEAD = (
+    "I don't see a {noun} at that spot on the part. "
+    "Here are the holes I did find: {holes}"
+)
+
 #: The input bound for :func:`fill_recut_trigger`: an instruction longer
 #: than this many characters is NOT a resize/move request — it bails out
 #: before the regexes run.
@@ -306,6 +316,40 @@ def is_clean_no(message: str) -> bool:
         re.search(r"\b(no|not|nope|nah|wrong|incorrect|never|drop it|forget it)\b", low)
     )
 
+def no_match_hole_reply(
+    noun: str, holes: list[dict[str, Any]]
+) -> str:
+    """The issue #414 no-match reply: the user named a hole by position
+    ("the center hole") but no measured hole matches that position.
+
+    The reply SAYS so (the ``FRILL_NO_MATCH_LEAD`` copy, mirrored in
+    ``copy.ts``'s ``fillRecut.noMatchLead``) and lists every measured
+    hole — its diameter and centre (mm, mono-formatted the way the deck
+    renders numbers) — so the user can pick by name or point at it. No
+    recut offer is made for a hole that does not exist."""
+    entries: list[str] = []
+    for h in holes:
+        center = h.get("center")
+        diameter = h.get("diameter_mm")
+        if (
+            isinstance(center, (list, tuple))
+            and len(center) >= 2
+            and all(
+                isinstance(v, (int, float))
+                and not isinstance(v, bool)
+                and math.isfinite(v)
+                for v in center[:2]
+            )
+            and isinstance(diameter, (int, float))
+            and not isinstance(diameter, bool)
+            and diameter > 0
+        ):
+            entries.append(
+                f"Ø{_fmt_size(float(diameter))} mm at ({float(center[0]):g}, {float(center[1]):g})"
+            )
+    return FRILL_NO_MATCH_LEAD.format(noun=noun, holes="; ".join(entries))
+
+
 def fill_and_recut_instruction(offer: dict[str, Any]) -> str:
     """The explicit design-loop instruction an ACCEPTED fill-recut offer
     appends to the request text (the loop's own import-aware prompt
@@ -364,10 +408,11 @@ __all__ = [
     "FRILL_HOLE_DIAMETER_REPLY",
     "FRILL_MOVE_DISTANCE_REPLY",
     "FRILL_MOVE_REPLY",
-    "FRILL_NOUN_DIMENSION_REPLY",
     "FRILL_NO_DIMENSION_REPLY",
+    "FRILL_NO_MATCH_LEAD",
     "FRILL_POINT_AT_NO_DIM_TEMPLATE",
     "FRILL_POINT_AT_TEMPLATE",
+    "no_match_hole_reply",
     "TRIGGER_MAX_INSTRUCTION_CHARS",
     "UNSETTLED_PART_REPLY",
     "boundary_sentence",

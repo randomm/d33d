@@ -2502,6 +2502,89 @@ def test_holes_list_three_plate(app_with_projects) -> None:
         )
 
 
+def test_holes_list_off_centre_plate(app_with_projects) -> None:
+    """Issue #414: a part NOT centred on the origin — a 120×80×6 plate
+    (a 30×30 corner cutout left at (0,0), three Ø4 through-holes at
+    (8, 72), (112, 8), (112, 72); the QA v36 geometry) — must measure
+    every hole centre in the part's OWN coordinates: (8, 72), (112, 8),
+    (112, 72) within 0.1 mm. The origin-centred fixtures mask the
+    to_planar() frame-origin bug (the 2D frame origin equals the plane
+    origin when the part is centred); this asymmetric part does not —
+    the pre-#414 remap offset every centre by a constant
+    (−9.19, −5.64) on the QA v36 plate — the frame-origin remap bug
+
+    The plate is a committed fixture (``off_centre_plate.stl``),
+    generated ONCE via ``trimesh.extrude_polygon`` (a triangulation
+    engine, not a boolean backend — CI has no manifold3d), so no mesh
+    work runs in the test itself."""
+    import trimesh
+
+    result = trimesh.load(str(FIXTURES / "off_centre_plate.stl"))
+    # Fixture guards — a corrupt/renamed fixture fails loudly, not vacuously:
+    # a genus-2 body (the corner cutout is not a hole), watertight,
+    # with extents that do NOT start at the origin-centred symmetric shape
+    # (all coordinates positive, asymmetric).
+    assert result.is_watertight
+    assert (2 - int(result.euler_number)) // 2 == 2, (
+        f"off-centre plate must have the corner cutout + 3 holes (genus 2), "
+        f"got {(2 - int(result.euler_number)) // 2}"
+    )
+    lo, hi = result.bounds
+    assert (float(lo[0]), float(lo[1]), float(lo[2])) == (0.0, 0.0, 0.0)
+    assert (float(hi[0]), float(hi[1]), float(hi[2])) == (120.0, 80.0, 6.0)
+    data = _stl_bytes_from_mesh(result)
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "OffCentrePlate"})
+        pid = r.json()["id"]
+        files = {"file": ("off_centre.stl", data, "model/stl")}
+        return await client.post(f"/api/projects/{pid}/part", files=files)
+
+    r = _run_async(app_with_projects, _call)
+    assert r.status_code == 201, r.text
+    report = r.json()["part"]["report"]
+    # hole_count is gaps_before + genus (issue #351): the corner cutout is
+    # not a hole, so the stored fact is 2 — the MEASURED list is what this
+    # test pins (the three Ø4 through-holes, in the part's own coordinates).
+    assert report["hole_count"] == 2, f"expected 2 (genus 2), got {report['hole_count']}"
+    holes = report.get("holes")
+    assert holes is not None, f"holes list missing from report: {report}"
+    assert len(holes) == 3, (
+        f"expected exactly 3 measured holes, got {len(holes)}: {holes}"
+    )
+    # The issue #414 acceptance: the measured centres are the hole's true
+    # position in the part's own coordinates, within 0.1 mm — the
+    # constant-offset error (the QA-reported class of error) is gone.
+    true = [(8.0, 72.0), (112.0, 8.0), (112.0, 72.0)]
+    matched = set()
+    for (tx, ty) in true:
+        best = None
+        best_d = None
+        for i, h in enumerate(holes):
+            if i in matched:
+                continue
+            c = h["center"]
+            d = (c[0] - tx) ** 2 + (c[1] - ty) ** 2
+            if best_d is None or d < best_d:
+                best_d = d
+                best = i
+        assert best is not None
+        matched.add(best)
+        c = holes[best]["center"]
+        assert abs(c[0] - tx) < 0.1, (
+            f"centre x {c[0]} not within 0.1 mm of {tx} (issue #414 offset)"
+        )
+        assert abs(c[1] - ty) < 0.1, (
+            f"centre y {c[1]} not within 0.1 mm of {ty} (issue #414 offset)"
+        )
+        # The Ø4 hole is measured from its 4-sided section ring (the
+        # rectangle's equivalent circle is Ø sqrt(4·16/π) ≈ 4.51) — the
+        # same tolerance the three-plate test uses for its section rings.
+        assert abs(holes[best]["diameter_mm"] - 4.0) < 0.6, (
+            f"diameter {holes[best]['diameter_mm']} not within 0.6 mm of 4 mm"
+        )
+
+
 # ---------------------------------------------------------------------------
 # 3MF units: never silently mm (the operator decision)
 # ---------------------------------------------------------------------------

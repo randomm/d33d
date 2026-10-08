@@ -29,13 +29,41 @@ from typing import Any
 #: rather than a confident but arbitrary pick).
 _AMBIGUITY_MM = 0.1
 
+#: The match threshold (mm) for the "nearest the centre" rule: the
+#: nearest hole must be within this distance of the XY bbox centre to be
+#: a match at all. A "center hole" that no measured hole actually sits
+#: at (issue #414) is a NO-MATCH — the caller says so and lists the
+#: measured holes — not a silent nearest-neighbour pick and not the
+#: point-at fallback (that one is for a genuinely ambiguous pick).
+#: 30 mm: the #396 test's "center" hole (22.4 mm from the centre of a
+#: 40 mm part) is within it (a match — the test pins the pick); the
+#: QA v36 plate's corner holes (61.1 mm from the centre of a 120×80
+#: plate) are beyond it (a no-match — the #414 fix). A part-relative
+#: fraction cannot separate the two (their ratios to the bbox are
+#: nearly identical: 0.79 vs 0.87 of the half-diagonal); a fixed mm
+#: value at the user's scale is the only discriminator that works for
+#: both.
+_CENTER_MATCH_MM = 30.0
+
+
+class NoMatchHole:
+    """The issue #414 no-match sentinel: the user named a hole by
+    position ("the center hole") but NO measured hole matches that
+    position — the caller must say so and list the measured holes, and
+    must NOT make a recut offer. Distinct from ``None`` (an ambiguous
+    or unqualified message — the point-at fallback) so the two replies
+    never get conflated."""
+
+
+_NO_MATCH = NoMatchHole()
+
 
 def select_measured_hole(
     holes: list[dict[str, Any]],
     message: str,
     bbox_mm: list[float] | None,
     trigger_size: float | None = None,
-) -> dict[str, Any] | None:
+) -> dict[str, Any] | None | NoMatchHole:
     """Select the hole the user is referring to from the measured list.
 
     ``holes`` is the part's measured-hole list (each entry ``{"center":
@@ -48,9 +76,12 @@ def select_measured_hole(
 
     1. A single measured hole is picked trivially (it is "the" hole).
     2. A "center"/"centre"/"middle" qualifier picks the hole nearest the
-       XY bbox centre; if two candidates are within :data:`_AMBIGUITY_MM`
-       of each other the pick is ambiguous and ``None`` is returned (the
-       point-at fallback).
+       XY bbox centre — but only when that hole is actually WITHIN
+       :data:`_CENTER_MATCH_MM` of the centre (issue #414: a "center
+       hole" no measured hole sits at is a NO-MATCH, not a silent
+       nearest-neighbour pick). If two near candidates are within
+       :data:`_AMBIGUITY_MM` of each other the pick is ambiguous and
+       ``None`` is returned (the point-at fallback).
     3. Otherwise, when the user stated a diameter, the hole with the
        CLOSEST diameter is picked (a unique minimum within the 0.1 mm
        ambiguity band — "the closest diameter", never a 5% band that
@@ -58,8 +89,10 @@ def select_measured_hole(
     4. Any other shape (no qualifier, no unique diameter match) is
        ambiguous: ``None`` (the point-at fallback).
 
-    Returns the chosen hole dict or ``None`` (the caller uses the
-    point-at copy — never an instruction without a location).
+    Returns the chosen hole dict, :data:`_NO_MATCH` (the user's
+    positional description matched no measured hole — issue #414), or
+    ``None`` (the caller uses the point-at copy — never an instruction
+    without a location).
     """
     if not holes:
         return None
@@ -91,6 +124,12 @@ def select_measured_hole(
                 dists.append((d, h))
             if dists:
                 dists.sort(key=lambda x: x[0])
+                # Issue #414: a "center hole" no measured hole actually
+                # sits at (nearest candidate farther than the match
+                # threshold) is a NO-MATCH — the caller says so and
+                # lists the measured holes, and makes no recut offer.
+                if dists[0][0] > _CENTER_MATCH_MM:
+                    return _NO_MATCH
                 # Two nearest candidates within the ambiguity band → the
                 # pick is not defensible; fall back to point-at.
                 if len(dists) > 1 and dists[1][0] - dists[0][0] < _AMBIGUITY_MM:
@@ -178,6 +217,7 @@ def fill_recut_instruction_with_hole(
 
 
 __all__ = [
+    "NoMatchHole",
     "fill_recut_instruction_with_hole",
     "holes_in_mm",
     "select_measured_hole",

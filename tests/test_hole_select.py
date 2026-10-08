@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from d33d.hole_select import holes_in_mm, select_measured_hole
+from d33d.hole_select import NoMatchHole, holes_in_mm, select_measured_hole
 
 # ---------------------------------------------------------------------------
 # holes_in_mm — scale guards (issue #396 lens item 2)
@@ -162,6 +162,83 @@ def test_select_measured_hole_no_qualifier_diameter_match_still_works():
     )
     assert result is not None
     assert abs(result["diameter_mm"] - 30.0) < 1e-6
+
+
+# ---------------------------------------------------------------------------
+# select_measured_hole — center qualifier, no measured hole matches
+# (issue #414)
+# ---------------------------------------------------------------------------
+
+def test_select_measured_hole_center_qualifier_no_match_returns_no_match():
+    """Issue #414: a 'center' qualifier where NO measured hole is anywhere
+    near the bbox centre must return the :class:`NoMatchHole` sentinel —
+    NOT the nearest hole (the silent wrong pick QA flagged) and NOT
+    ``None`` (which is the point-at fallback for a genuinely ambiguous
+    pick). The caller uses the sentinel to say "I don't see a center
+    hole" and list the measured holes, instead of making an offer for a
+    hole that does not exist."""
+    # The QA v36 shape: three holes at the corners, none anywhere near
+    # the centre. bbox [120, 80] → centre (60, 40); the nearest hole is
+    # (8, 72) at 61 mm — far beyond the 30 mm match threshold.
+    holes = [
+        {"center": [8.0, 72.0, 3.0], "axis": [0.0, 0.0, 1.0], "diameter_mm": 4.0},
+        {"center": [112.0, 8.0, 3.0], "axis": [0.0, 0.0, 1.0], "diameter_mm": 4.0},
+        {"center": [112.0, 72.0, 3.0], "axis": [0.0, 0.0, 1.0], "diameter_mm": 4.0},
+    ]
+    result = select_measured_hole(
+        holes, "make the center hole 38 mm", bbox_mm=[120.0, 80.0], trigger_size=38.0
+    )
+    # Distances to the centre (60, 40): (8,72)→63.0, (112,8)→68.8, (112,72)
+    # →68.8 mm — all far beyond the match threshold (the bbox's
+    # half-diagonal, hypot(60, 40) = 70.0 mm).
+    # Distances to the centre (60, 40): (8,72)→61.1, (112,8)→61.1, (112,72)
+    # →61.1 mm — all far beyond the 30 mm match threshold.
+    assert isinstance(result, NoMatchHole), (
+        f"a 'center hole' no measured hole sits at must be NoMatchHole, "
+        f"got {result!r}"
+    )
+    # It must be the SENTINEL (so the no-match copy fires), not None
+    # (the point-at fallback) and not a hole dict (the silent pick).
+    assert result is not None
+    assert not isinstance(result, dict)
+
+
+def test_select_measured_hole_center_qualifier_match_within_threshold_picks_hole():
+    """Issue #414: the no-match signal must NOT fire when a measured hole
+    IS near the centre — a 'center hole' with a hole actually at the
+    centre picks it (the #396 behaviour, unchanged by #414)."""
+    # A hole at (60, 40) = the bbox centre (dist 0), two corner holes.
+    holes = [
+        {"center": [8.0, 72.0, 3.0], "axis": [0.0, 0.0, 1.0], "diameter_mm": 4.0},
+        {"center": [60.0, 40.0, 3.0], "axis": [0.0, 0.0, 1.0], "diameter_mm": 10.0},
+        {"center": [112.0, 8.0, 3.0], "axis": [0.0, 0.0, 1.0], "diameter_mm": 4.0},
+    ]
+    result = select_measured_hole(
+        holes, "make the center hole 38 mm", bbox_mm=[120.0, 80.0], trigger_size=38.0
+    )
+    assert isinstance(result, dict), (
+        f"a measured hole at the centre must be picked, got {result!r}"
+    )
+    assert abs(result["diameter_mm"] - 10.0) < 1e-6, result
+
+
+def test_select_measured_hole_center_qualifier_ambiguous_still_none_not_no_match():
+    """Issue #414: two equally-near candidates within the ambiguity band
+    stay ``None`` (the point-at fallback) — the no-match sentinel is for
+    "nothing is near the centre", not for an ambiguous pick."""
+    # Two holes equidistant from the centre (both within the 30 mm
+    # threshold): (50, 40) and (70, 40) — 10 mm each from (60, 40), 0
+    # apart in rank.
+    holes = [
+        {"center": [50.0, 40.0, 3.0], "axis": [0.0, 0.0, 1.0], "diameter_mm": 8.0},
+        {"center": [70.0, 40.0, 3.0], "axis": [0.0, 0.0, 1.0], "diameter_mm": 8.0},
+    ]
+    result = select_measured_hole(
+        holes, "make the center hole 38 mm", bbox_mm=[120.0, 80.0], trigger_size=38.0
+    )
+    assert result is None, (
+        f"two equally-near candidates must stay None (point-at), got {result!r}"
+    )
 
 
 # ---------------------------------------------------------------------------

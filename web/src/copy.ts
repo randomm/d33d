@@ -1080,6 +1080,17 @@ export const fillRecut = {
       ? `Point at the hole on the part and I'll fill it and cut a Ø${dim} mm one there.`
       : `Point at the hole on the part and I'll fill it and cut a new one there.`,
 
+  /** The no-match reply's lead-in (issue #414): the user named a hole
+   *  by position ("the center hole") but no measured hole matches — the
+   *  reply says so and then lists the measured holes (diameter + centre),
+   *  which the backend appends (the hole entries are data, never part of
+   *  this template). `noun` is the user's own closed-set feature noun;
+   *  `holes` is the pre-rendered list. No recut offer is made. The
+   *  backend's FRILL_NO_MATCH_LEAD carries the same template (the parity
+   *  pin in tests/test_projects.py). */
+  noMatchLead: (noun: string, holes: string): string =>
+    `I don't see a ${noun} at that spot on the part. Here are the holes I did find: ${holes}`,
+
   /** The fill-and-recut offer's acceptance button (issue #338, decision
    *  7): sends the acceptance through the existing chat offer path, which
    *  runs the loop. */
