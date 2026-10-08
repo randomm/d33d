@@ -59,6 +59,22 @@ _FEATURE_VERBS: frozenset[str] = frozenset(
     {"add", "cut", "drill", "bore", "engrave", "emboss"}
 )
 
+_SUBJECT_INTRODUCER_RE = re.compile(
+    r"\b(?:a|an|it|this|that|these|those|he|she|they|we|you|I|my|your|his|her|its|our|their)\b",
+    re.IGNORECASE,
+)
+
+
+def _has_feature_verb(
+    clause: str, feature_verb_re: Callable[[str], re.Pattern[str]]
+) -> bool:
+    """True if any feature verb (``_FEATURE_VERBS``) appears in ``clause``.
+
+    Shared by :func:`feature_clause_start` and :func:`feature_clause_suppresses`
+    so the verb scan lives in one place (issue #413 lens review)."""
+    return any(feature_verb_re(v).search(clause) for v in _FEATURE_VERBS)
+
+
 def _is_bare_measurement(clause: str) -> bool:
     """True if ``clause`` is a BARE MEASUREMENT — just a number + axis
     word (and optional filler like "mm", "around", "from", "the", etc.)
@@ -72,17 +88,14 @@ def _is_bare_measurement(clause: str) -> bool:
     context — "8 mm tall on the top" is a bare measurement (the "the"
     refers to the feature's top, not a new subject).
     """
-    return not re.search(
-        r"\b(?:a|an|it|this|that|these|those|he|she|they|we|you|I|my|your|his|her|its|our|their)\b",
-        clause,
-        re.IGNORECASE,
-    )
+    return _SUBJECT_INTRODUCER_RE.search(clause) is None
 
 
 def feature_clause_start(
     clauses: list[str],
     feature_noun_re: re.Pattern[str],
     numbers_in: Callable[[str], list[float]],
+    feature_verb_re: Callable[[str], re.Pattern[str]],
 ) -> int:
     """The 0-based index of the sub-clause where the FEATURE CLAUSE
     begins (issue #413), or ``-1`` when the message has no feature
@@ -106,10 +119,7 @@ def feature_clause_start(
         if feature_noun_re.search(c):
             return i
     for i, c in enumerate(clauses):
-        if any(
-            re.search(rf"(?<!\w){re.escape(v)}(?!\w)", c, re.IGNORECASE)
-            for v in _FEATURE_VERBS
-        ) and numbers_in(c):
+        if _has_feature_verb(c, feature_verb_re) and numbers_in(c):
             return i
     return -1
 
@@ -131,6 +141,8 @@ def message_has_feature_noun(
 #: skips these when deciding whether a feature noun is the HEAD NOUN of
 #: the clause (no non-feature noun before it). Articles, prepositions,
 #: the mm unit words, and the axis words are not part nouns.
+#: MUST STAY IN SYNC with the axis word sets in ``axis_lexicon``
+#: (ABSOLUTE_WORDS, RELATIVE_WORDS) — a new axis word must be added here.
 _NON_NOUN_WORDS: frozenset[str] = frozenset(
     {
         "a", "an", "the", "with", "in", "on", "of", "and",
@@ -142,6 +154,40 @@ _NON_NOUN_WORDS: frozenset[str] = frozenset(
         "narrower", "deeper", "shallower",
     }
 )
+
+
+def _is_subordinate_feature(clause: str, with_match: re.Match[str]) -> bool:
+    """True when the feature noun is in a "with a/an" / "in a/an" phrase
+    AND the number belongs to that phrase (the last number in the clause
+    sits after the phrase's start). Issue #413 lens review: extracted
+    from :func:`in_clause_feature_noun_guard`."""
+    last_num_pos = -1
+    for num_m in re.finditer(r"\d+", clause):
+        last_num_pos = num_m.end()
+    return last_num_pos > with_match.end()
+
+
+def _feature_noun_is_head_noun(
+    clause: str,
+    feature_noun_pos: int,
+    feature_noun_re: re.Pattern[str],
+) -> bool:
+    """True when the feature noun is the HEAD NOUN of the clause — no
+    non-feature noun appears before it. Issue #413 lens review: extracted
+    from :func:`in_clause_feature_noun_guard`."""
+    prefix = clause[:feature_noun_pos]
+    for w in prefix.split():
+        w_clean = w.strip(".,;:!?()[]{}\"'")
+        if not w_clean:
+            continue
+        if feature_noun_re.search(w_clean):
+            continue
+        if w_clean.isdigit():
+            continue
+        if w_clean.lower() in _NON_NOUN_WORDS:
+            continue
+        return False  # a non-feature noun precedes — the feature noun is not the head
+    return True
 
 
 def in_clause_feature_noun_guard(
@@ -168,26 +214,8 @@ def in_clause_feature_noun_guard(
     prefix = clause[: m.start()]
     with_match = re.search(r"\b(?:with|in)\s+(?:a|an)\b", prefix, re.IGNORECASE)
     if with_match is not None:
-        # The number is part of the "with a/an" phrase if the LAST number
-        # in the clause sits after the phrase's start.
-        last_num_pos = -1
-        for num_m in re.finditer(r"\d+", clause):
-            last_num_pos = num_m.end()
-        return last_num_pos > with_match.end()
-    # Not in a "with a/an" phrase: the feature noun is suppressed when it
-    # is the HEAD NOUN — no non-feature noun appears before it.
-    for w in prefix.split():
-        w_clean = w.strip(".,;:!?()[]{}\"'")
-        if not w_clean:
-            continue
-        if feature_noun_re.search(w_clean):
-            continue
-        if w_clean.isdigit():
-            continue
-        if w_clean.lower() in _NON_NOUN_WORDS:
-            continue
-        return False  # a non-feature noun precedes — the feature noun is not the head
-    return True
+        return _is_subordinate_feature(clause, with_match)
+    return _feature_noun_is_head_noun(clause, m.start(), feature_noun_re)
 
 
 def feature_clause_suppresses(
@@ -198,9 +226,8 @@ def feature_clause_suppresses(
     feature_clause_start: int,
     absolute_words: dict[str, str],
     numbers_in: Callable[[str], list[float]],
-    word_re: Callable[[str], re.Pattern[str]],
     feature_verb_re: Callable[[str], re.Pattern[str]],
-    feature_noun_re: re.Pattern[str] | None = None,
+    feature_noun_re: re.Pattern[str],
 ) -> bool:
     """Feature-clause cross-clause suppression (issue #398, narrowed on
     #413).
@@ -238,17 +265,15 @@ def feature_clause_suppresses(
     and states H=12. Before #413, the gate was message-wide ("does ANY
     clause have a feature noun?"), so "12 mm tall" was swallowed.
 
-    ``absolute_words`` / ``numbers_in`` / ``word_re`` / ``feature_verb_re``
-    are passed in (rather than imported) to keep this module a leaf —
-    the dependency direction to ``axis_lexicon`` is one-way.
-    ``feature_clause_start`` is passed in from
+    ``absolute_words`` / ``numbers_in`` / ``feature_verb_re`` /
+    ``feature_noun_re`` are passed in (rather than imported) to keep this
+    module a leaf — the dependency direction to ``axis_lexicon`` is
+    one-way. ``feature_clause_start`` is passed in from
     ``axis_lexicon._classify_clause`` (the caller knows where the
     feature clause begins in the full message).
     """
-    has_feature_verb = any(
-        feature_verb_re(v).search(clause) for v in _FEATURE_VERBS
-    )
-    has_feature_noun = feature_noun_re is not None and feature_noun_re.search(clause)
+    has_feature_verb = _has_feature_verb(clause, feature_verb_re)
+    has_feature_noun = feature_noun_re.search(clause) is not None
     # A feature verb followed by a part-referencing pronoun ("it", "this",
     # "that") is a part-level statement, not a feature clause — UNLESS a
     # feature noun follows later in the same clause. "cut it to 15 mm tall"

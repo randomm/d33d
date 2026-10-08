@@ -457,7 +457,6 @@ def _classify_clause(
         feature_clause_start=feature_clause_start,
         absolute_words=ABSOLUTE_WORDS,
         numbers_in=_numbers_in,
-        word_re=_word_re,
         feature_verb_re=_word_re,
         feature_noun_re=FEATURE_NOUN_RE,
     ):
@@ -578,7 +577,7 @@ def classify(message: str) -> Cues:
     for clause in clauses:
         all_sub_clauses.extend(_split_on_and(clause))
     fc_start = feature_clause.feature_clause_start(
-        all_sub_clauses, FEATURE_NOUN_RE, _numbers_in
+        all_sub_clauses, FEATURE_NOUN_RE, _numbers_in, _word_re
     )
 
     all_absolute: dict[str, float] = {}
@@ -587,17 +586,15 @@ def classify(message: str) -> Cues:
     all_cue_words: list[str] = []
     all_mapped_numbers: set[float] = set()
 
-    global_sub_idx = 0
-    for clause in clauses:
+    for global_sub_idx, clause in enumerate(clauses):
         # Try splitting on "and" within this clause.
         sub_clauses = _split_on_and(clause)
-        for sub in sub_clauses:
+        for local_idx, sub in enumerate(sub_clauses):
             abs_c, rel_c, glob_c, words_c = _classify_clause(
                 sub,
-                sub_clause_index=global_sub_idx,
+                sub_clause_index=global_sub_idx + local_idx,
                 feature_clause_start=fc_start,
             )
-            global_sub_idx += 1
             for axis, val in abs_c.items():
                 all_absolute[axis] = val
                 all_mapped_numbers.add(val)
