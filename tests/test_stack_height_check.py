@@ -198,11 +198,23 @@ def test_declared_stack_sum_comment_does_not_split():
     assert set(refs) == {"a", "b"}
 
 
-def test_declared_stack_sum_duplicate_name_abstains():
-    """A parameter declared twice abstains (the block is ambiguous —
-    never guess which value wins)."""
-    scad = "a = 4;\na = 5;\ntotal_height = a + a;\ncube([a, a, a]);\n"
-    assert declared_stack_sum(scad) is None
+def test_declared_stack_sum_duplicate_name_first_wins():
+    """A name declared twice is SKIPPED (first occurrence wins, the
+    second is ignored — the round-1 skip-and-continue behaviour, not a
+    file-level abstain). The remaining declarations are evaluated: a
+    genuine two-operand sum is still found. (A duplicate of the SAME
+    name in a sum, ``total = a + a``, yields one distinct reference and
+    abstains for that reason, not because the file aborted.)"""
+    # Duplicate ``a`` (4 then 5) is skipped → first wins (a = 4). A
+    # distinct second operand makes a genuine two-operand sum → found.
+    scad = "a = 4;\na = 5;\nb = 2;\ntotal_height = a + b;\ncube([a, a, a]);\n"
+    total, refs = declared_stack_sum(scad)
+    assert total == 6.0  # a (first = 4) + b (2)
+    assert set(refs) == {"a", "b"}
+    # A sum whose only distinct reference is the duplicated name abstains
+    # (one distinct ref < 2) — for that reason, not a file abort.
+    same = "a = 4;\na = 5;\ntotal_height = a + a;\ncube([a, a, a]);\n"
+    assert declared_stack_sum(same) is None
 
 
 def test_declared_stack_sum_unbalanced_brackets_abstains():
@@ -427,3 +439,39 @@ def test_declared_stack_sum_all_unresolvable_abstains():
         "cube([r, r, r]);\n"
     )
     assert declared_stack_sum(scad) is None
+
+
+def test_declared_stack_sum_height_named_vector_declaration_no_crash():
+    """Issue #409 (crash regression): a HEIGHT-NAMED declaration whose RHS
+    is a VECTOR containing ``+`` (``lip_outer_top = [W + 2*t, D + 2*t]`` —
+    a real shape from ``evals/failures.jsonl`` row 55) is skipped from
+    ``env`` (a vector is not a readable atom), so the candidate loop must
+    NOT dereference it — the ``name not in env`` guard turns the former
+    ``KeyError`` into a clean skip. The rest of the block still resolves:
+    the stack among the resolvable declarations is found.
+    """
+    scad = (
+        "flared_lip_wall_thickness = 3;\n"
+        "W = 60; D = 45;\n"
+        "lip_outer_top = [W + 2*flared_lip_wall_thickness, "
+        "D + 2*flared_lip_wall_thickness];\n"
+        "base_height = 4;\n"
+        "skirt_height = 5;\n"
+        "total_height = base_height + skirt_height;\n"
+        "cube([W, D, 4]);\n"
+    )
+    # Does not crash. The vector is skipped; the real stack is found.
+    total, refs = declared_stack_sum(scad)
+    assert total == 9.0
+    assert set(refs) == {"base_height", "skirt_height"}
+    # When the vector is the ONLY height-named + containing declaration,
+    # the check abstains cleanly (no env entry → no candidate → None),
+    # not a crash.
+    only_vector = (
+        "flared_lip_wall_thickness = 3;\n"
+        "W = 60; D = 45;\n"
+        "lip_outer_top = [W + 2*flared_lip_wall_thickness, "
+        "D + 2*flared_lip_wall_thickness];\n"
+        "cube([W, D, 4]);\n"
+    )
+    assert declared_stack_sum(only_vector) is None

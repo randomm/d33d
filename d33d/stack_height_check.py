@@ -234,15 +234,18 @@ def _eval_add(expr: str, env: dict[str, float]) -> float | None:
 
 
 def _bare_params_in(rhs: str, env: dict[str, float]) -> tuple[str, ...]:
-    """The DISTINCT bare parameter references in ``rhs`` — identifier
-    spans that are exactly a known parameter name and are NOT part of a
-    number (a ``2`` inside ``rim_width`` never counts). Each span must
-    resolve to a STRICTLY positive value (a zero or negative parameter
-    is not a stack component).
+    """The DISTINCT positive parameter identifiers named in ``rhs``.
 
-    An operand containing ANY arithmetic is NOT a bare reference
-    (``2*rim_width`` is a term, not a parameter) — the span must match
-    a name in full.
+    Every identifier substring (``[A-Za-z_][A-Za-z0-9_]*``) is a candidate
+    — this does NOT exclude names appearing inside an arithmetic term
+    (``2*rim_width`` still yields ``rim_width``; a name is not part of a
+    number, so a ``2`` never counts). Each candidate must be a known
+    parameter resolving to a STRICTLY positive value (a zero or negative
+    parameter is not a stack component). The arithmetic-exclusion is NOT
+    done here: the caller's ``abs(value − sum(refs))`` equality check is
+    what rejects a sum like ``a = b + 2*c`` (where ``c`` is counted but the
+    term doubles it), so ``_bare_params_in`` collects every distinct
+    positive identifier and leaves the arithmetic judgment to that check.
     """
     out: list[str] = []
     seen: set[str] = set()
@@ -330,6 +333,13 @@ def declared_stack_sum(scad_source: str) -> tuple[float, tuple[str, ...]] | None
         if "+" not in rhs:
             continue
         if not is_height_name(name):
+            continue
+        # A height-named declaration whose RHS is unresolvable (a vector, a
+        # function call) was skipped from ``env`` above — it is not a
+        # candidate (the spike's ``name in env`` guard, restored here: a
+        # vector like ``lip_outer_top = [W + 2*t, D + 2*t]`` is height-named
+        # and has ``+`` in its RHS, but it is not a resolvable constant).
+        if name not in env:
             continue
         value = env[name]
         if not value > 0:
