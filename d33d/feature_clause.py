@@ -25,8 +25,6 @@ Public API (imported by ``axis_lexicon``):
 
 - :func:`feature_clause_suppresses` — the cross-clause suppression test.
 - :func:`feature_clause_start` — the clause-local feature-clause boundary.
-- :func:`message_has_feature_noun` — the pre-scan helper (kept for
-  callers that only need a boolean).
 - ``_FEATURE_VERBS`` — the closed feature-verb set.
 - ``_is_bare_measurement`` — the bare-measurement test.
 """
@@ -43,7 +41,6 @@ __all__ = [
     "feature_clause_start",
     "feature_clause_suppresses",
     "in_clause_feature_noun_guard",
-    "message_has_feature_noun",
 ]
 
 #: The feature verbs (closed set, issue #398): verbs that create or modify
@@ -122,19 +119,6 @@ def feature_clause_start(
         if _has_feature_verb(c, feature_verb_re) and numbers_in(c):
             return i
     return -1
-
-
-def message_has_feature_noun(
-    clauses: list[str], feature_noun_re: re.Pattern[str]
-) -> bool:
-    """Pre-scan: does ANY clause in the message contain a feature noun?
-
-    ``feature_noun_re`` is passed in (the closed feature-noun regex from
-    ``axis_lexicon``) so this module stays a leaf. Used by callers
-    that only need a boolean (issue #398); the clause-local version is
-    :func:`feature_clause_start` (issue #413).
-    """
-    return any(feature_noun_re.search(c) for c in clauses)
 
 
 #: Words that are NOT nouns — the in-clause head-noun guard (issue #413)
