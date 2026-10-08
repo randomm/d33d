@@ -52,8 +52,6 @@ __all__ = [
 # Feature-clause rules (issue #398) — see ``d33d.feature_clause``.
 
 # ---------------------------------------------------------------------------
-# Closed word sets
-# ---------------------------------------------------------------------------
 
 #: The canonical named-parameter axes for the W/D/H stated-dimension triple
 #: (mm). Defined here, at the bottom of the import graph (issue #393):
@@ -63,37 +61,18 @@ __all__ = [
 DIMENSION_AXES: tuple[str, ...] = ("W", "D", "H")
 
 ABSOLUTE_WORDS: dict[str, str] = {
-    "tall": "H",
-    "high": "H",
-    "height": "H",
-    "wide": "W",
-    "width": "W",
-    "deep": "D",
-    "depth": "D",
+    "tall": "H", "high": "H", "height": "H", "wide": "W", "width": "W",
+    "deep": "D", "depth": "D",
 }
 
 RELATIVE_WORDS: dict[str, str] = {
-    "taller": "H",
-    "shorter": "H",
-    "higher": "H",
-    "lower": "H",
-    "wider": "W",
-    "narrower": "W",
-    "deeper": "D",
-    "shallower": "D",
+    "taller": "H", "shorter": "H", "higher": "H", "lower": "H",
+    "wider": "W", "narrower": "W", "deeper": "D", "shallower": "D",
 }
 
 GLOBAL_WORDS: frozenset[str] = frozenset(
-    {
-        "bigger",
-        "smaller",
-        "scale",
-        "scaled",
-        "resize",
-        "resized",
-        "half the size",
-        "twice the size",
-    }
+    {"bigger", "smaller", "scale", "scaled", "resize", "resized",
+     "half the size", "twice the size"}
 )
 
 _RELATIVE = RELATIVE_WORDS
@@ -101,18 +80,8 @@ _GLOBAL = GLOBAL_WORDS
 
 # Words that must NOT trigger any axis (pinned by tests).
 _EXCLUDED: frozenset[str] = frozenset(
-    {
-        "long",
-        "length",
-        "thick",
-        "thickness",
-        "diameter",
-        "bore",
-        "lift",
-        "sit",
-        "reach",
-        "clear",
-    }
+    {"long", "length", "thick", "thickness", "diameter", "bore",
+     "lift", "sit", "reach", "clear"}
 )
 
 # Feature nouns (closed set, issue #261): words that name a FEATURE on
@@ -151,8 +120,6 @@ _FEATURE_NOUNS: frozenset[str] = frozenset(
         "bolts",
         "magnet",
         "magnets",
-        "spacer",
-        "spacers",
         "grid",
         "grids",
         "lid",
@@ -170,14 +137,15 @@ FEATURE_NOUN_RE = re.compile(
     r"(?<!\w)(?:" + "|".join(_FEATURE_NOUNS) + r")(?!\w)", re.IGNORECASE
 )
 
-#: The feature nouns that can ALSO name a whole printed part (issue #305
-#: task-a, operator decision: exactly {"lid"}; widening is a follow-up).
-#: Stays in ``_FEATURE_NOUNS`` (the lexicon's single-number path is
-#: unchanged: "a 7 mm lid" still states nothing); the triple/pair path
-#: (``dimension_protocol._extract_triple``) uses it for its conditional
-#: primary-object suppression. Pinned by ``tests/test_axis_lexicon.py``
-#: (the subset pin).
-_PART_NOUNS: frozenset[str] = frozenset({"lid"})
+#: The nouns that can ALSO name a whole printed part (issue #305 task-a;
+#: issue #413 added "spacer"/"spacers"). "lid" stays in ``_FEATURE_NOUNS``
+#: (the in-clause guard skips part nouns, so the lexicon's single-number
+#: path is unchanged: "a 7 mm lid" still states nothing); the triple/pair
+#: path (``dimension_protocol._extract_triple``) uses this set for its
+#: conditional primary-object suppression. "spacer"/"spacers" are NOT in
+#: ``_FEATURE_NOUNS`` (issue #413 operator decision). Pinned by
+#: ``tests/test_axis_lexicon.py`` (the part-noun pin).
+_PART_NOUNS: frozenset[str] = frozenset({"lid", "spacer", "spacers"})
 
 #: The mating connectors (issue #314): words and phrases that introduce the
 #: MATING PART of a design — the part the user's part must fit or sit on.
@@ -418,12 +386,17 @@ def _split_on_and(clause: str) -> list[str]:
 
 
 def _classify_clause(
-    clause: str, *, feature_noun_in_message: bool = False
+    clause: str,
+    *,
+    sub_clause_index: int = 0,
+    feature_clause_start: int = -1,
 ) -> tuple[dict[str, float], set[str], bool, list[str]]:
     """Classify one clause. Returns (absolute, relative, global_, cue_words).
 
-    ``feature_noun_in_message`` (issue #398) enables the feature-clause
-    suppression — see ``d33d.feature_clause``.
+    ``sub_clause_index`` (issue #413) is the 0-based index of this
+    sub-clause in the message's full sub-clause list. ``feature_clause_start``
+    is the 0-based index where the feature clause begins (``-1`` when
+    there is no feature clause). See ``d33d.feature_clause``.
     """
     relative: set[str] = set()
     global_: bool = False
@@ -463,24 +436,29 @@ def _classify_clause(
             # entirely in the mating part's zone. No absolute cue.
             return ({}, relative, global_, cue_words)
 
-    # Feature-noun clause (issue #261): the number is a feature size,
-    # not a part dimension. Relative/global cues and cue words are KEPT
-    # (a release only stops enforcement); the mm number falls into
-    # unmapped_mm_numbers via the normal scan below.
-    # See ``d33d.feature_clause``.
-    if FEATURE_NOUN_RE.search(clause):
+    # Feature-noun in-clause guard (issue #261, narrowed on #413) — see
+    # ``d33d.feature_clause.in_clause_feature_noun_guard``. The number is a
+    # feature size, not a part dimension, when the feature noun is a
+    # SUBORDINATE FEATURE ("with a/an" / "in a/an") or the HEAD NOUN of
+    # the clause. Part nouns (lid, spacer) are NOT true feature nouns —
+    # they name the whole part, so the guard does NOT fire for them.
+    if feature_clause.in_clause_feature_noun_guard(clause, FEATURE_NOUN_RE, _PART_NOUNS):
         return ({}, relative, global_, cue_words)
 
-    # Feature-clause suppression (issue #398) — see ``d33d.feature_clause``.
-    # Relative/global cues are KEPT (a release only stops enforcement).
+    # Feature-clause suppression (issue #398, narrowed on #413) — see
+    # ``d33d.feature_clause``. Relative/global cues are KEPT (a release
+    # only stops enforcement). The cross-clause guard fires for
+    # feature-verb clauses (always) and bare measurements at or after
+    # the feature clause start.
     if feature_clause.feature_clause_suppresses(
         clause,
         cue_words,
-        feature_noun_in_message=feature_noun_in_message,
+        sub_clause_index=sub_clause_index,
+        feature_clause_start=feature_clause_start,
         absolute_words=ABSOLUTE_WORDS,
         numbers_in=_numbers_in,
-        word_re=_word_re,
         feature_verb_re=_word_re,
+        feature_noun_re=FEATURE_NOUN_RE,
     ):
         return ({}, relative, global_, cue_words)
 
@@ -578,10 +556,28 @@ def classify(message: str) -> Cues:
     """
     clauses = split_clauses(message)
 
-    # Pre-scan for the feature-verb cross-clause suppression (issue
-    #398) — see ``d33d.feature_clause.message_has_feature_noun``.
-    _feature_noun_in_message = feature_clause.message_has_feature_noun(
-        clauses, FEATURE_NOUN_RE
+    # Pre-compute the feature clause start over ALL sub-clauses in the
+    # message (issue #413). The feature clause is message-wide: the
+    # feature noun's position in the full sub-clause list determines
+    # which sub-clauses are suppressed. Sub-clauses at or after the
+    # feature clause's start are suppressed; earlier ones are not.
+    #
+    # "a 40 mm wide box, 12 mm tall, with a 5 mm hole" → sub-clauses
+    # ["a 40 mm wide box", "12 mm tall", "with a 5 mm hole"]: feature
+    # noun at index 2, so "12 mm tall" (index 1) is NOT suppressed.
+    #
+    # "add a 10 mm wide slot across the top, 5 mm deep" → sub-clauses
+    # ["add a 10 mm wide slot across the top", "5 mm deep"]: feature
+    # noun at index 0, so "5 mm deep" (index 1) IS suppressed.
+    #
+    # "a 40 mm wide box with a 5 mm deep groove" → sub-clauses
+    # ["a 40 mm wide box", "a 5 mm deep groove"]: feature noun at
+    # index 1, so "a 40 mm wide box" (index 0) is NOT suppressed.
+    all_sub_clauses: list[str] = []
+    for clause in clauses:
+        all_sub_clauses.extend(_split_on_and(clause))
+    fc_start = feature_clause.feature_clause_start(
+        all_sub_clauses, FEATURE_NOUN_RE, _numbers_in, _word_re
     )
 
     all_absolute: dict[str, float] = {}
@@ -590,22 +586,25 @@ def classify(message: str) -> Cues:
     all_cue_words: list[str] = []
     all_mapped_numbers: set[float] = set()
 
-    for clause in clauses:
-        # Try splitting on "and" within this clause.
-        sub_clauses = _split_on_and(clause)
-        for sub in sub_clauses:
-            abs_c, rel_c, glob_c, words_c = _classify_clause(
-                sub,
-                feature_noun_in_message=_feature_noun_in_message,
-            )
-            for axis, val in abs_c.items():
-                all_absolute[axis] = val
-                all_mapped_numbers.add(val)
-            all_relative |= rel_c
-            all_global |= glob_c
-            for w in words_c:
-                if w not in all_cue_words:
-                    all_cue_words.append(w)
+    for global_sub_idx, clause in enumerate(all_sub_clauses):
+        # Each sub-clause carries its GLOBAL 0-based index in the flattened
+        # list (issue #413) — the same coordinate space as
+        # ``feature_clause_start``. A per-top-level-clause (local) index
+        # would misplace the at-or-after gate once a top-level clause holds
+        # more than one sub-clause ("a 40 mm wide box and 50 mm deep, …").
+        abs_c, rel_c, glob_c, words_c = _classify_clause(
+            clause,
+            sub_clause_index=global_sub_idx,
+            feature_clause_start=fc_start,
+        )
+        for axis, val in abs_c.items():
+            all_absolute[axis] = val
+            all_mapped_numbers.add(val)
+        all_relative |= rel_c
+        all_global |= glob_c
+        for w in words_c:
+            if w not in all_cue_words:
+                all_cue_words.append(w)
 
     has_any_number = _has_number(message)
     has_percent: bool = False

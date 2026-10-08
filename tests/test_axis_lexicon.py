@@ -442,13 +442,15 @@ class TestFeatureNounAbstain:
         feature noun still states its axis."""
         from d33d.axis_lexicon import _FEATURE_NOUNS
 
+        # "spacer"/"spacers" are PART nouns, not feature nouns (issue #413
+        # operator decision): they live in _PART_NOUNS only.
         words = {
             "hole", "holes", "groove", "slot", "pocket", "bore", "recess",
             "notch", "channel", "cutout", "cut-out", "counterbore",
             "countersink", "foot", "feet", "leg", "legs", "post", "tab",
             "lip", "rim", "rib", "boss", "peg", "pin", "screw", "bolt",
             "bolts",
-            "magnet", "magnets", "spacer", "spacers", "grid", "grids",
+            "magnet", "magnets", "grid", "grids",
             "lid", "wall", "walls", "chamfer", "fillet", "text",
             "label", "logo",
         }
@@ -465,17 +467,22 @@ class TestFeatureNounAbstain:
         # single-axis-word clause).
         assert classify("a 7 mm tall stand").absolute == {"H": 7.0}
 
-    def test_part_nouns_subset_pin(self) -> None:
-        """Issue #305: _PART_NOUNS is exactly {"lid"} — a named constant
-        pin. The subset must be a subset of _FEATURE_NOUNS."""
+    def test_part_nouns_pin(self) -> None:
+        """Issue #305/#413: _PART_NOUNS is exactly {"lid", "spacer",
+        "spacers"} — a named constant pin. "lid" is a feature noun too
+        (the in-clause guard skips part nouns); "spacer"/"spacers" are
+        NOT feature nouns (issue #413 operator decision), so the
+        subset-of-_FEATURE_NOUNS relation does NOT hold for them."""
         from d33d.axis_lexicon import _FEATURE_NOUNS, _PART_NOUNS
 
-        assert _PART_NOUNS == frozenset({"lid"}), (
-            f"_PART_NOUNS drifted: expected {{'lid'}}, got {_PART_NOUNS}"
+        assert _PART_NOUNS == frozenset({"lid", "spacer", "spacers"}), (
+            f"_PART_NOUNS drifted: expected {{'lid', 'spacer', 'spacers'}}, got {_PART_NOUNS}"
         )
-        assert _PART_NOUNS <= _FEATURE_NOUNS, (
-            f"_PART_NOUNS not a subset of _FEATURE_NOUNS: "
-            f"{_PART_NOUNS - _FEATURE_NOUNS}"
+        assert "lid" in _FEATURE_NOUNS, (
+            "the lid part-noun stays a feature noun (in-clause guard skips it)"
+        )
+        assert not ("spacer" in _FEATURE_NOUNS or "spacers" in _FEATURE_NOUNS), (
+            f"spacer must NOT be a feature noun: {_FEATURE_NOUNS}"
         )
 
     def test_part_noun_single_number_lexicon_unchanged(self) -> None:
@@ -536,6 +543,24 @@ class TestFeatureVerbClauseAbstain:
             # 'with' joiner: the feature noun is in the same top-level
             # clause (sub-clause), so the cross-clause rule does not fire.
             ("a 40 mm wide box with a 5 mm deep groove", {"W": 40.0}),
+            # Six QA 2026-10-08 §3 phrases (issue #413): part sizes +
+            # a feature in one message. The feature clause starts at the
+            # feature phrase; part sizes in earlier sub-clauses are
+            # unaffected.
+            ("a 40 mm wide box, 12 mm tall, with a 5 mm hole", {"W": 40.0, "H": 12.0}),
+            ("a planter 100 mm wide and 120 mm tall with a 10 mm drain hole", {"W": 100.0, "H": 120.0}),
+            ("a 50 mm wide stand, 80 mm tall, with a 10 mm wide cable slot", {"W": 50.0, "H": 80.0}),
+            ("a 40 mm wide, 12 mm tall box with a slot", {"W": 40.0, "H": 12.0}),
+            ("a 30 mm tall spacer with a 5 mm hole", {"H": 30.0}),
+            ("add a boss 12 mm wide and 8 mm tall on the top", {}),
+            # Issue #413 regression: a feature verb followed by "it" /
+            # "this" / "that" is a part-level statement ONLY when it is
+            # NOT followed, later in the same clause, by a feature noun.
+            # With a feature noun present, it IS a feature clause and
+            # states nothing (the 10 is the slot's width, the 5 the
+            # groove's depth — not the part's W/D).
+            ("add this 10 mm wide slot", {}),
+            ("add that 5 mm deep groove", {}),
         ],
     )
     def test_feature_verb_clause_states(
@@ -554,6 +579,38 @@ class TestFeatureVerbClauseAbstain:
         measurement; the slot's noun is in clause 1."""
         result = classify("add a 10 mm wide slot across the top, 5 mm deep")
         assert result.absolute == {}
+
+    def test_sub_clause_index_is_global_position(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """#413: classify() must pass each sub-clause its 0-based index in
+        the FLATTENED sub-clause list, not a local index within its
+        top-level clause. 'a 40 mm wide box and 50 mm deep, add a 5 mm
+        wide slot' flattens to three sub-clauses; the last one sits at
+        index 2, where feature_clause_start also points. A local index
+        (1) would break the at-or-after gate for a later feature clause.
+        The spy delegates to the real implementation, so output is
+        unchanged — this pins the index contract itself."""
+        import d33d.feature_clause as fc
+
+        # The gate reads ``feature_clause_suppresses`` through the module
+        # attribute, so patch it in the module namespace.
+        seen: list[tuple[str, int]] = []
+        real = fc.feature_clause_suppresses
+
+        def spy(clause, cue_words, **kw):
+            seen.append((clause, kw["sub_clause_index"]))
+            return real(clause, cue_words, **kw)
+
+        monkeypatch.setattr(fc, "feature_clause_suppresses", spy)
+        result = classify(
+            "a 40 mm wide box and 50 mm deep, add a 5 mm wide slot"
+        )
+        assert result.absolute == {"W": 40.0, "D": 50.0}
+        indices = {clause: idx for clause, idx in seen}
+        assert indices == {
+            "a 40 mm wide box": 0,
+            "50 mm deep": 1,
+            "add a 5 mm wide slot": 2,
+        }, f"global position contract broken: {seen}"
 
     def test_feature_verb_positions_never_state(self) -> None:
         """Position phrases ('15 mm from the left edge', '10 mm from the
@@ -896,12 +953,20 @@ class TestTripleExtraction:
         assert stated_axes_from_message("a 10 × 10 mm hole") == {}
 
     def test_plural_feature_nouns_suppress(self) -> None:
-        """Plural feature nouns (magnets, spacers, grids) suppress the
-        triple double the same way the singulars do (issue #275 round-1
+        """Plural feature nouns (magnets, grids) suppress the triple
+        double the same way the singulars do (issue #275 round-1
         false-positive fix)."""
         assert stated_axes_from_message("add 2x magnets 6x3mm") == {}
-        assert stated_axes_from_message("print 2 x 40 mm spacers") == {}
         assert stated_axes_from_message("a 5x5 grid") == {}
+
+    def test_count_times_size_spacers_states_nothing(self) -> None:
+        """'print 2 x 40 mm spacers' states NOTHING — now through the
+        count guard (issue #413): "spacer"/"spacers" are no longer
+        feature nouns, so the suppression no longer comes from the
+        feature-noun window; "2 x 40" is a count-times-size ("2" is the
+        count of spacers, "40 mm" is the size) and the count guard
+        keeps it from reading as a W/D pair."""
+        assert stated_axes_from_message("print 2 x 40 mm spacers") == {}
 
     def test_tray_triple_states_axes(self) -> None:
         """'a 60 × 45 × 20 mm tray' → the triple states W/D/H (no feature
