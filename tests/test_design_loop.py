@@ -4263,10 +4263,11 @@ def test_unchanged_mesh_v100_repro_fires_geometrically_wrong(tmp_path):
 
 def test_unchanged_mesh_genuine_edit_passes(tmp_path):
     """Issue #419: a v2+ edit whose rendered mesh DIFFERS from the parent's
-    (a genuine change — volume and face count both beyond epsilon) PASSES
-    on iteration 1 (no repair routed). The recut fixture (792 faces,
-    7578 mm3) differs from the plate (800 faces, 56663 mm3) by well over
-    1% on both metrics — the check must not false-fire on a real change."""
+    (a genuine change — face count and volume both beyond epsilon) PASSES
+    on iteration 1 (no repair routed). The recut fixture (824 faces,
+    50799.79 mm3 — a 38 mm bore at the centre of the plate) differs from
+    the plate (12 faces, 57600 mm3) by well over 1% on both metrics —
+    the check must not false-fire on a real change."""
     fixture_dir = Path(__file__).parent / "fixtures" / "stl"
     parent = str(fixture_dir / "v100-plate.stl")
     recut = str(fixture_dir / "v100-plate-recut.stl")
@@ -4325,6 +4326,42 @@ def test_unchanged_mesh_missing_candidate_stl_abstains(tmp_path):
     )
     assert result.status == "pass"
     assert result.iterations[0].repair is None
+
+
+def test_unchanged_mesh_moved_hole_passes(tmp_path):
+    """Issue #419 (PM main concern — the position-sensitive fix): a v2+ edit
+    that MOVES a hole (the "move the hole 10 mm" case) leaves volume and
+    face count unchanged — only the centroid moves. The hole-A fixture
+    (bore at (0,0)) vs hole-B (bore at (10,10)) have identical face count
+    (824), identical volume within 0.0002 mm3, and identical bbox — the
+    ONLY metric that differs is the centroid (1.34 mm). Without the
+    position-sensitive leg this check would false-fire "nothing moved"
+    on a correct edit. With the centroid leg the check passes."""
+    fixture_dir = Path(__file__).parent / "fixtures" / "stl"
+    parent = str(fixture_dir / "v100-plate-hole-A.stl")
+    candidate = str(fixture_dir / "v100-plate-hole-B.stl")
+    result = _run_unchanged_loop(candidate, parent_mesh_stl=parent)
+    assert result.status == "pass"
+    assert result.iterations_used == 1
+    assert result.iterations[0].repair is None
+    assert result.iterations[0].failure_class is None
+
+
+def test_unchanged_mesh_identical_mesh_still_fires(tmp_path):
+    """Issue #419 (regression guard for the position-sensitive fix): a v2+
+    edit whose rendered mesh is BYTE-IDENTICAL to the parent's (the v100
+    repro — same file loaded as both parent and candidate) still fires the
+    unchanged repair: volume, face count, bbox AND centroid are all equal.
+    The centroid leg must not accidentally suppress the v100 repro."""
+    fixture_dir = Path(__file__).parent / "fixtures" / "stl"
+    parent = str(fixture_dir / "v100-plate-hole-A.stl")
+    # Same file as parent and candidate: delta 0 on every metric.
+    result = _run_unchanged_loop(parent, parent_mesh_stl=parent)
+    assert result.status == "exhausted"
+    first = result.iterations[0]
+    assert first.failure_class == "geometrically_wrong"
+    assert first.repair is not None
+    assert "unchanged from the parent" in first.repair["evidence"]
 
 
 def test_unchanged_mesh_repair_then_changed_mesh_passes_within_cap(tmp_path):

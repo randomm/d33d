@@ -1517,7 +1517,7 @@ def _measured_parent_stats_for_dir(
         return (None, None, None)
     try:
         components = load_and_split(str(stl_path))
-    except Exception:
+    except (OSError, ValueError, RuntimeError):
         return (None, None, None)
     if not components:
         return (None, None, None)
@@ -1529,7 +1529,7 @@ def _measured_parent_stats_for_dir(
         topo = mesh_topology(merged=components[0], components=components)
         if topo["watertight_bodies"] > 0:
             genus = topo["genus"]
-    except Exception:
+    except (ValueError, RuntimeError, IndexError, TypeError):
         genus = None
     # Volume + face count: sum across watertight components.
     try:
@@ -1542,7 +1542,7 @@ def _measured_parent_stats_for_dir(
         if total_faces <= 0:
             return (genus, None, None)
         return (genus, total_vol, total_faces)
-    except Exception:
+    except (ValueError, TypeError, RuntimeError, IndexError):
         return (genus, None, None)
 
 
@@ -1562,7 +1562,7 @@ def _measured_parent_stats_for_file(
         return (None, None, None)
     try:
         components = load_and_split(stl_path)
-    except Exception:
+    except (OSError, ValueError, RuntimeError):
         return (None, None, None)
     if not components:
         return (None, None, None)
@@ -1573,7 +1573,7 @@ def _measured_parent_stats_for_file(
         topo = mesh_topology(merged=components[0], components=components)
         if topo["watertight_bodies"] > 0:
             genus = topo["genus"]
-    except Exception:
+    except (ValueError, RuntimeError, IndexError, TypeError):
         genus = None
     try:
         total_vol = 0.0
@@ -1585,7 +1585,7 @@ def _measured_parent_stats_for_file(
         if total_faces <= 0:
             return (genus, None, None)
         return (genus, total_vol, total_faces)
-    except Exception:
+    except (ValueError, TypeError, RuntimeError, IndexError):
         return (genus, None, None)
 
 

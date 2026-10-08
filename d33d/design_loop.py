@@ -109,8 +109,6 @@ __all__ = [
     "scad_looks_valid",
     "scad_title",
     "score",
-    "unchanged_mesh_check",
-    "UNCHANGED_INSTRUCTION",
 ]
 
 #: The auto-iteration cap (spec: "capped at 3 auto-iterations"). The cap
@@ -2250,6 +2248,7 @@ async def run_design_loop_async(
                     "instruction": _instruction,
                     "scad_source": scad_source,
                     "evidence": _evidence,
+                    "reason": "mesh_unchanged",
                 }
                 _unchanged_repair_fired = True
 
@@ -2703,8 +2702,7 @@ def _exhausted(
         _repair = getattr(best, "repair", None)
         if (
             isinstance(_repair, dict)
-            and _repair.get("failure_class") == "geometrically_wrong"
-            and "unchanged from the parent" in str(_repair.get("evidence", ""))
+            and _repair.get("reason") == "mesh_unchanged"
         ):
             reason = "mesh_unchanged"
     return DesignResult(
