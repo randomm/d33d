@@ -216,8 +216,10 @@ describe("PlateBackdrop", () => {
     expect(vhTerm).toBeLessThan(52);
     // Lower bound: the cap must still be a real plate — a degenerate value
     // (0vh, 0.5vh) would be a non-sensical reversion this tripwire should not
-    // silently pass. 40 is the floor of the "reduced but meaningful" band.
-    expect(vhTerm).toBeGreaterThanOrEqual(40);
+    // silently pass. 30 is the floor of the "reduced but meaningful" band
+    // (issue #415: 40vh was too large — the caption+note column overlapped
+    // the photo line at 1920x1080; 30vh clears all four gate viewports).
+    expect(vhTerm).toBeGreaterThanOrEqual(30);
   });
 
   it("caps the plate SVG's width cap's vw term at 44vw — the caption stays inside the card's bottom edge at the narrowest QA width (issue #390 item 3)", () => {
