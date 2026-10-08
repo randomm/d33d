@@ -30,7 +30,9 @@ circular-import break applies the same way).
 
 from __future__ import annotations
 
+import itertools
 import logging
+import math
 import re
 
 logger = logging.getLogger(__name__)
@@ -177,7 +179,7 @@ def _eval_mul(expr: str, env: dict[str, float]) -> float | None:
     if not splits:
         return _eval_atom(e, env)
     parts = [e[: splits[0]]]
-    for a, b in zip(splits, splits[1:]):
+    for a, b in itertools.pairwise(splits):
         parts.append(e[a + 1 : b])
     parts.append(e[splits[-1] + 1 :])
     acc = _eval_atom(parts[0], env)
@@ -303,7 +305,7 @@ def declared_stack_sum(scad_source: str) -> tuple[float, tuple[str, ...]] | None
     env: dict[str, float] = {}
     for name, rhs in decls.items():
         value = _eval_add(rhs, env)
-        if value is None or value != value or value in (float("inf"), float("-inf")):
+        if value is None or math.isnan(value) or math.isinf(value):
             logger.info(
                 "stack-height check abstained: declaration %r does not resolve "
                 "to a constant",

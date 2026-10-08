@@ -45,6 +45,7 @@ __all__ = [
     "METRIC_SCREW_CLEARANCE_MM",
     "SCREW_CLEARANCE_INSTRUCTION",
     "SCREW_SIZE_RE",
+    "TOTAL_HEIGHT_INSTRUCTION",
     "clearance_rows_line",
     "design_prompt",
     "import_part_instruction",
@@ -116,6 +117,18 @@ SCREW_CLEARANCE_INSTRUCTION = (
     "screw clearance table below, NOT the nominal size — printed holes come out "
     "undersize, so a nominal-sized hole will not accept the screw — and state "
     "the clearance in the parameter's reason."
+)
+
+#: The overall-height declaration instruction (issue #409): when the part
+#: is a stack of features, the model declares the part's overall height as
+#: a derived parameter named ``total_height`` (a sum of its stacked
+#: component parameters), so the loop's stack-height post-check has a
+#: declared sum to compare against the measured Z.
+TOTAL_HEIGHT_INSTRUCTION = (
+    "When the part is a stack of features (multiple features stacked "
+    "along the Z axis), declare the part's overall height as a derived "
+    "parameter named `total_height` — a sum of its stacked component "
+    "height parameters (e.g. `total_height = base_height + skirt_height`)."
 )
 
 
@@ -312,6 +325,8 @@ def design_prompt(
     lines.append("Screw clearance (through-holes), in mm:")
     lines.append(clearance_rows_line())
     lines.append(SCREW_CLEARANCE_INSTRUCTION)
+
+    lines.append(TOTAL_HEIGHT_INSTRUCTION)
 
     lines.append("")
     lines.append("BOSL2 cheatsheet (verified module signatures; do not invent):")

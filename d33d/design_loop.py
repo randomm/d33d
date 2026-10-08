@@ -1119,6 +1119,7 @@ def _design_system(
     unsettled part) the prompt is byte-identical to today."""
     from d33d.design_prompts import (
         SCREW_CLEARANCE_INSTRUCTION,
+        TOTAL_HEIGHT_INSTRUCTION,
         clearance_rows_line,
         import_part_instruction,
     )
@@ -1131,6 +1132,7 @@ def _design_system(
         "Screw clearance (through-holes), in mm: "
         f"{clearance_rows_line()}. "
         f"{SCREW_CLEARANCE_INSTRUCTION} "
+        f"{TOTAL_HEIGHT_INSTRUCTION} "
     )
     if part_scale is not None:
         system += import_part_instruction(part_scale) + " "
@@ -2064,6 +2066,7 @@ async def run_design_loop_async(
             and next_repair is None
             and not _screw_repair_fired
             and not _through_repair_fired
+            and part_scale is None
         ):
             _stack_det = _stack_height_post_check(scad_source, bbox.z if bbox else None)
             if _stack_det is not None:

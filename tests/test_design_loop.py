@@ -3345,9 +3345,9 @@ def test_stack_height_direct_check_contract():
     """Issue #409: the post-check helper's contract in isolation —
     the DETECTION tuple (declared, measured) and the fire/pass/abstain
     conditions."""
-    from d33d.stack_height_check import stack_height_check as _check
-
     from pathlib import Path
+
+    from d33d.stack_height_check import stack_height_check as _check
 
     fixtures = Path(__file__).parent / "fixtures" / "scad"
     v65 = (fixtures / "v65-lid-difference-inversion.scad").read_text()
@@ -3386,6 +3386,56 @@ def test_stack_height_repair_scad_source_equals_iteration_scad():
     assert first.repair["scad_source"] == first.scad_source
     assert first.repair["scad_source"] == v65
     assert first.repair["scad_source"] != ""
+
+
+def test_stack_height_imported_part_abstains():
+    """Issue #409 (edge case, #383): when the project has an imported
+    part (``part_scale`` is not None), the stack-height check abstains —
+    the measured Z includes the imported geometry's height, so a declared
+    sum that describes only the added feature would fire falsely.
+
+    The test uses a SCAD that satisfies the import guard (has
+    ``import("part.stl")``) so the import guard does not suppress the
+    stack check — the stack check itself must abstain via
+    ``part_scale is not None``."""
+    # A SCAD with the import AND a declared height sum (the stack check's
+    # candidate) — the import guard passes (import present), but the
+    # stack check must abstain because part_scale is not None.
+    scad = (
+        'scale(1.0) import("part.stl")\n'
+        "plate_thickness = 4;\n"
+        "rim_drop = 2;\n"
+        "skirt_height = 5;\n"
+        "base_height = plate_thickness + rim_drop;\n"
+        "total_height = base_height + skirt_height;\n"
+        "union() {\n"
+        "  scale(1.0) import(\"part.stl\")\n"
+        "  translate([0, 0, total_height])\n"
+        "  cube([20, 20, 1]);\n"
+        "}\n"
+    )
+    llm = [_stack_scad_llm(scad)]
+
+    def render_fn(scad_src, defines):
+        return _render()
+
+    stated = (20.0, 20.0, 0.0)
+
+    result = run_design_loop(
+        photo=PHOTO,
+        stated_dims=stated,
+        render_fn=render_fn,
+        llm_fn=lambda role, messages, system: llm[0],
+        bbox_fn=lambda r: BboxInfo(20.0, 20.0, 4.0, 400.0),
+        part_scale=1.0,
+    )
+    # The stack check abstains (part_scale is not None) → no stack repair.
+    # The import guard passes (import present, scale matches).
+    # The candidate passes (no gate fires, no stack repair).
+    assert result.status == "pass"
+    first = result.iterations[0]
+    assert first.repair is None
+    assert first.failure_class is None
 
 
 # ---------------------------------------------------------------------------
