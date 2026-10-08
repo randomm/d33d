@@ -17,7 +17,11 @@ from pathlib import Path
 
 import trimesh
 
-from d33d.through_hole_check import is_through_request, through_hole_check
+from d33d.through_hole_check import (
+    is_through_request,
+    requested_hole_count,
+    through_hole_check,
+)
 
 #: The committed STL fixtures (generated once locally with trimesh boolean
 #: ops — CI has no boolean backend, so the tests load these instead).
@@ -142,7 +146,6 @@ def test_check_pocket_over_zero_baseline_fires(tmp_path):
     stl = _write_stl(tmp_path / "pocket.stl", _pocket_stl())
     det = through_hole_check("drill a 6 mm hole through the box", stl, 0)
     assert det == (0, 0)
-
 
 def test_check_through_mesh_over_zero_baseline_passes(tmp_path):
     """A through request + a true through-hole (genus 1) over a zero
@@ -276,3 +279,364 @@ def test_check_unexpected_exception_abstains(tmp_path, monkeypatch):
     monkeypatch.setattr(pmt, "mesh_topology", _raise_runtime_error)
     # The check must abstain (None), not raise.
     assert through_hole_check("drill a 6 mm hole through the box", stl, 0) is None
+
+
+# ---------------------------------------------------------------------------
+# Issue #418: the article rule (new hole must raise, existing hole must
+# not lower) + the stated-count requirement + per-run baseline logging
+# ---------------------------------------------------------------------------
+
+
+def test_article_existing_hole_resize_unchanged_genus_passes(tmp_path):
+    """Issue #418 (the v108 repro): a request about an EXISTING hole
+    (definite article — "make the through-hole 8 mm") with parent genus
+    1 and a rendered genus 1 must PASS (the old strict-exceed rule
+    failed it as (1, 1))."""
+    stl = _write_stl(tmp_path / "through.stl", _through_stl())
+    assert through_hole_check("make the through-hole 8 mm", stl, 1) is None
+    # A move of the existing hole — unchanged genus also passes.
+    assert through_hole_check("move the through-hole to the left", stl, 1) is None
+
+
+def test_article_existing_hole_fell_below_baseline_fails(tmp_path):
+    """Issue #418: an existing-hole request where the rendered genus
+    FELL below the parent baseline (a hole that closed) fails."""
+    stl = _write_stl(tmp_path / "pocket.stl", _pocket_stl())
+    # Parent genus 1, rendered genus 0 → the hole closed → (1, 0).
+    assert through_hole_check("make the through-hole 8 mm", stl, 1) == (1, 0)
+
+
+def test_article_new_hole_unchanged_genus_fails(tmp_path):
+    """Issue #418: a NEW-hole request (indefinite article — "drill a
+    hole through") over a part that already has holes (parent genus 4,
+    rendered genus 4) must FAIL — the genus did not rise. A rendered
+    genus that exceeds the baseline passes."""
+    stl4 = _write_stl(tmp_path / "genus4.stl", _genus_n_stl(4))
+    req = "drill a hole through the plate"
+    # Parent genus 4, rendered genus 4 → no rise → (4, 4).
+    assert through_hole_check(req, stl4, 4) == (4, 4)
+    # Baseline 3, rendered genus 4 → one new hole → pass.
+    assert through_hole_check(req, stl4, 3) is None
+
+
+def test_article_new_hole_stated_count_requires_rise_by_count(tmp_path):
+    """Issue #418: a stated count ("add two holes through") requires the
+    genus to rise by the count: parent genus 2, rendered genus 3 → FAIL
+    (only one new hole), rendered genus 4 → PASS (two new holes)."""
+    stl3 = _write_stl(tmp_path / "genus3.stl", _genus_n_stl(3))
+    stl4 = _write_stl(tmp_path / "genus4.stl", _genus_n_stl(4))
+    req = "add two holes through the plate"
+    assert through_hole_check(req, stl3, 2) == (2, 3)
+    assert through_hole_check(req, stl4, 2) is None
+
+
+def test_article_hyphenated_existing_hole_passes_unchanged(tmp_path):
+    """Issue #418: the hyphenated token "through-hole" with a definite
+    article is an existing-hole request — unchanged genus passes."""
+    stl = _write_stl(tmp_path / "through.stl", _through_stl())
+    assert through_hole_check("make the through-hole 8 mm", stl, 1) is None
+
+
+def test_requested_hole_count_parses_counts():
+    """Issue #418: the stated-count parser — a number word or an Arabic
+    numeral is the count; no count → 1."""
+    assert requested_hole_count("add two holes through") == 2
+    assert requested_hole_count("drill 3 holes through the plate") == 3
+    assert requested_hole_count("four through-holes in a row") == 4
+    assert requested_hole_count("drill a hole through") == 1
+    assert requested_hole_count("make the through-hole 8 mm") == 1
+
+
+def test_requested_hole_count_is_adjacent_to_hole_noun():
+    """Issue #418 (lens finding 1): the count is the numeral or number
+    word IMMEDIATELY before the hole noun (single whitespace or a hyphen),
+    and never a number followed by a unit (mm, cm, in, ").
+
+    A dimension's digits must not leak in through the optional hyphen
+    separator ("drill 2mm holes" — 2 is a size, not a count), and a
+    later clause's count must not be taken ("drill a 2.5mm hole and
+    three holes" — one hole was requested). A plural with a stated size
+    and no count ("drill 2mm holes") means "some holes" — the default
+    for an unstated count is 1."""
+    # A dimension's digits do not leak in (2 is the size, not a count):
+    # unstated count -> default 1.
+    assert requested_hole_count("drill 2mm holes through") == 1
+    # A later clause's count is not the requested count (one hole):
+    assert requested_hole_count("drill a 2.5mm hole and three holes") == 1
+    # A later clause's count is not the requested count (single-space mm):
+    assert requested_hole_count("drill a 2.5 mm hole and three holes") == 1
+    # The legitimate pinned cases:
+    assert requested_hole_count("add 3 holes through") == 3
+    assert requested_hole_count("add three 5 mm holes through") == 3
+    assert requested_hole_count("drill a 2.5 mm hole through") == 1
+    assert requested_hole_count("add two holes through the lid") == 2
+
+
+def test_hole_vocabularies_are_shared():
+    """Issue #418 (lens finding 2, round-2 rewrite): every token in the
+    shared vocabulary is BEHAVIOURALLY visible to the three
+    classification functions — the test probes each token through the
+    functions' actual output instead of introspecting source or globals.
+
+    * every bare noun fires ``is_through_request`` with "drill a {tok}
+      through";
+    * every hyphenated token fires on its own ("add a {tok}");
+    * ``requested_hole_count`` parses the stated count ("add 3 {plural}
+      through") for every token where a plural is natural;
+    * every hyphenated token with "the" is an EXISTING hole ("make the
+      {tok} 8 mm");
+    * every bare noun with "the" is DELIBERATELY a new hole ("drill the
+      {noun} through") — the round-1 adversarial rule.
+    """
+    import d33d.through_hole_check as thc
+
+    hyphenated = set(thc._HYPHENATED_TOKENS)
+    for tok in thc._HOLE_VOCABULARY:
+        if tok in hyphenated:
+            # The hyphenated tokens fire on their own (no hole noun needed).
+            assert is_through_request(f"add a {tok}"), (
+                f"hyphenated token {tok!r} must fire is_through_request"
+            )
+            # "the" + hyphenated compound is an existing-hole reference.
+            assert thc._request_is_existing_hole(f"make the {tok} 8 mm"), (
+                f"hyphenated token {tok!r} with 'the' must be an existing hole"
+            )
+            # A stated count parses off the hyphenated token's plural
+            # ("through-holes" / "thru-holes").
+            assert requested_hole_count(f"add 3 {tok}s through") == 3, (
+                f"count parser must read the numeral before {tok!r}"
+            )
+        else:
+            # Bare nouns need the separate "through" word to fire.
+            assert is_through_request(f"drill a {tok} through"), (
+                f"bare noun {tok!r} must fire is_through_request"
+            )
+            # "the" + a bare noun is a NEW hole (deliberately, per the
+            # round-1 adversarial rule).
+            assert not thc._request_is_existing_hole(f"drill the {tok} through"), (
+                f"bare noun {tok!r} with 'the' must be a new hole"
+            )
+            # A stated count parses off the bare noun's plural.
+            assert requested_hole_count(f"add 3 {tok}s through") == 3, (
+                f"count parser must read the numeral before {tok!r}"
+            )
+
+
+def test_check_logs_baseline_and_source(tmp_path, caplog):
+    """Issue #418 (acceptance): each run logs the baseline used and the
+    check's decision, so QA can see why the check passed or failed.
+    The ``baseline_source`` kwarg (the adapter seam's provenance string)
+    is logged WITH the decision — not just the baseline number."""
+    stl = _write_stl(tmp_path / "through.stl", _through_stl())
+    import logging
+
+    src = "parent version v107 rendered genus: 1"
+    with caplog.at_level(logging.INFO, logger="d33d.through_hole_check"):
+        through_hole_check("make the through-hole 8 mm", stl, 1, src)
+    assert any("existing hole" in rec.message for rec in caplog.records)
+    assert any("baseline genus 1" in rec.message for rec in caplog.records)
+    assert any(src in rec.message for rec in caplog.records), (
+        "the baseline source must be logged with the decision"
+    )
+
+    src2 = "stored repaired part genus: 0"
+    with caplog.at_level(logging.INFO, logger="d33d.through_hole_check"):
+        through_hole_check("drill a hole through the plate", stl, 0, src2)
+    assert any("new hole" in rec.message for rec in caplog.records)
+    assert any(src2 in rec.message for rec in caplog.records), (
+        "the baseline source must be logged with the decision (new-hole)"
+    )
+
+    # No source (the seam omitted the kwarg): the log says so honestly.
+    with caplog.at_level(logging.INFO, logger="d33d.through_hole_check"):
+        through_hole_check("make the through-hole 8 mm", stl, 1)
+    assert any(
+        "not set by the seam" in rec.message for rec in caplog.records
+    )
+
+
+def test_route_through_hole_repair_accepts_source_kwarg(tmp_path):
+    """Issue #418: ``route_through_hole_repair`` accepts the
+    ``through_baseline_genus_source`` kwarg (the adapter seam's
+    provenance string) and forwards it to the check. Without the
+    forward, the production path would raise ``TypeError``."""
+    from d33d.through_hole_check import route_through_hole_repair
+
+    stl = _write_stl(tmp_path / "pocket.stl", _pocket_stl())
+    src = "parent version v108 rendered genus: 1"
+    # An existing-hole request where the genus fell below the baseline:
+    # the check fires (returns a tuple, not None) — the source kwarg
+    # must not cause a TypeError.
+    result = route_through_hole_repair(
+        "make the through-hole 8 mm",
+        stl,
+        1,
+        "W=20; cube([W,W,W]); difference();",
+        src,
+    )
+    assert result is not None
+    evidence, _instruction = result
+    assert "fell below" in evidence
+
+
+def test_route_repair_no_directive_warning_names_baseline_source(tmp_path, caplog):
+    """Issue #418 (lens finding 3): when ``route_repair`` returns no
+    directive, the warning must name WHERE the baseline came from, using
+    the same ``source or "not set by the seam"`` pattern as the check's
+    decision logs."""
+    import logging
+
+    import d33d.failure_classes as fc
+    from d33d.through_hole_check import route_through_hole_repair
+
+    stl = _write_stl(tmp_path / "pocket.stl", _pocket_stl())
+    src = "parent version v109 rendered genus: 2"
+
+    original_route_repair = fc.route_repair
+    fc.route_repair = lambda classified, scad_source: None
+    try:
+        with caplog.at_level(logging.WARNING, logger="d33d.through_hole_check"):
+            # A new-hole through request whose genus does not rise (pocket =
+            # 0 over baseline 0): the check fires, routing is attempted,
+            # and route_repair returns no directive.
+            route_through_hole_repair(
+                "drill a hole through the plate",
+                stl,
+                0,
+                "W=20; cube([W,W,W]);",
+                src,
+            )
+    finally:
+        fc.route_repair = original_route_repair
+
+    warnings = [rec for rec in caplog.records if rec.levelno >= logging.WARNING]
+    assert warnings, "the no-directive warning must be logged"
+    assert any(src in rec.message for rec in warnings), (
+        "the no-directive warning must name the baseline source"
+    )
+
+    # No source (the seam omitted the kwarg): the warning says so honestly.
+    with caplog.at_level(logging.WARNING, logger="d33d.through_hole_check"):
+        fc.route_repair = lambda classified, scad_source: None
+        try:
+            route_through_hole_repair(
+                "drill a hole through the plate", stl, 0,
+                "W=20; cube([W,W,W]);",
+            )
+        finally:
+            fc.route_repair = original_route_repair
+    assert any(
+        "not set by the seam" in rec.message
+        for rec in caplog.records
+        if rec.levelno >= logging.WARNING
+    ), "the no-directive warning must say the source was not set"
+
+
+# ---------------------------------------------------------------------------
+# Issue #418 round-1 (adversarial): the article classifier must be
+# article-conditional (not verb-conditional), and the count parser must be
+# clause-local (a number word in a different clause is not the requested
+# hole count). Both were attack vectors: a verb marker anywhere in the
+# message, or a number word in a different clause, would silently select
+# the laxer branch.
+# ---------------------------------------------------------------------------
+
+
+def test_article_existing_hole_verb_marker_without_definite_article(tmp_path):
+    """Issue #418 (adversarial finding 1): a request that contains an
+    existing-hole verb (``resize`` / ``move``) but NO definite article
+    before the hole phrase is a NEW-hole request — the laxer existing-hole
+    branch must not be selected. A pocket render (genus 0) over a parent
+    baseline 1 must FAIL (a new hole did not pass), not silently pass.
+
+    "move the plate" and "resize the lid" have no hole noun at all (no
+    trigger — OUT_OF_DIFF); the real attack surface is a through-hole
+    request that carries a marker verb without "the".
+    """
+    stl = _write_stl(tmp_path / "pocket.stl", _pocket_stl())
+    # A marker verb + the hyphenated token, but NO "the" before it:
+    # indefinite article — this is a NEW hole, not the existing one.
+    assert through_hole_check("add a through-hole to the plate", stl, 1) == (1, 0)
+    # A marker verb + a hole noun, no "the": new-hole branch, pocket fails.
+    assert through_hole_check("resize a hole through the plate", stl, 1) == (1, 0)
+
+
+def test_article_ambiguous_make_it_a_through_hole(tmp_path):
+    """Issue #418 (adversarial minor note): "make it a through-hole" is
+    ambiguous — the indefinite article ("a") marks a NEW hole, so the
+    new-hole branch applies and the genus must rise by 1. A genus-1 render
+    over a baseline-0 parent passes (1 >= 0 + 1); over a baseline-1 parent
+    it fails (1 < 1 + 1). This pins the sane default (the indefinite
+    article, not the verb, decides)."""
+    stl = _write_stl(tmp_path / "through.stl", _through_stl())
+    # New design (baseline 0), one through-hole rendered: 1 >= 0 + 1 → pass.
+    assert through_hole_check("make it a through-hole", stl, 0) is None
+    # A parent that already has a hole (baseline 1): a new hole requires
+    # the genus to rise; 1 < 2 → fail.
+    assert through_hole_check("make it a through-hole", stl, 1) == (1, 1)
+
+
+def test_article_no_article_drill_another_hole(tmp_path):
+    """Issue #418 (adversarial minor note): "drill another hole through" is
+    a NEW-hole request with NO article at all ("another" is a determiner,
+    not an article). It must take the new-hole branch and require a genus
+    rise of 1 — the sane default. Pinned: a genus-1 render over a
+    baseline-0 parent passes; over a baseline-1 parent it fails."""
+    stl = _write_stl(tmp_path / "through.stl", _through_stl())
+    assert through_hole_check("drill another hole through the plate", stl, 0) is None
+    assert through_hole_check("drill another hole through the plate", stl, 1) == (1, 1)
+
+
+def test_requested_hole_count_is_clause_local():
+    """Issue #418 (adversarial finding 2): a number word or Arabic numeral
+    in a DIFFERENT clause is not the requested hole count. "shrink the hole
+    to 3 holes" and "make the hole like two holes in a row" both describe
+    ONE existing hole and the number is incidental — the count must be 1,
+    not 3 or 2. The parser reads the number immediately ADJACENT to the
+    hole noun, not any number word in the message."""
+    assert requested_hole_count("shrink the hole to 3 holes") == 1
+    assert requested_hole_count("make the hole like two holes in a row") == 1
+    # The legitimate count cases still parse (adjacent number + hole noun):
+    assert requested_hole_count("add two holes through") == 2
+    assert requested_hole_count("drill 3 holes through the plate") == 3
+    assert requested_hole_count("four through-holes in a row") == 4
+
+
+# ---------------------------------------------------------------------------
+# Issue #418 round-1 (adversarial): "the" + BARE hole noun is a NEW-hole
+# request (cutting through), not an existing-hole reference. Only the
+# hyphenated compound (through-hole / thru-hole) with "the" is existing.
+# ---------------------------------------------------------------------------
+
+
+def test_article_bare_hole_with_definite_article_is_new_hole(tmp_path):
+    """Issue #418 (adversarial finding 1): "the" + a BARE hole noun is a
+    NEW-hole request — the user is asking for a hole to be drilled through
+    (the gate's stated purpose). The definite article marks specificity, not
+    existence. A pocket render (genus 0) over a parent baseline 1 must
+    FAIL, not silently pass."""
+    stl = _write_stl(tmp_path / "pocket.stl", _pocket_stl())
+    # "drill the hole through" — bare noun, definite article, separate
+    # "through" word → new-hole branch → pocket over baseline 1 fails.
+    assert through_hole_check("drill the hole through", stl, 1) == (1, 0)
+    # "make the hole go through" — same pattern → new-hole branch.
+    assert through_hole_check("make the hole go through", stl, 1) == (1, 0)
+    # "the hole through" (no comma) — same pattern → new-hole branch.
+    assert through_hole_check("the hole through", stl, 1) == (1, 0)
+    # A through render (genus 1) over baseline 1 still fails (no rise).
+    stl1 = _write_stl(tmp_path / "through.stl", _through_stl())
+    assert through_hole_check("drill the hole through", stl1, 1) == (1, 1)
+    # But over baseline 0 (fresh design) it passes (1 >= 0 + 1).
+    assert through_hole_check("drill the hole through", stl1, 0) is None
+
+
+def test_article_hyphenated_hole_with_definite_article_still_existing(tmp_path):
+    """Issue #418 (regression): the v108 cases — "the" + hyphenated
+    compound (through-hole / thru-hole) is an EXISTING-hole request.
+    Unchanged genus passes; a fall below baseline fails."""
+    stl = _write_stl(tmp_path / "through.stl", _through_stl())
+    assert through_hole_check("make the through-hole 8 mm", stl, 1) is None
+    assert through_hole_check("move the thru-hole to the left", stl, 1) is None
+    # A fall below baseline (hole closed) still fails.
+    pocket_stl = _write_stl(tmp_path / "pocket.stl", _pocket_stl())
+    assert through_hole_check("make the through-hole 8 mm", pocket_stl, 1) == (1, 0)
