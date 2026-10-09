@@ -1493,45 +1493,45 @@ def _measured_genus_for_dir(render_artifact_dir: str) -> int | None:
     return genus_from_stl(str(stl_path))
 
 
-def _measured_parent_stats_for_dir(
-    render_artifact_dir: str,
-) -> tuple[int | None, float | None, int | None]:
-    """Issue #419 (consolidation): measure the parent version's rendered
-    genus, volume, and face count from its ``model.stl`` in ONE mesh load.
+def _seam_parent_mesh_stats(
+    stl_path: str,
+) -> tuple[int | None, float | None, int | None, Any, float | None]:
+    """Issue #419 (lens fix): the SEAM parent-mesh measurement — genus,
+    volume, face count, centroid, and bbox diagonal from ONE mesh load.
 
-    Returns ``(genus, volume_mm3, face_count)`` — each ``None`` when the
-    corresponding measurement is unavailable (missing file, load failure,
-    zero watertight components). A fabricated baseline would make the gate
-    lie, so ``None`` means "abstain" for that metric.
+    The single shared helper the chat and finalize seams call off the
+    event loop: the genus feeds the through-hole baseline, the volume
+    and face count feed the unchanged-mesh check, and the centroid and
+    bbox diagonal (the check's position-sensitive legs) come from the
+    SAME load — the check then never re-loads the parent mesh for the
+    centroid. ``None`` per metric when unavailable (missing file, load
+    failure, zero watertight components) — a fabricated baseline would
+    make the gate lie.
 
-    The face count is read from the merged mesh (``len(mesh.faces)`` after
-    ``merge_vertices``) — the same measurement the unchanged-mesh check
-    applies to the candidate's ``render.stl`` (``trimesh.load(
-    process=False, force="mesh")`` without merge), so the comparison is
-    symmetric in the same way the genus and volume are.
+    ``_measured_parent_stats`` (the 3-tuple) is a projection of this for
+    existing callers that do not need the position-sensitive legs.
     """
-    from d33d.part_mesh_topology import load_and_split
+    from d33d.part_mesh_topology import load_and_split, mesh_topology
 
-    stl_path = Path(render_artifact_dir) / "model.stl"
-    if not stl_path.is_file():
-        return (None, None, None)
+    if not Path(stl_path).is_file():
+        return (None, None, None, None, None)
     try:
-        components = load_and_split(str(stl_path))
+        components = load_and_split(stl_path)
     except (OSError, ValueError, RuntimeError):
-        return (None, None, None)
+        return (None, None, None, None, None)
     if not components:
-        return (None, None, None)
-    # Genus: use the shared helper (handles the zero-watertight abstain).
+        return (None, None, None, None, None)
+    # Genus: the shared helper's measurement (zero-watertight abstain).
     genus = None
     try:
-        from d33d.part_mesh_topology import mesh_topology
-
         topo = mesh_topology(merged=components[0], components=components)
         if topo["watertight_bodies"] > 0:
             genus = topo["genus"]
     except (ValueError, RuntimeError, IndexError, TypeError):
         genus = None
     # Volume + face count: sum across watertight components.
+    centroid: Any = None
+    diag: float | None = None
     try:
         total_vol = 0.0
         total_faces = 0
@@ -1540,53 +1540,44 @@ def _measured_parent_stats_for_dir(
                 total_vol += float(comp.volume)
                 total_faces += len(comp.faces)
         if total_faces <= 0:
-            return (genus, None, None)
-        return (genus, total_vol, total_faces)
+            return (genus, None, None, None, None)
+        # Centroid + bbox diagonal of the merged parent mesh (issue #419
+        # lens fix: the unchanged-mesh check's position-sensitive legs
+        # come from THIS SAME load — the check then never re-loads the
+        # parent for the centroid).
+        centroid = components[0].center_mass
+        b = components[0].bounds
+        lo, hi = b[0], b[1]
+        diag = float(
+            ((hi[0] - lo[0]) ** 2 + (hi[1] - lo[1]) ** 2 + (hi[2] - lo[2]) ** 2) ** 0.5
+        )
+        return (genus, total_vol, total_faces, centroid, diag)
     except (ValueError, TypeError, RuntimeError, IndexError):
-        return (genus, None, None)
+        return (genus, None, None, None, None)
 
 
-def _measured_parent_stats_for_file(
-    stl_path: str,
-) -> tuple[int | None, float | None, int | None]:
-    """Issue #419 (consolidation): measure a stored part mesh's genus,
-    volume, and face count in ONE mesh load (the ``part.stl`` twin of
-    :func:`_measured_parent_stats_for_dir`).
+def _measured_parent_stats(stl_path: str) -> tuple[int | None, float | None, int | None]:
+    """Issue #419 (consolidation): the 3-tuple projection of
+    :func:`_seam_parent_mesh_stats` — the parent mesh's genus, volume,
+    and face count (existing callers keep this shape; the centroid and
+    bbox diagonal ride the same seam load, measured off it directly)."""
+    genus, vol, faces, _cm, _diag = _seam_parent_mesh_stats(stl_path)
+    return (genus, vol, faces)
 
-    Returns ``(genus, volume_mm3, face_count)`` — each ``None`` when
-    the corresponding measurement is unavailable.
-    """
-    from d33d.part_mesh_topology import load_and_split
 
-    if not Path(stl_path).is_file():
-        return (None, None, None)
-    try:
-        components = load_and_split(stl_path)
-    except (OSError, ValueError, RuntimeError):
-        return (None, None, None)
-    if not components:
-        return (None, None, None)
-    genus = None
-    try:
-        from d33d.part_mesh_topology import mesh_topology
+def _measured_parent_stats_for_dir(render_artifact_dir: str) -> tuple[int | None, float | None, int | None]:
+    """Issue #419 (consolidation): the parent version's rendered mesh stats
+    from its ``model.stl`` (the ``render_artifact_dir`` twin of
+    :func:`_measured_parent_stats`). Thin wrapper — the measurement is
+    the single shared helper."""
+    return _measured_parent_stats(str(Path(render_artifact_dir) / "model.stl"))
 
-        topo = mesh_topology(merged=components[0], components=components)
-        if topo["watertight_bodies"] > 0:
-            genus = topo["genus"]
-    except (ValueError, RuntimeError, IndexError, TypeError):
-        genus = None
-    try:
-        total_vol = 0.0
-        total_faces = 0
-        for comp in components:
-            if comp.is_watertight:
-                total_vol += float(comp.volume)
-                total_faces += len(comp.faces)
-        if total_faces <= 0:
-            return (genus, None, None)
-        return (genus, total_vol, total_faces)
-    except (ValueError, TypeError, RuntimeError, IndexError):
-        return (genus, None, None)
+
+def _measured_parent_stats_for_file(stl_path: str) -> tuple[int | None, float | None, int | None]:
+    """Issue #419 (consolidation): a stored part mesh's stats (the
+    ``part.stl`` twin). Thin wrapper — the measurement is the single
+    shared helper."""
+    return _measured_parent_stats(stl_path)
 
 
 async def _resolve_version_create(
@@ -2056,10 +2047,9 @@ async def run_design_loop_with_events(
             # consolidation — the operator decision: parent stats live
             # in #418's parent-version block, not a separate one).
             _render_dir = _latest_ver["render_artifact_dir"]
-            _parent_genus, _parent_vol, _parent_faces = (
-                await asyncio.to_thread(
-                    _measured_parent_stats_for_dir, _render_dir
-                )
+            _pm_stl_path = str(Path(_render_dir) / "model.stl")
+            _parent_genus, _parent_vol, _parent_faces, _parent_cm, _parent_diag = (
+                await asyncio.to_thread(_seam_parent_mesh_stats, _pm_stl_path)
             )
             if _parent_genus is not None:
                 kwargs["through_baseline_genus"] = _parent_genus
@@ -2085,11 +2075,19 @@ async def run_design_loop_with_events(
             # the genus path above. The parent stats come from the
             # stored parent version/render already on disk; NO extra
             # render is added.
-            kwargs["parent_mesh_stl"] = str(Path(_render_dir) / "model.stl")
+            kwargs["parent_mesh_stl"] = _pm_stl_path
             if _parent_vol is not None:
                 kwargs["parent_volume_mm3"] = _parent_vol
             if _parent_faces is not None:
                 kwargs["parent_face_count"] = _parent_faces
+            # Issue #419 (lens fix): the unchanged-mesh check's
+            # position-sensitive legs (centroid + bbox diagonal) from
+            # the SAME seam load — the check uses these and does not
+            # re-load the parent mesh for the centroid.
+            if _parent_cm is not None:
+                kwargs["parent_centroid"] = _parent_cm
+            if _parent_diag is not None:
+                kwargs["parent_bbox_diagonal_mm"] = _parent_diag
         elif row.get("part_filename"):
             # V1 on import: the stored part mesh's genus, volume, and
             # face count (the mesh the render imports). A 3MF import
@@ -2100,12 +2098,18 @@ async def run_design_loop_with_events(
             _stored_genus: int | None = None
             _stored_vol: float | None = None
             _stored_faces: int | None = None
+            _stored_cm: Any = None
+            _stored_diag: float | None = None
             _stored_path = _stored_part_mesh_path(row, app.state.conn)
             if _stored_path is not None:
-                _stored_genus, _stored_vol, _stored_faces = (
-                    await asyncio.to_thread(
-                        _measured_parent_stats_for_file, str(_stored_path)
-                    )
+                (
+                    _stored_genus,
+                    _stored_vol,
+                    _stored_faces,
+                    _stored_cm,
+                    _stored_diag,
+                ) = await asyncio.to_thread(
+                    _seam_parent_mesh_stats, str(_stored_path)
                 )
             if _stored_genus is not None:
                 kwargs["through_baseline_genus"] = _stored_genus
@@ -2135,6 +2139,13 @@ async def run_design_loop_with_events(
                 kwargs["parent_volume_mm3"] = _stored_vol
             if _stored_faces is not None:
                 kwargs["parent_face_count"] = _stored_faces
+            # Issue #419 (lens fix): the unchanged-mesh check's
+            # position-sensitive legs from the SAME seam load (no
+            # double parent load).
+            if _stored_cm is not None:
+                kwargs["parent_centroid"] = _stored_cm
+            if _stored_diag is not None:
+                kwargs["parent_bbox_diagonal_mm"] = _stored_diag
         else:
             # Issue #418: a part-less project. No version yet → the
             # NEW-design default: the kwarg is omitted (the loop

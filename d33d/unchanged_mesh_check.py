@@ -132,8 +132,13 @@ def _load_mesh(path: str) -> Any | None:
         return trimesh.load(str(p), process=False, force="mesh")
     except (OSError, ValueError, RuntimeError):
         # Missing file, unreadable bytes, or a trimesh parse failure —
-        # any load failure → abstain, never a raise.
-        logger.debug("unchanged-mesh check: failed to load %r", path)
+        # any load failure → abstain, never a raise. The exception is
+        # logged with its traceback (the ``genus_from_stl`` pattern) and
+        # only the path's BASENAME is logged — never the full path
+        # (issue #356's host-path-disclosure convention).
+        logger.warning(
+            "unchanged-mesh check: failed to load %r", p.name, exc_info=True
+        )
         return None
 
 
@@ -163,17 +168,19 @@ def _center_mass(mesh: Any) -> Any | None:
         return None
 
 
-def _bbox_extent(mesh: Any) -> float:
+def _bbox_diagonal(mesh: Any) -> float | None:
     """The diagonal extent of the mesh's bounding box (a scalar proxy
-    for part size), or 0.0 when the bounds cannot be read. Used to
+    for part size), or ``None`` when the bounds cannot be read. Used to
     scale the centroid tolerance: a 1 mm shift on a 20 mm part is a
     real edit; on a 500 mm part it is noise."""
     try:
         b = mesh.bounds
         lo, hi = b[0], b[1]
-        return float(((hi[0] - lo[0]) ** 2 + (hi[1] - lo[1]) ** 2 + (hi[2] - lo[2]) ** 2) ** 0.5)
+        return float(
+            ((hi[0] - lo[0]) ** 2 + (hi[1] - lo[1]) ** 2 + (hi[2] - lo[2]) ** 2) ** 0.5
+        )
     except (ValueError, TypeError, RuntimeError, IndexError):
-        return 0.0
+        return None
 
 
 def unchanged_mesh_check(
@@ -182,7 +189,8 @@ def unchanged_mesh_check(
     candidate_stl: str | None,
     parent_volume_mm3: float | None = None,
     parent_face_count: int | None = None,
-    scad_source: str = "",
+    parent_centroid: Any = None,
+    parent_bbox_diagonal_mm: float | None = None,
 ) -> tuple[str, str] | None:
     """Issue #419: the unchanged-mesh post-check (detection).
 
@@ -195,7 +203,10 @@ def unchanged_mesh_check(
       when pre-computed stats are supplied (``parent_volume_mm3`` and
       ``parent_face_count``), ``parent_stl`` may be ``None`` (the path
       is not needed — the stats were already measured off the same mesh
-      load the genus came from).
+      load the genus came from). ``parent_centroid`` / ``parent_bbox_
+      diagonal_mm`` ride that same seam load: when supplied, the check
+      uses them directly and the parent mesh is never loaded (the
+      path-based load remains a fallback only).
     - ``candidate_stl`` is ``None`` or unloadable (the loop's
       render has no STL, or it cannot be read).
     - Either mesh's face count cannot be read (a zero-face load is a
@@ -220,27 +231,30 @@ def unchanged_mesh_check(
     parent_faces: int | None = None
     parent_vol: float | None = None
     parent_cm: Any | None = None
+    parent_diag: float | None = None
 
     if parent_volume_mm3 is not None or parent_face_count is not None:
         # Pre-computed stats path: the parent mesh was already loaded
-        # (off the event loop) in the seam that also measured the genus.
-        # Use those stats directly — no second load.
+        # (off the event loop) in the seam that measured the genus,
+        # volume, face count, centroid, and bbox diagonal in ONE load.
+        # Use those stats directly — the parent mesh is NEVER loaded
+        # here (a second load would re-read the same bytes from disk;
+        # issue #419 lens fix). A missing centroid / diagonal stat
+        # degrades the centroid leg to abstain — it does NOT fall back
+        # to a load.
         if parent_face_count is not None and parent_face_count > 0:
             parent_faces = parent_face_count
         if parent_volume_mm3 is not None:
             parent_vol = parent_volume_mm3
         if parent_faces is None:
             return None  # no usable face count → abstain
-        # Pre-computed stats do NOT include the centroid — load the
-        # parent mesh for that leg (the seam already has the path). If
-        # the path is unavailable or the load fails, the centroid leg
-        # abstains (the check still runs on volume + face count).
-        if parent_stl is not None:
-            parent = _load_mesh(parent_stl)
-            if parent is not None:
-                parent_cm = _center_mass(parent)
+        if parent_centroid is not None:
+            parent_cm = parent_centroid
+        parent_diag = parent_bbox_diagonal_mm
     elif parent_stl is not None:
-        # Path-based path (the original design): load the parent mesh.
+        # Path-based fallback (the original design): load the parent
+        # mesh ONCE for every metric (face count, volume, centroid,
+        # bbox diagonal).
         parent = _load_mesh(parent_stl)
         if parent is None:
             return None
@@ -249,6 +263,7 @@ def unchanged_mesh_check(
             return None
         parent_vol = _volume(parent)
         parent_cm = _center_mass(parent)
+        parent_diag = _bbox_diagonal(parent)
     else:
         # No parent at all → abstain.
         return None
@@ -296,10 +311,13 @@ def unchanged_mesh_check(
             import numpy as np
 
             cm_delta = float(np.abs(np.array(parent_cm) - np.array(candidate_cm)).max())
-            # Scale the tolerance by part size (the parent's bbox
-            # diagonal) so a 1 mm shift means different things on a
-            # 20 mm part vs a 500 mm part.
-            extent = _bbox_extent(parent) if parent is not None else _bbox_extent(candidate)
+            # Scale the tolerance by part size: the parent's bbox
+            # diagonal when measured (the stats path's ``None`` diagonal
+            # degrades to the candidate's — a size proxy is a proxy, and
+            # the tolerance floor keeps the leg honest either way).
+            extent = parent_diag if parent_diag is not None else _bbox_diagonal(candidate)
+            if extent is None:
+                extent = 0.0
             cm_tol = max(_CENTROID_ABS_FLOOR_MM, _CENTROID_REL_TOL * extent)
             centroid_changed = cm_delta > cm_tol
         except (ValueError, TypeError, RuntimeError, IndexError):

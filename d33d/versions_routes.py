@@ -1084,8 +1084,7 @@ def _finalize_loop_kwargs(
     import concurrent.futures as _cf
 
     from d33d.design_loop_events import (
-        _measured_parent_stats_for_dir,
-        _measured_parent_stats_for_file,
+        _seam_parent_mesh_stats,
         _stored_part_mesh_path,
     )
 
@@ -1099,11 +1098,14 @@ def _finalize_loop_kwargs(
     _pm_stl: str | None = None
     _pm_vol: float | None = None
     _pm_faces: int | None = None
+    _pm_cm: Any = None
+    _pm_diag: float | None = None
     if _latest_ver is not None and _latest_ver.get("render_artifact_dir"):
         _render_dir = _latest_ver["render_artifact_dir"]
+        _pm_stl = str(Path(_render_dir) / "model.stl")
         with _cf.ThreadPoolExecutor(max_workers=1) as _ex:
-            _pg, _pv, _pf = _ex.submit(
-                _measured_parent_stats_for_dir, _render_dir
+            _pg, _pv, _pf, _pm_cm, _pm_diag = _ex.submit(
+                _seam_parent_mesh_stats, _pm_stl
             ).result()
         if _pg is not None:
             _tb_genus = _pg
@@ -1119,9 +1121,9 @@ def _finalize_loop_kwargs(
             )
         # Issue #419: the unchanged-mesh check's parent baseline — the
         # SAME mesh load that produced the genus (one file, one disk
-        # read, two baselines). The path is also passed (the check falls
-        # back to loading it when the stats are None).
-        _pm_stl = str(Path(_render_dir) / "model.stl")
+        # read, two baselines). The centroid and bbox diagonal ride the
+        # same load (issue #419 lens fix — the check then never re-loads
+        # the parent for the centroid).
         _pm_vol = _pv
         _pm_faces = _pf
     elif row.get("part_filename"):
@@ -1131,8 +1133,8 @@ def _finalize_loop_kwargs(
         _pf: int | None = None
         if _stored_path is not None:
             with _cf.ThreadPoolExecutor(max_workers=1) as _ex:
-                _pg, _pv, _pf = _ex.submit(
-                    _measured_parent_stats_for_file, str(_stored_path)
+                _pg, _pv, _pf, _pm_cm, _pm_diag = _ex.submit(
+                    _seam_parent_mesh_stats, str(_stored_path)
                 ).result()
         if _pg is not None:
             _tb_genus = _pg
@@ -1206,6 +1208,13 @@ def _finalize_loop_kwargs(
         out["parent_volume_mm3"] = _pm_vol
     if _pm_faces is not None:
         out["parent_face_count"] = _pm_faces
+    # Issue #419 (lens fix): the unchanged-mesh check's position-sensitive
+    # legs from the SAME seam load (the check uses them and does not
+    # re-load the parent for the centroid).
+    if _pm_cm is not None:
+        out["parent_centroid"] = _pm_cm
+    if _pm_diag is not None:
+        out["parent_bbox_diagonal_mm"] = _pm_diag
     # The import section's kwargs (issue #332, sub-issue 3) — additive:
     # the no-part case adds nothing (byte-identical loop call to today).
     if part_env is not None:

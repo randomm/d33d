@@ -4328,6 +4328,55 @@ def test_unchanged_mesh_missing_candidate_stl_abstains(tmp_path):
     assert result.iterations[0].repair is None
 
 
+def test_unchanged_mesh_parent_stats_path_never_loaded(tmp_path):
+    """Issue #419 (lens fix — double parent load): when the seam supplies
+    the parent stats (volume, face count, centroid, bbox diagonal), the
+    check uses them directly and the parent mesh is NEVER loaded — a
+    deliberately missing ``parent_stl`` (a path that does not exist) must
+    not change the outcome. The v100 identical-mesh case still fires
+    (all three legs within tolerance off the stats), and the moved-hole
+    case still passes (the centroid leg fires off the stats)."""
+    from d33d import unchanged_mesh_check as umc
+
+    fixture_dir = Path(__file__).parent / "fixtures" / "stl"
+    hole_a = str(fixture_dir / "v100-plate-hole-A.stl")
+    hole_b = str(fixture_dir / "v100-plate-hole-B.stl")
+    missing = str(tmp_path / "no-such-parent.stl")
+
+    def _stats(path: str) -> dict[str, Any]:
+        import trimesh
+
+        mesh = trimesh.load(path, process=False, force="mesh")
+        return {
+            "parent_volume_mm3": float(mesh.volume),
+            "parent_face_count": len(mesh.faces),
+            "parent_centroid": mesh.center_mass,
+            "parent_bbox_diagonal_mm": 1000.0,
+        }
+
+    # Identical mesh (hole-A candidate vs hole-A parent stats): fires
+    # with a MISSING parent path (no load needed).
+    fired = umc.unchanged_mesh_check(
+        parent_stl=missing,
+        candidate_stl=hole_a,
+        **_stats(hole_a),
+    )
+    assert fired is not None
+    assert "unchanged from the parent" in fired[0]
+    # Moved hole (hole-B candidate vs hole-A parent stats): the centroid
+    # leg fires off the stats — the check does NOT fire.
+    not_fired = umc.unchanged_mesh_check(
+        parent_stl=missing,
+        candidate_stl=hole_b,
+        **_stats(hole_a),
+    )
+    assert not_fired is None
+    # The path-based fallback still works (a real path, no stats).
+    assert umc.unchanged_mesh_check(
+        parent_stl=hole_a, candidate_stl=hole_a
+    ) is not None
+
+
 def test_unchanged_mesh_moved_hole_passes(tmp_path):
     """Issue #419 (PM main concern — the position-sensitive fix): a v2+ edit
     that MOVES a hole (the "move the hole 10 mm" case) leaves volume and
