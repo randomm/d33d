@@ -203,8 +203,9 @@ def _load_mesh(path: str) -> Any | None:
         import trimesh
 
         return trimesh.load(str(p), process=False, force="mesh")
-    except (OSError, ValueError, RuntimeError):
-        # Missing file, unreadable bytes, or a trimesh parse failure —
+    except Exception:
+        # Missing file, unreadable bytes, or any trimesh parse failure
+        # (struct.error / IndexError on a malformed STL included) —
         # any load failure → abstain, never a raise. The exception is
         # logged with its traceback (the ``genus_from_stl`` pattern) and
         # only the path's BASENAME is logged — never the full path

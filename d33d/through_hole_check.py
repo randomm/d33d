@@ -32,6 +32,7 @@ contains no "through", so no stripping is needed).
 from __future__ import annotations
 
 import logging
+import math
 import re
 
 from d33d.part_holes import HOLE_NOUNS
@@ -376,6 +377,12 @@ def _instruction_with_span(instruction: str, stl: str | None) -> str:
         )
         return instruction
     zmin, zmax = (float(v) for v in bounds[:, 2])
+    if not (math.isfinite(zmin) and math.isfinite(zmax)):
+        logger.warning(
+            "through-hole span unavailable (stl %s): non-finite z bound — repair sent without the measured z-span",
+            stl,
+        )
+        return instruction
     thickness = zmax - zmin
     return (
         f"{instruction} Measured: the part is {thickness:g} mm thick "
