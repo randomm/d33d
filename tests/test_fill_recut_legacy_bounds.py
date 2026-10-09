@@ -19,8 +19,6 @@ from typing import Any
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from d33d.app import create_app
-
 # Shared helpers (issue #414, round 2, LOW).
 from tests.legacy_bounds_fixtures import (
     _commit_stl,
@@ -56,40 +54,6 @@ def _legacy_report_with_holes():
             {"center": [112.0, 72.0, 3.0], "axis": [0.0, 0.0, 1.0], "diameter_mm": 4.0},
         ],
         "bbox_file_units": [120.0, 80.0, 6.0],
-    }
-
-
-@pytest.fixture
-def app_with_projects(app_paths):
-    """Isolated app with tmp-path repos (the test_projects pattern)."""
-    import d33d.db as db_mod
-
-    original_default = db_mod._default_git_path
-
-    def _tmp_default_git_path(name: str) -> str:
-        import uuid
-
-        base = app_paths["tmp"] / "repos" / uuid.uuid4().hex[:12]
-        base.mkdir(parents=True, exist_ok=True)
-        return str(base)
-
-    db_mod._default_git_path = _tmp_default_git_path
-    app = create_app(
-        app_paths["db"],
-        master_key_path=app_paths["key"],
-        catalogue_path=app_paths["cat"],
-    )
-    yield app
-    db_mod._default_git_path = original_default
-
-
-@pytest.fixture
-def app_paths(tmp_path):
-    return {
-        "db": tmp_path / "d33d.sqlite3",
-        "key": tmp_path / "master.key",
-        "cat": tmp_path / "models.yaml",
-        "tmp": tmp_path,
     }
 
 

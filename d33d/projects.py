@@ -481,10 +481,10 @@ def create_projects_router() -> APIRouter:
                 )
                 return {"status": "accepted"}
             # Issue #414 (part 3): the ASYNC entry point — the legacy-report
-            # mesh bounds load (``load_mesh_bounds_async``) is awaited off
-            # the event loop (``asyncio.to_thread``), so a slow mesh parse
-            # never blocks the loop. The sync ``fill_recut_turn`` (direct
-            # load) is for non-async callers (the tests) only.
+            # mesh bounds load is awaited off the event loop
+            # (``asyncio.to_thread``), so a slow mesh parse never blocks
+            # the loop. The sync ``fill_recut_turn`` (direct load) is
+            # test-only; production uses ``fill_recut_turn_async``.
             _fill_recut = await fill_recut.fill_recut_turn_async(
                 app, project_id, body.message
             )

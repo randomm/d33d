@@ -17,6 +17,7 @@ This module pins the fix:
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 import pytest
@@ -30,40 +31,6 @@ from tests.legacy_bounds_fixtures import (
     _make_stl,
     _set_legacy_part,
 )
-
-
-@pytest.fixture
-def app_with_projects(app_paths):
-    import d33d.db as db_mod
-    from d33d.app import create_app
-
-    original_default = db_mod._default_git_path
-
-    def _tmp_default_git_path(name: str) -> str:
-        import uuid
-
-        base = app_paths["tmp"] / "repos" / uuid.uuid4().hex[:12]
-        base.mkdir(parents=True, exist_ok=True)
-        return str(base)
-
-    db_mod._default_git_path = _tmp_default_git_path
-    app = create_app(
-        app_paths["db"],
-        master_key_path=app_paths["key"],
-        catalogue_path=app_paths["cat"],
-    )
-    yield app
-    db_mod._default_git_path = original_default
-
-
-@pytest.fixture
-def app_paths(tmp_path):
-    return {
-        "db": tmp_path / "d33d.sqlite3",
-        "key": tmp_path / "master.key",
-        "cat": tmp_path / "models.yaml",
-        "tmp": tmp_path,
-    }
 
 
 def test_legacy_mesh_load_does_not_block_the_event_loop(
@@ -275,7 +242,7 @@ def test_legacy_mesh_load_type_error_degrades_to_extents_fallback(
 
 
 def test_legacy_async_mesh_load_timeout_degrades_to_extents_fallback(
-    app_with_projects, monkeypatch: pytest.MonkeyPatch
+    app_with_projects, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Issue #414 (round 2, MEDIUM): the off-loop mesh load is BOUNDED
     — ``asyncio.wait_for(asyncio.to_thread(...), LEGACY_BOUNDS_LOAD_TIMEOUT_SECONDS)``.
@@ -288,8 +255,12 @@ def test_legacy_async_mesh_load_timeout_degrades_to_extents_fallback(
     stl = _make_stl()
 
     def _slow_load(part_path: Any, fmt: Any):
-        time.sleep(0.5)  # much longer than the monkeypatched 0.2 s timeout
-    
+        # 1.0 s sleep — truly EXCEEDS the monkeypatched 0.2 s bound (the
+        # old 0.5 s patch value was the reviewer's flake vector: with the
+        # unbounded default of 20 s a 0.5 s load never timed out, so the
+        # test pinned nothing; sleep(1.0) vs 0.2 s always times out).
+        time.sleep(1.0)
+
     monkeypatch.setattr(frt, "_load_mesh_bounds", _slow_load)
     monkeypatch.setattr(frt, "LEGACY_BOUNDS_LOAD_TIMEOUT_SECONDS", 0.2)
 
@@ -312,12 +283,22 @@ def test_legacy_async_mesh_load_timeout_degrades_to_extents_fallback(
         async with app_with_projects.router.lifespan_context(app_with_projects):
             return await _turn()
 
-    result, report = asyncio.run(_run())
+    with caplog.at_level("WARNING"):
+        result, report = asyncio.run(_run())
     assert result is not None, (
         "the turn must degrade to the extents/2 fallback after the load "
         "timeout — not hang or raise"
     )
     assert result["outcome"] in ("fresh_offer", "no_match")
+    # The timeout must be LOGGED (a silent fallback hides the pathology).
+    assert any(
+        "TimeoutError" in rec.message or "timed out" in rec.message
+        for rec in caplog.records
+        if rec.levelno >= logging.WARNING
+    ), (
+        "the load timeout must be logged as a warning; no such record: "
+        + repr([r.getMessage() for r in caplog.records])
+    )
     # No cache write landed (the load never completed): the stored
     # report must still lack ``bbox_bounds_file_units``.
     assert "bbox_bounds_file_units" not in report, (
