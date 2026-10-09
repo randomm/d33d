@@ -157,7 +157,7 @@ GATE_REASON_CLASSES: frozenset[str] = frozenset(
 #: alongside the gate bits. Without this, a Docker-down design turn
 #: would raise in :func:`_exhausted_loop_event` and the failures.jsonl
 #: archive would log an exception on EVERY such turn.
-LOOP_LEVEL_FAILURE_REASONS: frozenset[str] = frozenset(
+_LOOP_LEVEL_BASE_REASONS: frozenset[str] = frozenset(
     {
         "renderer_unavailable",
         "model_unconfigured",
@@ -182,7 +182,11 @@ LOOP_LEVEL_FAILURE_REASONS: frozenset[str] = frozenset(
         # failures.jsonl hook and silently lose its archive line.
         MESH_UNCHANGED_REASON,
     }
-) | POST_CHECK_REASONS  # Issue #432: post-check reasons share one source
+)
+#: Issue #432: union only the post-check reasons not already listed above.
+LOOP_LEVEL_FAILURE_REASONS: frozenset[str] = (
+    _LOOP_LEVEL_BASE_REASONS | (POST_CHECK_REASONS - _LOOP_LEVEL_BASE_REASONS)
+)
 
 
 #: Hard cap on ``output_scad`` line length (chars) — an unbounded LLM

@@ -182,10 +182,21 @@ def fingerprint_stl(path: str | None) -> tuple[str, int] | None:
     """Issue #432: the geometry fingerprint of the STL at ``path`` — one
     load, then :func:`mesh_fingerprint`. ``None`` abstains (missing or
     unreadable file, or an empty mesh)."""
+    if path is None:
+        return None
     mesh = _load_mesh(path)
     if mesh is None:
         return None
-    return mesh_fingerprint(mesh)
+    try:
+        return mesh_fingerprint(mesh)
+    except Exception:
+        # A degenerate loaded mesh abstains, never raises (issue #432).
+        logger.warning(
+            "unchanged-mesh check: failed to fingerprint %r",
+            Path(path).name,
+            exc_info=True,
+        )
+        return None
 
 
 def _load_mesh(path: str) -> Any | None:

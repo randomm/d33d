@@ -2411,13 +2411,11 @@ async def run_design_loop_async(
                 )
                 if directive is not None:
                     failure_class = "geometrically_wrong"
-                    from d33d.stack_height_check import STACK_HEIGHT_INSTRUCTION
+                    from d33d.stack_height_check import stack_height_instruction
 
                     _stack_repair = directive.to_dict()
-                    _stack_repair["instruction"] = (
-                        f"The declared stack sums to {_declared:g} mm but the "
-                        f"part renders {_measured:g} mm tall. "
-                        f"{STACK_HEIGHT_INSTRUCTION}"
+                    _stack_repair["instruction"] = stack_height_instruction(
+                        _declared, _measured
                     )
                     _stack_repair["reason"] = STACK_HEIGHT_REASON
                     next_repair = _stack_repair

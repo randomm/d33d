@@ -394,6 +394,15 @@ STACK_HEIGHT_INSTRUCTION = (
 )
 
 
+def stack_height_instruction(declared: float, measured: float) -> str:
+    """The stack-height repair instruction with the declared-vs-measured fact."""
+    return (
+        f"The declared stack sums to {declared:g} mm but the "
+        f"part renders {measured:g} mm tall. "
+        f"{STACK_HEIGHT_INSTRUCTION}"
+    )
+
+
 def stack_height_check(
     scad_source: str,
     measured_z: float | None,

@@ -24,6 +24,28 @@ def test_fingerprint_stl_malformed_load_returns_none(tmp_path, monkeypatch, exc)
     assert fingerprint_stl(str(stl)) is None
 
 
+def test_fingerprint_stl_none_path_returns_none():
+    assert fingerprint_stl(None) is None
+
+
+def test_fingerprint_stl_mesh_fingerprint_raise_returns_none(tmp_path, monkeypatch):
+    import d33d.unchanged_mesh_check as umc
+
+    stl = tmp_path / "ok.stl"
+    stl.write_bytes(b"\x00" * 84)
+
+    class _Mesh:
+        vertices = np.zeros((3, 3))
+
+    monkeypatch.setattr(_tm, "load", lambda *a, **k: _Mesh())
+
+    def _boom(mesh):
+        raise ValueError("degenerate mesh")
+
+    monkeypatch.setattr(umc, "mesh_fingerprint", _boom)
+    assert fingerprint_stl(str(stl)) is None
+
+
 @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
 def test_span_non_finite_bounds_fall_back_to_bare_instruction(tmp_path, monkeypatch, bad):
     stl = tmp_path / "part.stl"
