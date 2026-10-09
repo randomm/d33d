@@ -332,6 +332,24 @@ describe("design contract", () => {
     expect(display.detail).toBe("mesh_unchanged");
   });
 
+  it.each(["through_hole_missing", "screw_clearance_wrong", "stack_height_mismatch"])(
+    "the post-check failure copy for %s lives in the deck (issue #432)",
+    (reason) => {
+      // Issue #432: each post-check reason maps to its own sentence, never the
+      // generic "Something went wrong" fallback, and carries no digits (the
+      // measured numbers ride the repair/evidence, not the reason copy).
+      const headline = copy.failure.reasons[reason as keyof typeof copy.failure.reasons];
+      expect(headline).toBeTruthy();
+      expect(headline).not.toMatch(/\d/);
+      expect(FAILURE_REASONS).toContain(reason);
+      const display = displayDesignLoopError({
+        message: `Design loop exhausted: ${reason}`,
+        reason,
+      });
+      expect(display.message).toBe(headline);
+    },
+  );
+
   /* ---------------------------------------- W260 */
 
   it("the question pre-route's no-run replies live in the deck (issue #260)", () => {
