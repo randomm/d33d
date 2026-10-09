@@ -344,10 +344,9 @@ def no_match_hole_reply(
     existing no-hole copy (``d33d.part_holes.no_hole_reply``) rather than
     emitting a dangling ``"…Here are the holes I did find: "`` tail.
     """
-    if not holes:
-        from d33d.part_holes import no_hole_reply
-
-        return no_hole_reply(noun)
+    # Compute the valid entries first (issue #414 part 3): a single
+    # fallback decision afterwards — the no-hole copy is imported and
+    # called once, not per branch.
     entries: list[str] = []
     for h in holes:
         center = h.get("center")
@@ -370,8 +369,8 @@ def no_match_hole_reply(
                 f"({_fmt_coord(float(center[0]))}, {_fmt_coord(float(center[1]))})"
             )
     if not entries:
-        # Every entry was malformed — same situation as an empty list:
-        # fall back to the no-hole copy, never a dangling tail.
+        # Empty list OR every entry malformed — same situation, ONE
+        # fallback: the no-hole copy, never a dangling tail.
         from d33d.part_holes import no_hole_reply
 
         return no_hole_reply(noun)
@@ -436,6 +435,7 @@ __all__ = [
     "FRILL_HOLE_DIAMETER_REPLY",
     "FRILL_MOVE_DISTANCE_REPLY",
     "FRILL_MOVE_REPLY",
+    "FRILL_NOUN_DIMENSION_REPLY",
     "FRILL_NO_DIMENSION_REPLY",
     "FRILL_NO_MATCH_LEAD",
     "FRILL_POINT_AT_NO_DIM_TEMPLATE",
