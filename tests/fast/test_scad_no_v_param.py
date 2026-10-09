@@ -49,6 +49,11 @@ from tests.slow.test_render_views import _marker_scad
 
 FIXTURES_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "scad"
 
+# Issue #436: the negative fixture for the wrong-typed ``center=[...]`` check.
+# It must carry the vector argument (the check is what fails it), so the
+# fixture scan skips it; ``tests/fast/test_scad_center_check.py`` pins it.
+_INTENTIONALLY_BROKEN_FIXTURES = frozenset({"groove-center-vector.scad"})
+
 # The three primitives that have no ``v``/vector-``center`` parameter.
 _PRIM_RE = re.compile(r"\b(cube|cylinder|sphere)\s*\(")
 
@@ -246,6 +251,8 @@ def test_no_v_arg_in_scad_fixtures() -> None:
     )
     all_hits: list[tuple[str, int, str]] = []
     for scad in sorted(FIXTURES_DIR.glob("*.scad")):
+        if scad.name in _INTENTIONALLY_BROKEN_FIXTURES:
+            continue
         text = scad.read_text(encoding="utf-8")
         for lineno, snippet in _scan_source(text):
             all_hits.append((scad.name, lineno, snippet))

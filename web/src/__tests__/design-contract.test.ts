@@ -332,7 +332,7 @@ describe("design contract", () => {
     expect(display.detail).toBe("mesh_unchanged");
   });
 
-  it.each(["through_hole_missing", "screw_clearance_wrong", "stack_height_mismatch"])(
+  it.each(["through_hole_missing", "screw_clearance_wrong", "stack_height_mismatch", "hollow_solid"])(
     "the post-check failure copy for %s lives in the deck (issue #432)",
     (reason) => {
       // Issue #432: each post-check reason maps to its own sentence, never the

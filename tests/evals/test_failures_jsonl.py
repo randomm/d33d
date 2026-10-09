@@ -296,7 +296,7 @@ def test_hooked_loop_unchanged_mesh_exhaustion_archives_line(tmp_path: Path):
 
 @pytest.mark.parametrize(
     "reason",
-    ["through_hole_missing", "screw_clearance_wrong", "stack_height_mismatch"],
+    ["through_hole_missing", "screw_clearance_wrong", "stack_height_mismatch", "hollow_solid"],
 )
 def test_hooked_post_check_exhaustion_archives_line(tmp_path: Path, reason: str):
     """Issue #432: an exhausted post-check result (through-hole, screw-clearance

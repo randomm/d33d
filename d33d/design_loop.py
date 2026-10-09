@@ -70,6 +70,7 @@ from d33d.config.probes import CapabilityResult
 from d33d.config.resolve import resolve_model
 from d33d.design_llm import LLMResult, send
 from d33d.evals.failure_capture import (
+    HOLLOW_SOLID_REASON,
     POST_CHECK_REASONS,
     SCREW_CLEARANCE_REASON,
     STACK_HEIGHT_REASON,
@@ -82,6 +83,7 @@ from d33d.failure_classes import (
     detect_magic_numbers,
     route_repair,
 )
+from d33d.hollow_check import hollow_solid_check
 from d33d.identical_repair import IdenticalRepairTracker
 from d33d.render_worker import (
     RENDER_WORKER_IMAGE,
@@ -90,6 +92,7 @@ from d33d.render_worker import (
     build_hash,
     canonical_build_command,
 )
+from d33d.scad_center_check import center_vector_warning
 from d33d.unchanged_mesh_check import MESH_UNCHANGED_REASON, fingerprint_stl
 
 logger = logging.getLogger(__name__)
@@ -2178,13 +2181,20 @@ async def run_design_loop_async(
         # failures are a low-scoring iteration, not a loop stop.
         failure_class: str | None = None
         next_repair: dict[str, Any] | None = None
-        classified = classify_failure(
-            error_class=render.error_class,
-            stderr=render.stderr,
-            scad_source=scad_source,
-            render_log=getattr(render, "render_log", ""),
+        # Issue #436: a wrong-typed ``center=[...]`` on an ok render is
+        # routed like #419's unknown-parameter warning — the SCAD-text
+        # warning line is classified as a syntax_error diagnostic, so it
+        # lands in ``unknown_variable`` with evidence naming ``center``.
+        _center_warning = (
+            center_vector_warning(scad_source) if render.error_class == "ok" else None
         )
-        if render.error_class != "ok":
+        classified = classify_failure(
+            error_class="syntax_error" if _center_warning else render.error_class,
+            stderr=_center_warning or render.stderr,
+            scad_source=scad_source,
+            render_log="" if _center_warning else getattr(render, "render_log", ""),
+        )
+        if render.error_class != "ok" or _center_warning is not None:
             # Non-LLM-addressable render classes (timeout/oom/container_
             # error/...) are non-improving steps and NOT fed back.
             if classified.failure_class in REPAIRABLE_CLASSES:
@@ -2466,6 +2476,36 @@ async def run_design_loop_async(
                 }
                 _unchanged_repair_fired = True
 
+        # Issue #436: an ok render whose solid is under 10% of its bounding
+        # box is a near-hollow result the request did not ask for (a skin
+        # where a solid was named). Runs last in the post-check chain; a
+        # fired earlier repair suppresses it. Rides ``geometrically_wrong``
+        # and the #432 loop-level reason ``hollow_solid``.
+        _hollow_repair_fired = False
+        if (
+            render.error_class == "ok"
+            and next_repair is None
+            and not _screw_repair_fired
+            and not _through_repair_fired
+            and not _stack_repair_fired
+            and not _unchanged_repair_fired
+            and part_scale is None
+        ):
+            _hollow_det = await asyncio.to_thread(
+                hollow_solid_check, request, render.stl
+            )
+            if _hollow_det is not None:
+                _evidence, _instruction = _hollow_det
+                failure_class = "geometrically_wrong"
+                next_repair = {
+                    "failure_class": "geometrically_wrong",
+                    "instruction": _instruction,
+                    "scad_source": scad_source,
+                    "evidence": _evidence,
+                    "reason": HOLLOW_SOLID_REASON,
+                }
+                _hollow_repair_fired = True
+
         # Issue #432: identical-repair stop. A post-check repair whose
         # rendered mesh equals the PREVIOUS iteration's (same post-check
         # reason) cannot move — stop after this attempt instead of repairing
@@ -2493,7 +2533,15 @@ async def run_design_loop_async(
         )
         iterations.append(record)
 
-        if candidate_score.perfect and not _screw_repair_fired and not _through_repair_fired and not _stack_repair_fired and not _unchanged_repair_fired:
+        if (
+            candidate_score.perfect
+            and not _screw_repair_fired
+            and not _through_repair_fired
+            and not _stack_repair_fired
+            and not _unchanged_repair_fired
+            and not _hollow_repair_fired
+            and _center_warning is None
+        ):
             return DesignResult(
                 status="pass",
                 best=record,
