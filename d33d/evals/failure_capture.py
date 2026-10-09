@@ -240,7 +240,11 @@ class FailureEvent(BaseModel):
     #: Measured wall-clock seconds per completed attempt (issue #417),
     #: one entry per timed attempt in attempt order. Optional — ``None``
     #: (absent) when no attempt was timed (a stall that never rendered);
-    #: an empty list is never written (omit-not-null: honest absence).
+    #: an empty list is never written (omit-not-null: honest absence —
+    #: the normalisers in ``record_production_failure`` /
+    #: ``make_failure_event`` turn an empty list into ``None`` before
+    #: construction, so ``min_length`` guards against a direct
+    #: constructor call with a malformed empty list).
     per_attempt_latencies: list[float] | None = Field(
         default=None, min_length=1
     )
@@ -325,6 +329,8 @@ def make_failure_event(
     now: datetime | None = None,
     event_id: str | None = None,
     allow_gate_reasons: bool = False,
+    attempt_count: int | None = None,
+    per_attempt_latencies: list[float] | None = None,
 ) -> FailureEvent:
     """Build a validated :class:`FailureEvent`.
 
@@ -338,8 +344,14 @@ def make_failure_event(
     ``True`` while a direct ``make_failure_event`` call (the eval
     harness, the fold script) does not.
 
+    ``attempt_count`` / ``per_attempt_latencies`` (issue #417) are
+    constructor arguments: the model's ``ge=1`` / ``min_length=1``
+    constraints are enforced at construction (never assigned after the
+    fact, which would bypass Pydantic validation).
+
     Raises ``ValidationError`` (via the model) on a missing/empty
-    required field, or a ``failure_class`` outside the closed enum.
+    required field, a ``failure_class`` outside the closed enum, or an
+    invalid ``attempt_count`` / ``per_attempt_latencies`` value.
     """
     _validate_failure_class(failure_class, allow_gate_reasons=allow_gate_reasons)
     ts = (
@@ -358,6 +370,10 @@ def make_failure_event(
         stderr_tail=(stderr_tail or "")[:MAX_STDERR_TAIL_CHARS],
         ts=ts,
         event_id=eid,
+        attempt_count=attempt_count,
+        per_attempt_latencies=list(per_attempt_latencies)
+        if per_attempt_latencies
+        else None,
     )
 
 
@@ -465,6 +481,8 @@ def _exhausted_loop_event(
     model: Any,
     prompt_version: str,
     output_scad: str,
+    attempt_count: int | None = None,
+    per_attempt_latencies: list[float] | None = None,
 ) -> FailureEvent:
     """Build the :class:`FailureEvent` for an exhausted design loop.
 
@@ -472,6 +490,10 @@ def _exhausted_loop_event(
     render-worker class, a gate-reason bit, a loop-level pre-flight
     reason — issue #277 — or a named LLM class) — the structured class
     the loop already computed, never a re-derivation from raw stderr.
+
+    ``attempt_count`` / ``per_attempt_latencies`` (issue #417) are passed
+    straight through to ``make_failure_event`` so the model's ``ge=1`` /
+    ``min_length=1`` constraints validate at construction.
     """
     failure_reason = getattr(design_result, "failure_reason", None)
     if not isinstance(failure_reason, str) or not failure_reason:
@@ -514,6 +536,10 @@ def _exhausted_loop_event(
         exit_code=exit_code,
         stderr_tail=stderr_tail,
         allow_gate_reasons=True,
+        attempt_count=attempt_count,
+        per_attempt_latencies=list(per_attempt_latencies)
+        if per_attempt_latencies
+        else None,
     )
 
 
@@ -552,7 +578,11 @@ def record_production_failure(
     per-attempt wall-clock seconds (one per timed attempt, in order).
     Both are optional (``None`` = absent — pre-#417 rows validate
     unchanged); an empty latencies list is normalised to ``None``
-    (omit-not-null — honest absence over an empty array).
+    (omit-not-null — honest absence over an empty array). Both are
+    handed through ``_exhausted_loop_event`` → ``make_failure_event``
+    (issue #417 lens round 4) so the model's ``ge=1`` / ``min_length=1``
+    constraints validate at construction, never via post-construction
+    attribute assignment.
 
     Returns the :class:`FailureEvent` written, or ``None`` for a
     passing result. An untagged/exhausted result (no ``failure_reason``)
@@ -574,11 +604,11 @@ def record_production_failure(
         model=model,
         prompt_version=prompt_version,
         output_scad=output_scad,
+        attempt_count=attempt_count,
+        per_attempt_latencies=list(per_attempt_latencies)
+        if per_attempt_latencies
+        else None,
     )
-    if attempt_count is not None:
-        event.attempt_count = attempt_count
-    if per_attempt_latencies:
-        event.per_attempt_latencies = list(per_attempt_latencies)
     append_failure_line(event, path)
     return event
 

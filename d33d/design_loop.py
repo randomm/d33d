@@ -1742,7 +1742,9 @@ def _scad_from_result(result: LLMResult) -> str:
 # ---------------------------------------------------------------------------
 
 
-async def _call(fn: Any, *args: Any) -> Any:
+async def _call(
+    fn: Any, *args: Any, deadline_armed: bool = False
+) -> Any:
     """Invoke an injected callable that may be sync or async.
 
     An async callable is invoked in its OWN task (not awaited inline):
@@ -1750,12 +1752,39 @@ async def _call(fn: Any, *args: Any) -> Any:
     future with ``asyncio.wait_for``, and ``wait_for`` must be able to
     CANCEL the in-flight call on expiry — an inline ``await`` leaves no
     task to cancel, so the deadline would never fire for a hanging
-    coroutine. (A sync callable still runs inline — it has no cancel
-    path of its own; its boundedness is the render worker's own
-    subprocess timeout, not the deadline.)
+    coroutine.
+
+    A sync callable runs inline — UNLESS the deadline is armed
+    (``deadline_armed`` — issue #417 lens round 4: a blocking sync call
+    running inline on the event loop would make the per-attempt deadline
+    a no-op, stalling every other task on the loop for the call's full
+    duration). With the deadline armed, the sync call is dispatched to a
+    worker thread via ``asyncio.to_thread`` BEFORE the deadline awaits
+    it, so ``wait_for`` can actually bound it (the deadline's
+    ``CancelledError`` is swallowed — the loop treats it as any other
+    non-timeout exception; the worker thread cannot be killed mid-flight
+    and the call runs to completion in the background, the same
+    best-effort-cancellation contract as the async path).
     """
+    if asyncio.iscoroutinefunction(fn):
+        return await asyncio.ensure_future(fn(*args))
+    if deadline_armed:
+        # The sync call runs in a worker thread (dispatched NOW — the
+        # deadline's ``wait_for`` gets an awaitable it can cancel at the
+        # deadline). A sync call that wedges raises nothing the deadline
+        # can use (``wait_for`` cancels the future, not the thread), so
+        # the loop's per-attempt deadline bounds the WALL CLOCK (the
+        # result the caller sees), and the worker thread's own lifetime
+        # is bounded separately (the render worker's subprocess timeout
+        # one level down in production). An exception in the sync call
+        # propagates out of ``to_thread`` unchanged (the original
+        # exception type — the deadline only converts its own
+        # ``TimeoutError``; see :func:`_await_with_per_attempt_deadline`).
+        return await asyncio.to_thread(fn, *args)
     result = fn(*args)
     if asyncio.iscoroutine(result):
+        # A sync callable returning a coroutine (an async def called
+        # without await — not the production shape, but supported).
         return await asyncio.ensure_future(result)
     return result
 
@@ -1992,6 +2021,7 @@ async def run_design_loop_async(
                 part_scale=part_scale,
             ),
             _design_system(stated_dims, part_scale),
+            deadline_armed=attempt_timeout is not None,
         )
         _scad_or_result: LLMResult | DesignResult
         if attempt_timeout is not None:

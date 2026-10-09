@@ -501,6 +501,129 @@ def test_failure_event_attempt_fields_constraints_apply_when_present():
         )
 
 
+def _exhausted_stub_result():
+    """A minimal exhausted loop result for the record_production_failure
+    validation tests (a structured ``failure_reason`` the hook admits)."""
+    from d33d.design_loop import IterationRecord, Score
+    from d33d.render_worker import RenderResult
+
+    class _StubResult:
+        status = "exhausted"
+        failure_reason = "timeout"
+        best = IterationRecord(
+            iteration=1,
+            scad_source="cube();",
+            render=RenderResult(
+                ok=True,
+                exit_code=0,
+                duration_ms=0,
+                error_class="ok",
+                stderr="",
+                stl=None,
+                csg=None,
+                views=("v",) * 6,
+            ),
+            score=Score(bits=(True,) * 5, rank=5, tiebreak=(True,) * 5),
+            params={},
+        )
+
+    return _StubResult()
+
+
+def test_make_failure_event_validates_attempt_fields_at_construction():
+    """Issue #417 lens round 4 (item 3): ``make_failure_event`` accepts
+    ``attempt_count`` / ``per_attempt_latencies`` and enforces the model's
+    ``ge=1`` / ``min_length=1`` constraints at CONSTRUCTION — invalid
+    values raise ``ValidationError`` (not silently after, via attribute
+    assignment that bypasses Pydantic validation)."""
+    with pytest.raises(ValidationError):
+        make_failure_event(
+            photo=None,
+            region_mark=None,
+            request="make it a cube",
+            model="model-x",
+            prompt_version="",
+            output_scad="",
+            failure_class="design_loop_timed_out",
+            allow_gate_reasons=True,
+            attempt_count=0,
+        )
+    # An empty ``per_attempt_latencies`` list is normalised to ``None``
+    # (omit-not-null) at the ``make_failure_event`` / ``record_production_
+    # failure`` entry points — the ``min_length`` guard fires for a direct
+    # ``FailureEvent`` constructor call with a malformed empty list (the
+    # model-level test above), not here (normalisation is the honest
+    # absence, never an error).
+    ev_none = make_failure_event(
+        photo=None,
+        region_mark=None,
+        request="make it a cube",
+        model="model-x",
+        prompt_version="",
+        output_scad="",
+        failure_class="design_loop_timed_out",
+        allow_gate_reasons=True,
+        per_attempt_latencies=[],
+    )
+    assert ev_none.per_attempt_latencies is None
+    ev = make_failure_event(
+        photo=None,
+        region_mark=None,
+        request="make it a cube",
+        model="model-x",
+        prompt_version="",
+        output_scad="",
+        failure_class="design_loop_timed_out",
+        allow_gate_reasons=True,
+        attempt_count=2,
+        per_attempt_latencies=[1.5, 2.0],
+    )
+    assert ev.attempt_count == 2
+    assert ev.per_attempt_latencies == [1.5, 2.0]
+
+
+def test_record_production_failure_validates_attempt_fields():
+    """Issue #417 lens round 4 (item 3): ``record_production_failure``
+    hands ``attempt_count`` / ``per_attempt_latencies`` through the
+    validated constructor — invalid values raise ``ValidationError`` at
+    construction (before anything is appended), and the sink file is
+    never created."""
+    sink = Path("no_sink_file_417.txt")
+    if sink.exists():
+        sink.unlink()
+    with pytest.raises(ValidationError):
+        record_production_failure(
+            design_result=_exhausted_stub_result(),
+            photo=None,
+            region_mark=None,
+            request="make it a cube",
+            model="model-x",
+            prompt_version="",
+            output_scad="",
+            path=sink,
+            attempt_count=0,
+        )
+    # An empty ``per_attempt_latencies`` list is NORMALISED to ``None``
+    # (omit-not-null — honest absence over an empty array), so the
+    # constructor path accepts it; the ``min_length`` guard fires for a
+    # direct ``FailureEvent`` / ``make_failure_event`` call with a
+    # malformed empty list (the model-level test above), not here.
+    ev = record_production_failure(
+        design_result=_exhausted_stub_result(),
+        photo=None,
+        region_mark=None,
+        request="make it a cube",
+        model="model-x",
+        prompt_version="",
+        output_scad="",
+        path=sink,
+        per_attempt_latencies=[],
+    )
+    assert ev.per_attempt_latencies is None
+    assert sink.exists()  # the valid row (latencies normalised to None)
+    sink.unlink()  # clean up the scratch sink
+
+
 def test_make_failure_event_rejects_empty_request():
     """``make_failure_event`` rejects an empty ``request`` (the model's
     ``min_length=1`` validator)."""

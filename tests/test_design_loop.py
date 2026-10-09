@@ -4275,6 +4275,100 @@ def test_sync_llm_success_within_per_attempt_deadline_passes(monkeypatch):
     assert "cube" in result.best.scad_source
 
 
+def test_non_timeout_llm_exception_propagates_under_deadline():
+    """Issue #417 lens round 4: a NON-timeout LLM exception (an
+    ``httpx.ConnectError``) raised by the design call under the armed
+    per-attempt deadline propagates out of ``run_design_loop_async`` AS
+    ITS ORIGINAL TYPE — it is neither converted into the keep-best
+    ``design_loop_timed_out`` result (only timeouts take that path) nor
+    swallowed into an ``AttributeError`` at the ``scad = _scad_or_result``
+    seam. Good attempt 1 + ``ConnectError`` on attempt 2, deadline armed:
+    the exception must be the ConnectError itself (the same as before
+    #417, when a bare ``await`` let every non-TimeoutException propagate).
+    """
+    import httpx
+
+    good = _scad_llm(GOOD_SCAD)
+    calls = {"n": 0}
+    # The pre-flight probes are injected stubs, so only the LLM call
+    # (attempt 2) is reached before the exception fires.
+
+    async def _err_llm(role, messages, system):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return good
+        raise httpx.ConnectError("connect refused")
+
+    with pytest.raises(httpx.ConnectError):
+        asyncio.run(
+            run_design_loop_async(
+                photo=PHOTO,
+                stated_dims=STATED,
+                render_fn=lambda s, d: _render(),
+                llm_fn=_err_llm,
+                max_iterations=MAX_ITERATIONS,
+                attempt_timeout=5.0,
+            )
+        )
+    assert calls["n"] == 2, "attempt 2 was never made"
+
+
+def test_sync_llm_blocking_call_is_bounded_by_deadline():
+    """Issue #417 lens round 4: a SYNC ``llm_fn`` runs in a worker thread
+    (``asyncio.to_thread``) when the per-attempt deadline is armed, so
+    ``wait_for`` can actually bound it — a blocking 2 s call under a 0.3 s
+    budget returns the keep-best ``design_loop_timed_out`` result in well
+    under 1.5 s (before the fix the sync call ran inline on the event
+    loop, the deadline was a no-op, and the loop waited the full 2 s).
+    """
+    good = _scad_llm(GOOD_SCAD)
+    calls = {"n": 0}
+
+    def _blocking_llm(role, messages, system):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return good
+        time.sleep(2.0)
+        raise AssertionError("blocking sync llm_fn ran to completion")
+
+    t0 = time.monotonic()
+
+    def _loop():
+        return run_design_loop_async(
+            photo=PHOTO,
+            stated_dims=STATED,
+            render_fn=lambda s, d: _render(),
+            llm_fn=_blocking_llm,
+            max_iterations=MAX_ITERATIONS,
+            attempt_timeout=0.3,
+        )
+
+    async def _driver():
+        # The deadline fires at ~0.3 s; the loop result is available then.
+        # (Measured outside ``asyncio.run``'s shutdown join — the worker
+        # thread cannot be killed and its 2 s sleep outlives the deadline;
+        # the point is the WALL CLOCK of the result, not the thread's
+        # death.)
+        result = await _loop()
+        return result, time.monotonic() - t0
+
+    import asyncio as _asyncio
+
+    loop = _asyncio.new_event_loop()
+    try:
+        result, elapsed = loop.run_until_complete(_driver())
+    finally:
+        loop.close()
+    assert result.status == "exhausted"
+    assert result.failure_reason == "design_loop_timed_out"
+    # The keep-best path: attempt 1's candidate is kept.
+    assert result.best is not None
+    assert result.best.iteration == 1
+    assert "cube" in result.best.scad_source
+    # The deadline fired at ~0.3 s, not after the full 2 s blocking call.
+    assert elapsed < 1.5, f"sync blocking call stalled the loop {elapsed:.2f}s"
+
+
 def test_inner_per_call_llm_timeout_keeps_best_candidate(monkeypatch):
     """Issue #417: the production per-LLM-call bound
     (``d33d.design_llm.LLM_CALL_TIMEOUT_SECONDS``, 120 s — the httpx

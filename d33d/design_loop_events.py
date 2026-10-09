@@ -951,6 +951,51 @@ def _run_in_loop(coro: Any) -> Any:
     return asyncio.run(coro)
 
 
+def _slow_model_fields(
+    latencies: list[float] | None = None,
+    count: int = 0,
+) -> tuple[float | None, int]:
+    """Derive the slow-model copy's measured fields from the
+    per-attempt latencies and attempt count (issue #417).
+
+    ``latencies`` is the list of measured seconds (one per timed
+    attempt, in attempt order); ``count`` is the number of attempts
+    that started. Returns ``(mean_latency, count)`` where the mean is
+    the arithmetic mean of ``latencies`` rounded up to a whole second
+    (a killed attempt that burned 0.2 s reads as "about 1s an attempt",
+    never "about 0s"), or ``None`` when no latency was measured
+    (honest absence — the field is omitted, never fabricated). The
+    count is passed through (``0`` → omit). Both the adapter
+    safety-net deadline path and the loop's own timeout-version path
+    use this helper (no re-derivation).
+    """
+    _avg = sum(latencies) / len(latencies) if latencies else None
+    _ceil = math.ceil(_avg) if _avg is not None and _avg > 0 else None
+    return _ceil, count
+
+
+def _slow_model_frame(
+    latency: float | None,
+    count: int,
+    total_deadline: float,
+) -> dict[str, Any]:
+    """The terminal ``design_loop_timed_out`` error frame (the
+    slow-model copy: the measured mean latency + attempt count,
+    omit-not-null)."""
+    _error_data: dict[str, Any] = {
+        "message": (
+            "Design loop timed out after "
+            f"{int(total_deadline)}s"
+        ),
+        "reason": DESIGN_LOOP_TIMED_OUT_REASON,
+    }
+    if latency is not None:
+        _error_data["attempt_latency_seconds"] = int(latency)
+    if count > 0:
+        _error_data["attempt_count"] = count
+    return _error_data
+
+
 def _version_bbox_extents(result: Any) -> tuple[float, float, float] | None:
     """The best candidate's per-axis measured extents for persistence
     (issue #137), or ``None``.
@@ -1561,7 +1606,7 @@ async def _resolve_version_create(
        model (the old guard returned ``None`` here, suppressing the
        version entirely).
 
-    The version ``name` (issue #245) is derived from WHAT CHANGED, never
+    The version ``name`` (issue #245) is derived from WHAT CHANGED, never
     from the raw user message (a question like "how tall is it now" used
     to become the version name). Name source, in strict precedence:
 
@@ -1586,9 +1631,9 @@ async def _resolve_version_create(
     and NEVER becomes the name. ``None`` is returned only when ``best``
     itself is missing (a loop result that does not carry a candidate at
     all — a contract violation that must not fabricate a version), never
-    when the parameter set is merely empty. The version ``message` is the user's chat text truncated to
-    200 characters (Python string slicing is code-point-safe — no
-    multi-byte split, unlike a raw byte slice)."""
+    when the parameter set is merely empty. The version ``message`` is the
+    user's chat text truncated to 200 characters (Python string slicing is
+    code-point-safe — no multi-byte split, unlike a raw byte slice)."""
     best = getattr(result, "best", None)
     if best is None:
         return None
@@ -2228,24 +2273,12 @@ async def run_design_loop_with_events(
                     attempt_count=_attempt_count,
                     latencies=_latencies,
                 )
-                _avg_latency = (
-                    sum(_latencies) / len(_latencies) if _latencies else None
+                _latency, _count = _slow_model_fields(_latencies, _attempt_count)
+                _frames: list[tuple[str, dict[str, Any]]] = _yield_notice()
+                _frames.append(
+                    ("error", _slow_model_frame(_latency, _count, _total_deadline))
                 )
-                _error_data: dict[str, Any] = {
-                    "message": (
-                        "Design loop timed out after "
-                        f"{int(_total_deadline)}s"
-                    ),
-                    "reason": DESIGN_LOOP_TIMED_OUT_REASON,
-                }
-                if _avg_latency is not None:
-                    _error_data["attempt_latency_seconds"] = math.ceil(_avg_latency)
-                if _attempt_count > 0:
-                    _error_data["attempt_count"] = _attempt_count
-                frames: list[tuple[str, dict[str, Any]]] = _yield_notice()
-                frames.append(("error", _error_data))
-                return frames
-
+                return _frames
             while True:
                 if render_task.done():
                     break
@@ -2619,41 +2652,29 @@ async def run_design_loop_with_events(
                 # would violate the SPA's "never render a number the
                 # SPA has not established" invariant).
                 _loop_latencies = getattr(result, "attempt_latencies", None)
-                if _loop_latencies:
-                    _avg_latency = sum(_loop_latencies) / len(_loop_latencies)
-                    # Round UP to a whole second: a killed attempt that
-                    # burned 0.2 s of a 0.2 s budget reads as "about 1s
-                    # an attempt", never "about 0s" — and a real slow
-                    # model's 58.2 s average never reads as "58s" when
-                    # it was really 59s.
-                    if _avg_latency > 0:
-                        error_data["attempt_latency_seconds"] = math.ceil(
-                            _avg_latency
-                        )
-                    _started = getattr(result, "attempts_started", None)
-                    if not isinstance(_started, int) or _started <= 0:
-                        _started = len(_loop_latencies)
-                    error_data["attempt_count"] = _started
-                else:
-                    # Fallback: the frame-derived attempt tracker (the
-                    # adapter safety-net path — see the comment above).
-                    # Only exists on the awaitable path; a sync stub
-                    # loop with no loop-sourced numbers falls through to
-                    # omitting both fields (no fabricated numbers — the
-                    # SPA never renders a number it has not established).
-                    if _attempt_tracker is not None:
-                        _latencies = _attempt_tracker.latencies()
-                        _avg_latency = (
-                            sum(_latencies) / len(_latencies) if _latencies else None
-                        )
-                        if _avg_latency is not None:
-                            error_data["attempt_latency_seconds"] = math.ceil(
-                                _avg_latency
-                            )
-                        if _attempt_tracker.attempt_count > 0:
-                            error_data["attempt_count"] = (
-                                _attempt_tracker.attempt_count
-                            )
+                _started = getattr(result, "attempts_started", None)
+                if not isinstance(_started, int) or _started <= 0:
+                    _started = len(_loop_latencies) if _loop_latencies else 0
+                _latency, _count = _slow_model_fields(
+                    _loop_latencies, _started
+                )
+                # Fallback: the frame-derived attempt tracker (the
+                # adapter safety-net path — see the comment above).
+                # Only exists on the awaitable path; a sync stub
+                # loop with no loop-sourced numbers falls through to
+                # omitting both fields (no fabricated numbers — the
+                # SPA never renders a number it has not established).
+                if _latency is None and _attempt_tracker is not None:
+                    _fallback_latency, _fallback_count = _slow_model_fields(
+                        _attempt_tracker.latencies(),
+                        _attempt_tracker.attempt_count,
+                    )
+                    _latency = _fallback_latency
+                    _count = _fallback_count
+                if _latency is not None:
+                    error_data["attempt_latency_seconds"] = _latency
+                if _count > 0:
+                    error_data["attempt_count"] = _count
         # Frame order (issue #417 gate resolution): [photo notice(s),
         # version-created (when the kept candidate was stored), terminal
         # error] — the SAME order the adapter-deadline path uses, and the
