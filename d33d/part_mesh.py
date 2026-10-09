@@ -328,10 +328,19 @@ def parse_and_repair(
     if len(merged.faces) == 0:
         raise PartUploadError("mesh is empty after cleanup")
 
-    # The bbox in FILE units, BEFORE repair.
+    # The bbox in FILE units, BEFORE repair — EXTENTS (width/depth/height;
+    # ``merged.extents``), the historical ``bbox_file_units``. The real
+    # BOUNDS (``[min, max]`` two 3-vectors — issue #414: extents/2 is
+    # the part centre only for origin-anchored meshes; imported STLs
+    # often sit elsewhere, e.g. translated to (100, 100)) are stored
+    # alongside so readers can centre on the true bounds.
     file_bbox = tuple(float(e) for e in merged.extents)
     if not all(math.isfinite(e) for e in file_bbox) or max(file_bbox) <= 0:
         raise PartUploadError("mesh has invalid extents")
+    file_bounds = (
+        [float(v) for v in merged.bounds[0]],
+        [float(v) for v in merged.bounds[1]],
+    )
 
     # The 3MF's declared unit.
     file_unit: str | None = None
@@ -404,6 +413,7 @@ def parse_and_repair(
         "gaps_closed": max(0, gaps_before - gaps_after),
         "hole_count": int(holes),
         "bbox_file_units": file_bbox,
+        "bbox_bounds_file_units": [list(b) for b in file_bounds],
     }
     if bodies < bodies_before:
         report["bodies_before"] = bodies_before

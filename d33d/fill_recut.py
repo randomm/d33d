@@ -90,6 +90,16 @@ FRILL_POINT_AT_NO_DIM_TEMPLATE = (
     "Point at the {noun} on the part and I'll fill it and cut a new one there."
 )
 
+#: The no-match reply (issue #414): the user named a hole by position
+#: ("the center hole") but no measured hole matches — the reply says so
+#: and lists the measured holes (diameter + centre). The per-hole list is
+#: built by :func:`no_match_hole_reply` (the hole entries are never part
+#: of the template — the copy.ts mirror carries only the lead-in).
+FRILL_NO_MATCH_LEAD = (
+    "I don't see a {noun} at that spot on the part. "
+    "Here are the holes I did find: {holes}"
+)
+
 #: The input bound for :func:`fill_recut_trigger`: an instruction longer
 #: than this many characters is NOT a resize/move request — it bails out
 #: before the regexes run.
@@ -164,6 +174,17 @@ def _fmt_size(value: float | None) -> str | None:
     if value is None:
         return None
     return f"{value:g}"
+
+def _fmt_coord(value: float) -> str:
+    """A hole-centre coordinate, human-readable at any scale.
+
+    Uses ``:g`` (compact, no trailing zeros) but falls back to ``:f``
+    (fixed-point) when ``:g`` would switch to scientific notation —
+    a coordinate of 1e6 mm renders as ``1000000``, not ``1e+06``."""
+    g = f"{value:g}"
+    if "e" in g or "E" in g:
+        return f"{value:f}".rstrip("0").rstrip(".")
+    return g
 
 
 def boundary_sentence(
@@ -306,6 +327,56 @@ def is_clean_no(message: str) -> bool:
         re.search(r"\b(no|not|nope|nah|wrong|incorrect|never|drop it|forget it)\b", low)
     )
 
+def no_match_hole_reply(
+    noun: str, holes: list[dict[str, Any]]
+) -> str:
+    """The issue #414 no-match reply: the user named a hole by position
+    ("the center hole") but no measured hole matches that position.
+
+    The reply SAYS so (the ``FRILL_NO_MATCH_LEAD`` copy, mirrored in
+    ``copy.ts``'s ``fillRecut.noMatchLead``) and lists every measured
+    hole — its diameter and centre (mm, mono-formatted the way the deck
+    renders numbers) — so the user can pick by name or point at it. No
+    recut offer is made for a hole that does not exist.
+
+    Callers pass the MEASURED holes; an empty list or a list where EVERY
+    entry is malformed (no valid centre + diameter) falls back to the
+    existing no-hole copy (``d33d.part_holes.no_hole_reply``) rather than
+    emitting a dangling ``"…Here are the holes I did find: "`` tail.
+    """
+    # Compute the valid entries first (issue #414 part 3): a single
+    # fallback decision afterwards — the no-hole copy is imported and
+    # called once, not per branch.
+    entries: list[str] = []
+    for h in holes:
+        center = h.get("center")
+        diameter = h.get("diameter_mm")
+        if (
+            isinstance(center, (list, tuple))
+            and len(center) >= 2
+            and all(
+                isinstance(v, (int, float))
+                and not isinstance(v, bool)
+                and math.isfinite(v)
+                for v in center[:2]
+            )
+            and isinstance(diameter, (int, float))
+            and not isinstance(diameter, bool)
+            and diameter > 0
+        ):
+            entries.append(
+                f"Ø{_fmt_size(float(diameter))} mm at "
+                f"({_fmt_coord(float(center[0]))}, {_fmt_coord(float(center[1]))})"
+            )
+    if not entries:
+        # Empty list OR every entry malformed — same situation, ONE
+        # fallback: the no-hole copy, never a dangling tail.
+        from d33d.part_holes import no_hole_reply
+
+        return no_hole_reply(noun)
+    return FRILL_NO_MATCH_LEAD.format(noun=noun, holes="; ".join(entries))
+
+
 def fill_and_recut_instruction(offer: dict[str, Any]) -> str:
     """The explicit design-loop instruction an ACCEPTED fill-recut offer
     appends to the request text (the loop's own import-aware prompt
@@ -366,6 +437,7 @@ __all__ = [
     "FRILL_MOVE_REPLY",
     "FRILL_NOUN_DIMENSION_REPLY",
     "FRILL_NO_DIMENSION_REPLY",
+    "FRILL_NO_MATCH_LEAD",
     "FRILL_POINT_AT_NO_DIM_TEMPLATE",
     "FRILL_POINT_AT_TEMPLATE",
     "TRIGGER_MAX_INSTRUCTION_CHARS",
@@ -375,25 +447,27 @@ __all__ = [
     "fill_recut_trigger",
     "is_clean_no",
     "is_clean_yes",
+    "no_match_hole_reply",
     "own_feature_names",
 ]
 
 
 def __getattr__(name: str):
-    """Lazy re-export of ``fill_recut_turn`` (which lives in
-    :mod:`d33d.fill_recut_turn`).
+    """Lazy re-export of ``fill_recut_turn`` / ``fill_recut_turn_async``
+    (which live in :mod:`d33d.fill_recut_turn`).
 
     A top-level ``from d33d.fill_recut_turn import fill_recut_turn`` would
     be a circular import: ``fill_recut_turn`` imports the constants and
     helpers it uses FROM ``d33d.fill_recut``, so the two modules must not
     import each other at module load. PEP 562's module ``__getattr__``
-    re-exports ``fill_recut_turn`` lazily — ``d33d.projects.post_chat`` and
-    the tests do ``from d33d.fill_recut import fill_recut_turn`` and get the
-    same function object (``d33d.fill_recut_turn.fill_recut_turn``) without
-    the cycle.
+    re-exports both entry points lazily — ``d33d.projects.post_chat``
+    awaits ``d33d.fill_recut.fill_recut_turn_async`` (issue #414, part 3:
+    the legacy-report mesh load is awaited off the event loop) and the
+    tests call the sync ``fill_recut_turn``; both resolve to the same
+    function objects (``d33d.fill_recut_turn.*``) without the cycle.
     """
-    if name == "fill_recut_turn":
-        from d33d.fill_recut_turn import fill_recut_turn
+    if name in ("fill_recut_turn", "fill_recut_turn_async"):
+        from d33d import fill_recut_turn as _frt
 
-        return fill_recut_turn
+        return getattr(_frt, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

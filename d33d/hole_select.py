@@ -21,6 +21,7 @@ instruction without a location.
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from typing import Any
 
 #: The ambiguity threshold (mm) for the "nearest the centre" rule: two
@@ -29,28 +30,86 @@ from typing import Any
 #: rather than a confident but arbitrary pick).
 _AMBIGUITY_MM = 0.1
 
+#: The match threshold (mm) for the "nearest the centre" rule: the
+#: nearest hole must be within this distance of the XY bounds centre to
+#: be a match at all. A "center hole" that no measured hole actually
+#: sits at is a NO-MATCH — the caller says so and lists the measured
+#: holes — not a silent nearest-neighbour pick and not the point-at
+#: fallback (that one is for a genuinely ambiguous pick).
+#:
+#: A part-relative fraction (e.g. 15% of the XY diagonal) CANNOT
+#: separate the two pinned cases, so a fixed mm value is used instead:
+#: - The #396 origin-anchored part (bounds 0..40 × 0..40, centre
+#:   (20, 20)): the (10, 0) hole is 22.4 mm from the centre — it
+#:   MUST be selected (the test pins the pick). 15% of the 56.6 mm
+#:   diagonal is 8.5 mm — a fraction would no-match this hole.
+#: - The QA v36 plate (bounds 0..120 × 0..80, centre (60, 40)): the
+#:   corner holes are 61.1 mm from the centre — they MUST NOT match.
+#: 30 mm separates the two (22.4 < 30 < 61.1); no fraction of the
+#: diagonal can (8.5 < 22.4 and 28.8 < 61.1 both fail to discriminate).
+_CENTER_MATCH_MM = 30.0
+
+
+@dataclass(frozen=True)
+class NoMatchHole:
+    """The issue #414 no-match sentinel: the user named a hole by
+    position ("the center hole") but NO measured hole matches that
+    position — the caller must say so and list the measured holes, and
+    must NOT make a recut offer. Distinct from ``None`` (an ambiguous
+    or unqualified message — the point-at fallback) so the two replies
+    never get conflated.
+
+    A frozen dataclass so a stray second instantiation is a VISIBLE
+    mistake (a different object, caught by ``is _NO_MATCH``) instead of
+    a second, indistinguishable sentinel."""
+
+
+_NO_MATCH = NoMatchHole()
+
 
 def select_measured_hole(
     holes: list[dict[str, Any]],
     message: str,
     bbox_mm: list[float] | None,
     trigger_size: float | None = None,
-) -> dict[str, Any] | None:
+    bounds_mm: list[list[float]] | None = None,
+) -> dict[str, Any] | None | NoMatchHole:
     """Select the hole the user is referring to from the measured list.
 
     ``holes`` is the part's measured-hole list (each entry ``{"center":
     [x, y, z], "axis": [x, y, z], "diameter_mm": d}``); ``message`` the
-    user's chat turn; ``bbox_mm`` the part's bounding box in MM (the
-    file-unit bbox scaled by ``part_scale``); ``trigger_size`` the
-    diameter (mm) the user stated for the resize, when they stated one.
+    user's chat turn; ``bbox_mm`` the part's bounding box in MM — the
+    legacy EXTENTS form (``[w, d, h]`` from ``bbox_file_units`` scaled
+    by ``part_scale``); ``trigger_size`` the diameter (mm) the user
+    stated for the resize, when they stated one; ``bounds_mm`` the
+    part's REAL bounds in MM (``[lo, hi]``, the
+    ``bbox_bounds_file_units`` blob scaled by ``part_scale``).
+
+    The "center" reference is the centre of the part's XY bounds —
+    ``(min+max)/2`` of :data:`bounds_mm` when it is usable, because the
+    stored ``bbox_file_units`` is the mesh's EXTENTS (``merged.extents``,
+    ``part_mesh.parse_and_repair``), and extents/2 is the part centre
+    ONLY when the bounding box starts at the origin. An origin-centred
+    part (the #396 knob: bounds −20..20) gets the same centre either
+    way; a translated part (imported STLs often sit at (100, 100) or
+    are centred on the origin) needs the real bounds. When no real
+    bounds are stored (legacy report) and the legacy extents are
+    available, the centre degrades to extents/2 — the origin-anchored
+    special case, same as before issue #414; when neither is available
+    the rule cannot run (``None``, the point-at fallback).
 
     Selection rules (issue #396), in priority order:
 
     1. A single measured hole is picked trivially (it is "the" hole).
     2. A "center"/"centre"/"middle" qualifier picks the hole nearest the
-       XY bbox centre; if two candidates are within :data:`_AMBIGUITY_MM`
-       of each other the pick is ambiguous and ``None`` is returned (the
-       point-at fallback).
+       XY bounds centre (``(min+max)/2`` of ``bounds_mm`` — issue #414:
+       extents/2 is only the origin-anchored special case) — but only
+       when that hole is actually WITHIN :data:`_CENTER_MATCH_MM` of
+       the centre. A "center hole" no measured hole sits at is a
+       NO-MATCH, not a silent nearest-neighbour pick. If two near
+       candidates are within :data:`_AMBIGUITY_MM` of each other the
+       pick is ambiguous and ``None`` is returned (the point-at
+       fallback).
     3. Otherwise, when the user stated a diameter, the hole with the
        CLOSEST diameter is picked (a unique minimum within the 0.1 mm
        ambiguity band — "the closest diameter", never a 5% band that
@@ -58,8 +117,10 @@ def select_measured_hole(
     4. Any other shape (no qualifier, no unique diameter match) is
        ambiguous: ``None`` (the point-at fallback).
 
-    Returns the chosen hole dict or ``None`` (the caller uses the
-    point-at copy — never an instruction without a location).
+    Returns the chosen hole dict, :data:`_NO_MATCH` (the user's
+    positional description matched no measured hole — issue #414), or
+    ``None`` (the caller uses the point-at copy — never an instruction
+    without a location).
     """
     if not holes:
         return None
@@ -71,17 +132,53 @@ def select_measured_hole(
         w in msg_lower for w in ("center", "centre", "middle")
     )
 
-    # Rule 2: "center hole" — nearest to the XY bbox centre (mm).
-    # When a center qualifier is present, the center rule is the ONLY
-    # rule that applies: if it cannot run (no usable bbox, or no hole
-    # has a usable centre), the result is ``None`` (the point-at
-    # fallback) — it must NOT silently switch to diameter matching
-    # (a center qualifier that falls through to diameter matching
-    # would pick a hole the user did not ask for).
+    # Rule 2: "center hole" — nearest to the XY BOUNDS centre (mm).
+    # Issue #414: the centre is (min+max)/2 of the real bounds — the
+    # stored ``bbox_file_units`` is the mesh's EXTENTS (width/depth/
+    # height), and extents/2 is only the part centre when the bounding
+    # box starts at the origin. Real bounds when available (``
+    # bounds_mm``, the ``bbox_bounds_file_units`` blob scaled by the
+    # part's scale — the same space the measured holes live in once
+    # ``holes_in_mm`` has scaled them); legacy extents/2 as fallback
+    # (origin-anchored parts, pre-#414 reports). When the center
+    # qualifier is present, the center rule is the ONLY rule that
+    # applies: if it cannot run (no usable centre, or no hole has a
+    # usable centre), the result is ``None`` (the point-at fallback)
+    # — it must NOT silently switch to diameter matching (a center
+    # qualifier that falls through to diameter matching would pick a
+    # hole the user did not ask for).
     if has_center_qualifier:
-        if bbox_mm is not None and len(bbox_mm) >= 2:
-            cx = float(bbox_mm[0]) / 2.0
-            cy = float(bbox_mm[1]) / 2.0
+        centre: tuple[float, float] | None = None
+        if bounds_mm is not None and len(bounds_mm) == 2:
+            lo = bounds_mm[0]
+            hi = bounds_mm[1]
+            if (
+                isinstance(lo, (list, tuple))
+                and isinstance(hi, (list, tuple))
+                and len(lo) >= 2
+                and len(hi) >= 2
+            ):
+                try:
+                    lo_xy = [float(lo[0]), float(lo[1])]
+                    hi_xy = [float(hi[0]), float(hi[1])]
+                except (TypeError, ValueError):
+                    centre = None
+                else:
+                    if all(math.isfinite(v) for v in lo_xy + hi_xy):
+                        centre = (
+                            (lo_xy[0] + hi_xy[0]) / 2.0,
+                            (lo_xy[1] + hi_xy[1]) / 2.0,
+                        )
+        if centre is None and bbox_mm is not None and len(bbox_mm) >= 2:
+            try:
+                w = float(bbox_mm[0])
+                d = float(bbox_mm[1])
+            except (TypeError, ValueError):
+                w = d = 0.0
+            if w > 0 and d > 0:
+                centre = (w / 2.0, d / 2.0)
+        if centre is not None:
+            cx, cy = centre
             dists: list[tuple[float, dict[str, Any]]] = []
             for h in holes:
                 c = h.get("center")
@@ -91,12 +188,18 @@ def select_measured_hole(
                 dists.append((d, h))
             if dists:
                 dists.sort(key=lambda x: x[0])
+                # Issue #414: a "center hole" no measured hole actually
+                # sits at (nearest candidate farther than the match
+                # threshold) is a NO-MATCH — the caller says so and
+                # lists the measured holes, and makes no recut offer.
+                if dists[0][0] > _CENTER_MATCH_MM:
+                    return _NO_MATCH
                 # Two nearest candidates within the ambiguity band → the
                 # pick is not defensible; fall back to point-at.
                 if len(dists) > 1 and dists[1][0] - dists[0][0] < _AMBIGUITY_MM:
                     return None
                 return dists[0][1]
-        # No usable bbox or no hole had a usable centre → the center
+        # No usable centre or no hole had a usable centre → the center
         # rule cannot run; return None (point-at fallback), NOT the
         # diameter branch (the user asked for "the center hole",
         # not "the hole of this diameter").
@@ -178,10 +281,41 @@ def fill_recut_instruction_with_hole(
 
 
 __all__ = [
+    "NoMatchHole",
     "fill_recut_instruction_with_hole",
     "holes_in_mm",
+    "report_bounds_mm",
     "select_measured_hole",
 ]
+
+
+def report_bounds_mm(
+    report: dict[str, Any] | None, scale: float | None
+) -> list[list[float]] | None:
+    """The stored ``part_report["bbox_bounds_file_units"]`` (``[lo, hi]``,
+    two 3-vectors in file units — the real bounding box, unlike
+    ``bbox_file_units`` which is the mesh's EXTENTS) converted to MM.
+
+    ``scale`` is the part's ``part_scale``; the guard mirrors
+    :func:`holes_in_mm` (``None`` / non-numeric / ``<= 0`` → ``None`` —
+    unknown units, never file units passed off as mm). A missing or
+    corrupt bounds blob → ``None`` (legacy reports predate the blob;
+    the caller then degrades to the extents/2 origin-anchored centre).
+    """
+    if not isinstance(report, dict):
+        return None
+    stored = report.get("bbox_bounds_file_units")
+    lo = _numeric_vec(stored[0], 3) if isinstance(stored, (list, tuple)) and len(stored) == 2 else None
+    hi = _numeric_vec(stored[1], 3) if isinstance(stored, (list, tuple)) and len(stored) == 2 else None
+    if lo is None or hi is None:
+        return None
+    try:
+        factor = float(scale) if scale is not None else 0.0
+    except (TypeError, ValueError):
+        factor = 0.0
+    if factor <= 0:
+        return None
+    return [[v * factor for v in lo], [v * factor for v in hi]]
 
 
 def _numeric_vec(values: Any, length: int) -> list[float] | None:

@@ -480,7 +480,14 @@ def create_projects_router() -> APIRouter:
                     fill_recut.UNSETTLED_PART_REPLY
                 )
                 return {"status": "accepted"}
-            _fill_recut = fill_recut.fill_recut_turn(app, project_id, body.message)
+            # Issue #414 (part 3): the ASYNC entry point — the legacy-report
+            # mesh bounds load is awaited off the event loop
+            # (``asyncio.to_thread``), so a slow mesh parse never blocks
+            # the loop. The sync ``fill_recut_turn`` (direct load) is
+            # test-only; production uses ``fill_recut_turn_async``.
+            _fill_recut = await fill_recut.fill_recut_turn_async(
+                app, project_id, body.message
+            )
             if _fill_recut is not None:
                 if _fill_recut.get("run_loop"):
                     _fill_recut_instruction = _fill_recut["instruction"]

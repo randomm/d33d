@@ -27,6 +27,12 @@ import pytest
 # Side-effect-only import via ``importlib`` — the call below is the guard.
 importlib.import_module("tests")
 
+# Expose the shared legacy-bounds fixtures (``app_paths`` /
+# ``app_with_projects``) from ``tests.legacy_bounds_fixtures`` (issue
+# #414: single home for the fixtures the two fill-recut legacy test
+# modules share).
+pytest_plugins = ["tests.legacy_bounds_fixtures"]
+
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 root_str = str(_REPO_ROOT)
 if root_str not in sys.path:
