@@ -13,8 +13,10 @@ real tiny STLs built with trimesh in ``tmp_path``).
 
 from __future__ import annotations
 
+import struct
 from pathlib import Path
 
+import pytest
 import trimesh
 
 from d33d.through_hole_check import (
@@ -279,6 +281,29 @@ def test_check_unexpected_exception_abstains(tmp_path, monkeypatch):
     monkeypatch.setattr(pmt, "mesh_topology", _raise_runtime_error)
     # The check must abstain (None), not raise.
     assert through_hole_check("drill a 6 mm hole through the box", stl, 0) is None
+
+
+@pytest.mark.parametrize("exc", [struct.error("bad header"), IndexError("bad index")])
+def test_span_loader_malformed_stl_falls_back_to_bare_instruction(
+    tmp_path, monkeypatch, exc
+):
+    """Issue #432 (lens round 1): a malformed STL whose loader raises an
+    arbitrary parse error (struct.error / IndexError) must make the span
+    helper ABSTAIN to the bare instruction, never abort the run."""
+    import trimesh as _tm
+
+    from d33d.through_hole_check import (
+        THROUGH_HOLE_INSTRUCTION,
+        _instruction_with_span,
+    )
+
+    stl = _write_stl(tmp_path / "bad.stl", _pocket_stl())
+
+    def _raise(*args, **kwargs):
+        raise exc
+
+    monkeypatch.setattr(_tm, "load", _raise)
+    assert _instruction_with_span(THROUGH_HOLE_INSTRUCTION, stl) == THROUGH_HOLE_INSTRUCTION
 
 
 # ---------------------------------------------------------------------------

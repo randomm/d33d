@@ -361,7 +361,7 @@ def _instruction_with_span(instruction: str, stl: str | None) -> str:
 
     try:
         bounds = trimesh.load(stl, process=False, force="mesh").bounds
-    except (OSError, ValueError, RuntimeError, TypeError) as exc:
+    except Exception as exc:  # any malformed-mesh parse error: abstain, never abort
         logger.warning(
             "through-hole span unavailable (stl %s): %r — repair sent without the measured z-span",
             stl,

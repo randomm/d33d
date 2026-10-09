@@ -65,6 +65,7 @@ __all__ = [
     "MESH_UNCHANGED_REASON",
     "UNCHANGED_INSTRUCTION",
     "fingerprint_from_rounded_vertices",
+    "fingerprint_stl",
     "mesh_fingerprint",
     "unchanged_mesh_check",
 ]
@@ -175,6 +176,16 @@ def mesh_fingerprint(mesh: Any) -> tuple[str, int] | None:
     except (ValueError, TypeError, RuntimeError, IndexError, OverflowError):
         return None
     return fingerprint_from_rounded_vertices(verts)
+
+
+def fingerprint_stl(path: str | None) -> tuple[str, int] | None:
+    """Issue #432: the geometry fingerprint of the STL at ``path`` — one
+    load, then :func:`mesh_fingerprint`. ``None`` abstains (missing or
+    unreadable file, or an empty mesh)."""
+    mesh = _load_mesh(path)
+    if mesh is None:
+        return None
+    return mesh_fingerprint(mesh)
 
 
 def _load_mesh(path: str) -> Any | None:

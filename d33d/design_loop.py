@@ -82,6 +82,7 @@ from d33d.failure_classes import (
     detect_magic_numbers,
     route_repair,
 )
+from d33d.identical_repair import IdenticalRepairTracker
 from d33d.render_worker import (
     RENDER_WORKER_IMAGE,
     RenderResult,
@@ -89,7 +90,7 @@ from d33d.render_worker import (
     build_hash,
     canonical_build_command,
 )
-from d33d.unchanged_mesh_check import MESH_UNCHANGED_REASON
+from d33d.unchanged_mesh_check import MESH_UNCHANGED_REASON, fingerprint_stl
 
 logger = logging.getLogger(__name__)
 
@@ -1207,20 +1208,6 @@ def _unchanged_mesh_post_check(
     )
 
 
-def _render_fingerprint(stl: str | None) -> tuple[str, int] | None:
-    """Issue #432: the geometry fingerprint of one candidate's rendered STL,
-    used by the identical-repair stop (the same fingerprint the unchanged-mesh
-    check compares). ``None`` abstains (no STL, or an unreadable mesh)."""
-    from d33d.unchanged_mesh_check import _load_mesh, mesh_fingerprint
-
-    if not isinstance(stl, str) or not stl:
-        return None
-    mesh = _load_mesh(stl)
-    if mesh is None:
-        return None
-    return mesh_fingerprint(mesh)
-
-
 def _stack_height_post_check(
     scad_source: str,
     measured_z: float | None,
@@ -2034,12 +2021,9 @@ async def run_design_loop_async(
     best: IterationRecord | None = None
     best_score: Score | None = None
     prev_score: Score | None = None
-    # Issue #432: the previous iteration's post-check (reason, fingerprint)
-    # — a repeat of the same post-check on an identical mesh stops the loop.
-    prev_post: tuple[str, tuple[str, int]] | None = None
-    # Issue #432: the last RENDERED attempt's record (the identical-repair stop
-    # reports it; a non-render attempt never overwrites it).
-    prev_rendered: IterationRecord | None = None
+    # Issue #432: the identical-repair stop state (previous post-check
+    # fingerprint + last rendered record) — see d33d.identical_repair.
+    tracker = IdenticalRepairTracker()
     consecutive_no_improvement = 0
     iterations: list[IterationRecord] = []
     # The loop's OWN per-attempt wall clock (issue #417): one
@@ -2165,7 +2149,7 @@ async def run_design_loop_async(
             iterations.append(record)
             # Issue #432: a non-render attempt breaks the consecutive-renders
             # premise of the identical-repair stop - reset the tracker.
-            prev_post = None
+            tracker.reset()
             if best is None or is_best(candidate_score, best_score):
                 best = record
                 best_score = candidate_score
@@ -2491,16 +2475,9 @@ async def run_design_loop_async(
         _post_reason = (
             next_repair.get("reason") if isinstance(next_repair, dict) else None
         )
-        _repeat_post_check = False
+        _post_fp: tuple[str, int] | None = None
         if _post_reason in POST_CHECK_REASONS:
-            _post_fp = await asyncio.to_thread(_render_fingerprint, render.stl)
-            if _post_fp is not None:
-                _repeat_post_check = prev_post == (_post_reason, _post_fp)
-                prev_post = (_post_reason, _post_fp)
-            else:
-                prev_post = None
-        else:
-            prev_post = None
+            _post_fp = await asyncio.to_thread(fingerprint_stl, render.stl)
 
         record = IterationRecord(
             iteration=iteration,
@@ -2549,21 +2526,15 @@ async def run_design_loop_async(
         if render.error_class == "container_error":
             return _container_error_stop(iterations, best)
 
-        if _repeat_post_check:
-            # Issue #432 operator decision: the repeated attempt N's mesh is
-            # identical to attempt N-1's, so N-1 is the reported best and
-            # the repeated post-check's reason is the terminal reason.
-            # The prior RENDERED attempt's record (never iterations[-2], which
-            # may be a non-render record in between).
-            _prev = prev_rendered
-            if _prev is not None:
-                # A gate/error_class reason on N-1 always wins; the repeated
-                # post-check reason is only the fallback (issue #432).
-                return _exhausted(
-                    iterations, _prev, _prev.score, fallback_reason=_post_reason
-                )
-            # No prior rendered attempt to report: not a stop, keep looping.
-        prev_rendered = record
+        # Issue #432 operator decision: a repeated post-check on an identical
+        # mesh reports N-1 (the prior RENDERED record, never iterations[-2])
+        # with the post-check reason as the fallback (a gate/error_class
+        # reason on N-1 still wins inside _exhausted).
+        _repeated = tracker.observe_render(_post_reason, _post_fp, record)
+        if _repeated is not None:
+            return _exhausted(
+                iterations, _repeated, _repeated.score, fallback_reason=_post_reason
+            )
 
         repair = next_repair
         if consecutive_no_improvement >= NO_IMPROVEMENT_LIMIT:
