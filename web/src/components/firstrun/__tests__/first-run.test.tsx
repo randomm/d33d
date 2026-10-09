@@ -200,7 +200,7 @@ describe("FirstRun", () => {
 
 describe("PlateBackdrop", () => {
   it("caps the plate SVG's width below 52vh — the width cap's vh term stays reduced (issue #214)", () => {
-    const { container } = render(<PlateBackdrop x={320} y={320} z={300} verified={true} />);
+    const { container } = render(<PlateBackdrop x={320} y={320} z={300} verified={true} showCaption={true} />);
     const svg = container.querySelector("svg.plate-backdrop");
     expect(svg).not.toBeNull();
     // The SVG's width cap is min(Nvh, 44vw); the vh term pins how tall the
@@ -223,7 +223,7 @@ describe("PlateBackdrop", () => {
   });
 
   it("caps the plate SVG's width cap's vw term at 44vw — the caption stays inside the card's bottom edge at the narrowest QA width (issue #390 item 3)", () => {
-    const { container } = render(<PlateBackdrop x={320} y={320} z={300} verified={true} />);
+    const { container } = render(<PlateBackdrop x={320} y={320} z={300} verified={true} showCaption={true} />);
     const svg = container.querySelector("svg.plate-backdrop");
     expect(svg).not.toBeNull();
     // The width cap is min(Nvh, Nvw). The vw term pins how wide the plate
@@ -243,7 +243,7 @@ describe("PlateBackdrop", () => {
   });
 
   it("draws the plate to scale — the SVG viewBox matches the envelope dimensions", () => {
-    const { container } = render(<PlateBackdrop x={320} y={320} z={300} verified={false} />);
+    const { container } = render(<PlateBackdrop x={320} y={320} z={300} verified={false} showCaption={true} />);
     const svg = container.querySelector("svg.plate-backdrop");
     expect(svg).not.toBeNull();
     // The viewBox is `0 0 x z` — the plate's top view: x wide, z deep.
@@ -253,21 +253,21 @@ describe("PlateBackdrop", () => {
   });
 
   it("draws a different plate for different envelope dimensions", () => {
-    const { container } = render(<PlateBackdrop x={220} y={220} z={255} verified={false} />);
+    const { container } = render(<PlateBackdrop x={220} y={220} z={255} verified={false} showCaption={true} />);
     const svg = container.querySelector("svg.plate-backdrop");
     expect(svg).not.toBeNull();
     expect(svg!.getAttribute("viewBox")).toBe("0 0 220 255");
   });
 
   it("renders the caption with the envelope numbers (from the deck)", () => {
-    render(<PlateBackdrop x={320} y={320} z={300} verified={true} />);
+    render(<PlateBackdrop x={320} y={320} z={300} verified={true} showCaption={true} />);
     expect(screen.getByTestId("plate-caption").textContent).toBe(copy.firstRun.plateCaption(320, 320, 300));
   });
 
   it("the unconfirmed envelope's caption carries the qualifier; the confirmed one does not", () => {
     const qualifier = copy.firstRun.plateCaptionUnverified;
     // verified: false — the caption must say the numbers are not yet confirmed.
-    const first = render(<PlateBackdrop x={320} y={320} z={300} verified={false} />);
+    const first = render(<PlateBackdrop x={320} y={320} z={300} verified={false} showCaption={true} />);
     const unconfirmedCaption = screen.getByTestId("plate-caption").textContent ?? "";
     // The dimensions are still stated — a to-scale backdrop is genuinely
     // useful; it just must not claim to be confirmed.
@@ -275,18 +275,18 @@ describe("PlateBackdrop", () => {
     expect(unconfirmedCaption).toContain(qualifier);
     first.unmount();
     // verified: true — the same numbers, no qualifier.
-    render(<PlateBackdrop x={320} y={320} z={300} verified={true} />);
+    render(<PlateBackdrop x={320} y={320} z={300} verified={true} showCaption={true} />);
     const confirmedCaption = screen.getByTestId("plate-caption").textContent ?? "";
     expect(confirmedCaption).not.toContain(qualifier);
   });
 
   it("renders the plate note (from the deck)", () => {
-    render(<PlateBackdrop x={320} y={320} z={300} verified={false} />);
+    render(<PlateBackdrop x={320} y={320} z={300} verified={false} showCaption={true} />);
     expect(screen.getByTestId("plate-note").textContent).toBe(copy.firstRun.plateNote);
   });
 
   it("the plate is low-contrast — the outline uses the hairline colour, not the marker", () => {
-    const { container } = render(<PlateBackdrop x={320} y={320} z={300} verified={false} />);
+    const { container } = render(<PlateBackdrop x={320} y={320} z={300} verified={false} showCaption={true} />);
     const rect = container.querySelector("rect.plate-outline");
     expect(rect).not.toBeNull();
     // The outline is the hairline colour at very low opacity — a backdrop,
@@ -294,6 +294,14 @@ describe("PlateBackdrop", () => {
     const stroke = rect!.getAttribute("stroke") ?? "";
     expect(stroke).not.toContain("FF3300");
     expect(stroke).not.toContain("255, 51, 0");
+  });
+
+  it("showCaption=false hides the caption and note but keeps the plate drawing", () => {
+    const { container } = render(<PlateBackdrop x={320} y={320} z={300} verified={true} showCaption={false} />);
+    expect(screen.queryByTestId("plate-caption")).toBeNull();
+    expect(screen.queryByTestId("plate-note")).toBeNull();
+    expect(container.querySelector("svg.plate-backdrop")).not.toBeNull();
+    expect(container.querySelector("rect.plate-outline")).not.toBeNull();
   });
 });
 

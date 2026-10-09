@@ -29,9 +29,13 @@ interface PlateBackdropProps {
   /** True once the values have been confirmed against the machine; false
    *  until then — the caption must carry that uncertainty, never hide it. */
   verified: boolean;
+  /** False while the first-run card is up: the caption and note are the
+   *  card's neighbours and must not fragment between its two cards. The
+   *  drawing itself always renders. */
+  showCaption: boolean;
 }
 
-export function PlateBackdrop({ x, y, z, verified }: PlateBackdropProps) {
+export function PlateBackdrop({ x, y, z, verified, showCaption }: PlateBackdropProps) {
   // The plate's top view: x wide, z deep (the print head's travel plane).
   // The viewBox is the envelope itself — the drawing scales with the API.
   return (
@@ -80,6 +84,8 @@ export function PlateBackdrop({ x, y, z, verified }: PlateBackdropProps) {
             opacity={0.35}
           />
         </svg>
+        {showCaption && (
+        <>
         {/* The caption: the API's numbers, formatted once in the deck. */}
         <span
           className="plate-caption"
@@ -106,6 +112,8 @@ export function PlateBackdrop({ x, y, z, verified }: PlateBackdropProps) {
         >
           {copy.firstRun.plateNote}
         </span>
+        </>
+        )}
       </div>
     </div>
   );

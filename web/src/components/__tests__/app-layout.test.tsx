@@ -4720,10 +4720,9 @@ describe("App first-run screen (issue #128, W14)", () => {
   });
 
   it("fetches the build envelope and draws the plate to scale with the API's numbers", async () => {
-    render(<App client={client} />);
-    // Issue #192: the envelope is machine config, fetched on mount —
-    // independent of the (still-nonexistent) project.
-    expect(client.createProject).not.toHaveBeenCalled();
+    // Issue #434: the caption shows once the project opens (the first-run
+    // card hides it), so open the project first.
+    await settleModelMount(client);
     await waitFor(() => expect(client.getEnvelope).toHaveBeenCalled());
     // The caption renders the fetched numbers (320 × 320 × 300) — and the
     // unconfirmed-envelope qualifier, since the stub returns verified: false.
@@ -4746,10 +4745,7 @@ describe("App first-run screen (issue #128, W14)", () => {
       unit: "mm",
       verified: false,
     });
-    render(<App client={client} />);
-    // Issue #192: the envelope is machine config, fetched on mount — no
-    // project exists yet.
-    expect(client.createProject).not.toHaveBeenCalled();
+    await settleModelMount(client);
     // The stub is verified: false, so the caption carries the qualifier.
     await waitFor(() =>
       expect(screen.getByTestId("plate-caption").textContent).toBe(
@@ -4765,16 +4761,13 @@ describe("App first-run screen (issue #128, W14)", () => {
   it("the plate caption carries the qualifier while the envelope is unconfirmed, and drops it when confirmed", async () => {
     // The default stub (makeClient) returns verified: false — the caption must
     // surface the uncertainty, in the deck's own words.
-    const first = render(<App client={client} />);
-    // Issue #192: the envelope is machine config, fetched on mount — no
-    // project exists yet.
-    expect(client.createProject).not.toHaveBeenCalled();
+    await settleModelMount(client);
     await waitFor(() =>
       expect(screen.getByTestId("plate-caption").textContent).toContain(
         copy.firstRun.plateCaptionUnverified,
       ),
     );
-    first.unmount();
+    cleanup();
     // Now the machine is confirmed — the same numbers, but the qualifier must
     // be gone. The plate never hides; only the claim of certainty does.
     vi.spyOn(client, "getEnvelope").mockResolvedValue({
@@ -4784,15 +4777,26 @@ describe("App first-run screen (issue #128, W14)", () => {
       unit: "mm",
       verified: true,
     });
-    const { unmount } = render(<App client={client} />);
-    expect(client.createProject).not.toHaveBeenCalled();
+    await settleModelMount(client);
     await waitFor(() =>
       expect(screen.getByTestId("plate-caption").textContent).toBe("320 × 320 × 300\u202Fmm"),
     );
     expect(screen.getByTestId("plate-caption").textContent).not.toContain(
       copy.firstRun.plateCaptionUnverified,
     );
-    unmount();
+    cleanup();
+  });
+
+  it("the plate caption and note are hidden while the first-run card is up, and shown once the project opens (issue #434)", async () => {
+    render(<App client={client} />);
+    expect(screen.getByTestId("first-run")).toBeTruthy();
+    // Wait for the envelope so the plate is actually drawn — absence must not pass vacuously.
+    await waitFor(() => expect(screen.getByTestId("plate-backdrop-svg")).toBeTruthy());
+    expect(screen.queryByTestId("plate-caption")).toBeNull();
+    expect(screen.queryByTestId("plate-note")).toBeNull();
+    sendFirstComposerMessage("make a box");
+    await waitFor(() => expect(screen.getByTestId("plate-caption")).toBeTruthy());
+    expect(screen.getByTestId("plate-note")).toBeTruthy();
   });
 
   it("goes away once a message has been sent (the conversation takes the centre)", async () => {
@@ -5083,6 +5087,8 @@ describe("App Screen 2 (issue #334, D6/D7/D8)", () => {
     // The plate is SHOWN for an assumed part (the D7 gate only fires on
     // "unsettled") — the self-contradiction symptom is gone.
     expect(screen.queryByTestId("plate-backdrop")).toBeTruthy();
+    // Issue #434: Screen 2 is not the first-run card, so the caption shows.
+    expect(screen.getByTestId("plate-caption")).toBeTruthy();
     // The unsettled caption is ABSENT (the assumed card carries the
     // read-as-mm line, never "Its size isn't…").
     expect(screen.queryByTestId("import-report-unsettled-caption")).toBeNull();
