@@ -59,9 +59,11 @@ import re
 import subprocess
 import time
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
+
+import httpx
 
 from d33d.config.catalogue import Catalogue
 from d33d.config.probes import CapabilityResult
@@ -154,6 +156,31 @@ RENDERER_PREFLIGHT_CACHE_SECONDS = 30.0
 #: The wall-clock bound on the ``docker info`` probe's ``subprocess.run``
 #: (issue #277: "a short timeout (≤ 5 s)").
 _PREFLIGHT_PROBE_TIMEOUT_S = 5.0
+
+#: The wall-clock bound (seconds) on the design loop's PRE-FLIGHT probes
+#: (issue #417): the ``docker info`` renderer check and the render-worker
+#: image check both run blocking ``subprocess.run`` calls off the event
+#: loop (``asyncio.to_thread``) — the subprocess has its own ``timeout``,
+#: but a probe that ignores it (or whose thread wedges in ``communicate``)
+#: would otherwise stall the whole run before any LLM call. A short
+#: named bound (30 s, below the per-attempt budget below) makes a hung
+#: pre-flight end with the same retryable :data:`RENDERER_UNAVAILABLE`
+#: result the OSError path already yields, instead of a silent stall.
+PREFLIGHT_PROBE_TIMEOUT_SECONDS = 30.0
+
+#: The design loop's per-attempt wall-clock deadline (issue #417), in
+#: seconds: ONE named constant, shared by the loop's ``attempt_timeout``
+#: default and the adapter (``d33d.design_loop_events`` imports it —
+#: previously a duplicate ``design_loop_events.DESIGN_LOOP_ATTEMPT_TIMEOUT_
+#: SECONDS`` name). The full two-tier timeout design (inner per-call
+#: bound vs this outer per-attempt deadline, and the adapter's safety
+#: net) is documented in one place:
+#: :func:`_await_with_per_attempt_deadline`. ``None`` (the seam) disables
+#: the deadline; any numeric value bounds it (the previous ``> 0`` guard
+#: is dropped — a 0-second budget is meaningless and would be a caller
+#: bug, and a negative one is likewise meaningless rather than a
+#: disable).
+DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS = 120.0
 
 #: The per-process cache of the last SUCCESSFUL pre-flight probe: a
 #: timestamp (``time.monotonic``) or ``None`` (never cached / reset).
@@ -370,7 +397,9 @@ class DesignResult:
     ``status`` is ``'pass'`` (a candidate passed every deterministic gate)
     or ``'exhausted'`` (the 3-iteration cap or the no-improvement stop fired
     without a full pass). ``best`` is the BEST-scoring candidate across all
-    iterations (never silently the last attempt); ``failure_reason`` is one
+    iterations (never silently the last attempt); ``None`` ONLY when the
+    per-attempt deadline cut the run off before any render — no candidate
+    exists rather than a fabricated placeholder. ``failure_reason`` is one
     of the structured classes in :data:`GATE_REASON_BITS` or a render-worker
     class — never free text.
 
@@ -384,15 +413,33 @@ class DesignResult:
     ``{"reason": "image_missing" | "label_mismatch", "expected"?,
     "actual"?, "rebuild_command"}`` — the terminal frame rides it verbatim
     (omit-not-null). ``None`` for every other outcome.
+
+    ``attempt_latencies`` (issue #417) carries the LOOP'S OWN measured
+    wall-clock seconds for the attempts it actually started (one entry per
+    STARTED attempt, in order), when a deadline-driven timeout cut the run
+    off mid-LLM-call: a killed attempt's time is the budget it burned
+    before the deadline fired, a completed one is its full duration. The
+    adapter's frame-derived ``AttemptTracker`` never sees a killed attempt
+    (no view frames arrive), so the loop's own clock is the only number
+    that exists in the primary slow-model case; ``None`` for every
+    non-deadline outcome (omit-not-null).
     """
 
     status: str
-    best: IterationRecord
+    best: IterationRecord | None
     iterations: tuple[IterationRecord, ...]
     failure_reason: str | None = None
     iterations_used: int = 0
+    #: The number of attempts the loop STARTED (issue #417) — including
+    #: the one killed mid-LLM-call — on a deadline-driven timeout. The
+    #: adapter's terminal frame and the failures.jsonl row carry this as
+    #: the slow-model copy's "after N tries" count. ``0`` for every
+    #: non-deadline outcome (omit-not-null: the adapter only reads it
+    #: when the reason is ``design_loop_timed_out``).
+    attempts_started: int = 0
     env_var: str | None = None
     renderer_detail: dict[str, str] | None = None
+    attempt_latencies: tuple[float, ...] | None = None
 
 
 #: Structured failure reasons for an exhausted loop, in bit order — each
@@ -1530,9 +1577,10 @@ def scad_looks_valid(scad: str) -> bool:
     and (3) contain at least one known OpenSCAD keyword
     (token-bounded). Prose that slipped past the fenced-JSON protocol
     (a chat response inside a fence, a refusal with a stray ``;``) fails
-    at least one leg; anything that fails is treated as empty SCAD so the
-    loop's empty_scad fail-fast path handles it — the render worker never
-    spends a run compiling garbage.
+    at least one leg. Both callers treat a reject as absent SCAD: the
+    loop's ``empty_scad`` fail-fast never spends a render run compiling
+    garbage, and the adapter's timeout-kept version gate (issue #417)
+    never persists a truncated stream as a version.
     """
     if ";" not in scad:
         return False
@@ -1694,11 +1742,50 @@ def _scad_from_result(result: LLMResult) -> str:
 # ---------------------------------------------------------------------------
 
 
-async def _call(fn: Any, *args: Any) -> Any:
-    """Invoke an injected callable that may be sync or async."""
+async def _call(
+    fn: Any, *args: Any, deadline_armed: bool = False
+) -> Any:
+    """Invoke an injected callable that may be sync or async.
+
+    An async callable is invoked in its OWN task (not awaited inline):
+    the loop's per-attempt deadline (issue #417) wraps the awaited
+    future with ``asyncio.wait_for``, and ``wait_for`` must be able to
+    CANCEL the in-flight call on expiry — an inline ``await`` leaves no
+    task to cancel, so the deadline would never fire for a hanging
+    coroutine.
+
+    A sync callable runs inline — UNLESS the deadline is armed
+    (``deadline_armed`` — issue #417 lens round 4: a blocking sync call
+    running inline on the event loop would make the per-attempt deadline
+    a no-op, stalling every other task on the loop for the call's full
+    duration). With the deadline armed, the sync call is dispatched to a
+    worker thread via ``asyncio.to_thread`` BEFORE the deadline awaits
+    it, so ``wait_for`` can actually bound it (the deadline's
+    ``CancelledError`` is swallowed — the loop treats it as any other
+    non-timeout exception; the worker thread cannot be killed mid-flight
+    and the call runs to completion in the background, the same
+    best-effort-cancellation contract as the async path).
+    """
+    if asyncio.iscoroutinefunction(fn):
+        return await asyncio.ensure_future(fn(*args))
+    if deadline_armed:
+        # The sync call runs in a worker thread (dispatched NOW — the
+        # deadline's ``wait_for`` gets an awaitable it can cancel at the
+        # deadline). A sync call that wedges raises nothing the deadline
+        # can use (``wait_for`` cancels the future, not the thread), so
+        # the loop's per-attempt deadline bounds the WALL CLOCK (the
+        # result the caller sees), and the worker thread's own lifetime
+        # is bounded separately (the render worker's subprocess timeout
+        # one level down in production). An exception in the sync call
+        # propagates out of ``to_thread`` unchanged (the original
+        # exception type — the deadline only converts its own
+        # ``TimeoutError``; see :func:`_await_with_per_attempt_deadline`).
+        return await asyncio.to_thread(fn, *args)
     result = fn(*args)
     if asyncio.iscoroutine(result):
-        result = await result
+        # A sync callable returning a coroutine (an async def called
+        # without await — not the production shape, but supported).
+        return await asyncio.ensure_future(result)
     return result
 
 
@@ -1728,6 +1815,7 @@ async def run_design_loop_async(
     on_progress_iteration: Any = "_current",
     renderer_check: Callable[[], bool] | None = None,
     image_check: Callable[[], dict[str, str] | None] | None = None,
+    attempt_timeout: float | None = DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS,
 ) -> DesignResult:
     """Run the bounded iterate-and-score design loop (async core).
 
@@ -1775,15 +1863,34 @@ async def run_design_loop_async(
     # so test harnesses default to "available" without shelling out; ``None``
     # runs the real probe.
     #
-    # The real probe shells out to ``docker info`` (blocking subprocess):
-    # run it off the event loop so a hung/slow daemon never stalls other
-    # SSE streams. An injected ``renderer_check`` is assumed to be a cheap
-    # test stub — a plain direct call keeps the stubs trivial (a sync
-    # zero-arg callable, no coroutine wiring needed). The image probe
-    # (issue #346) follows the same injectability convention: an injected
-    # ``image_check`` is a sync stub, the real probe runs off the loop.
+    # The real probes shell out to ``docker`` (blocking subprocess): run
+    # them off the event loop so a hung/slow daemon never stalls other SSE
+    # streams, and bound them with ``asyncio.wait_for`` (issue #417, the
+    # named :data:`PREFLIGHT_PROBE_TIMEOUT_SECONDS`): a probe that wedges
+    # (a daemon that ignores its own subprocess timeout) degrades to the
+    # SAME retryable :data:`RENDERER_UNAVAILABLE` result the OSError path
+    # yields, never a silent stall. An injected ``renderer_check`` /
+    # ``image_check`` is a cheap test stub — a plain direct call keeps the
+    # stubs trivial (a sync zero-arg callable, no coroutine wiring
+    # needed). The image probe (issue #346) follows the same injectability
+    # convention: an injected ``image_check`` is a sync stub, the real
+    # probe runs off the loop.
     if renderer_check is None:
-        renderer_ok = await asyncio.to_thread(renderer_is_available)
+        try:
+            renderer_ok = await asyncio.wait_for(
+                asyncio.to_thread(renderer_is_available),
+                timeout=PREFLIGHT_PROBE_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            # A pre-flight probe that wedges is a transient daemon fault:
+            # the SAME retryable renderer_unavailable result the OSError
+            # path yields — never a silent stall, never image_stale.
+            logger.debug(
+                "renderer pre-flight probe wedged past the %ss bound — "
+                "degrading this run to renderer_unavailable (retryable)",
+                PREFLIGHT_PROBE_TIMEOUT_SECONDS,
+            )
+            renderer_ok = False
     else:
         renderer_ok = renderer_check()
     if not renderer_ok:
@@ -1809,7 +1916,31 @@ async def run_design_loop_async(
     # The probe is injectable (``image_check``, ``None`` runs the real
     # probe) so the fast suite never shells out to real Docker.
     if image_check is None:
-        image_detail = await asyncio.to_thread(default_image_check)
+        try:
+            image_detail = await asyncio.wait_for(
+                asyncio.to_thread(default_image_check),
+                timeout=PREFLIGHT_PROBE_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            # A pre-flight image probe that wedges is a transient daemon
+            # fault: the SAME retryable renderer_unavailable result the
+            # OSError path yields — never a silent stall, never the
+            # terminal renderer_image_stale.
+            logger.debug(
+                "render-worker image pre-flight probe wedged past the %ss "
+                "bound — degrading this run to renderer_unavailable ("
+                "retryable), never renderer_image_stale",
+                PREFLIGHT_PROBE_TIMEOUT_SECONDS,
+            )
+            return DesignResult(
+                status="exhausted",
+                best=IterationRecord(
+                    iteration=0, scad_source="", render=None, score=None
+                ),
+                iterations=(),
+                failure_reason=RENDERER_UNAVAILABLE,
+                iterations_used=0,
+            )
     else:
         try:
             image_detail = image_check()
@@ -1846,10 +1977,33 @@ async def run_design_loop_async(
     prev_score: Score | None = None
     consecutive_no_improvement = 0
     iterations: list[IterationRecord] = []
+    # The loop's OWN per-attempt wall clock (issue #417): one
+    # ``time.monotonic()`` reading when the iteration's design LLM call
+    # STARTS, then the finished call's elapsed is appended exactly once
+    # per path — the call the per-attempt deadline bounds (the render
+    # that follows is bounded separately by the render worker). A killed
+    # attempt keeps the time it actually burned (the budget), a completed
+    # one its full duration; the deadline path hands this list to the
+    # result so the adapter's terminal frame and the failures.jsonl row
+    # carry the LOOP-SOURCED numbers, never the frame-derived ones (the
+    # frames never arrive for an attempt killed mid-LLM-call).
+    _attempt_latencies: list[float] = []
 
+    # The per-attempt wall-clock deadline (issue #417): each design
+    # iteration's LLM CALL gets its OWN budget (``attempt_timeout`` —
+    # production defaults it to
+    # :data:`DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS`, 120 s) so three slow
+    # attempts are never cut off by one flat total, and no single LLM
+    # call may hang forever. The loop OWNS this per-attempt LLM-call
+    # budget: on expiry it returns the best-so-far rendered candidate
+    # through the SAME result path an exhausted loop uses (a real,
+    # scored ``IterationRecord`` — never fabricated), and the adapter's
+    # derived total is a pure outer safety net (full design in
+    # :func:`_await_with_per_attempt_deadline`).
     for iteration in range(1, max_iterations + 1):
         _stamp_on_progress_iteration(on_progress, iteration)
-        scad = await _call(
+        _attempt_started = time.monotonic()
+        scad_co = _call(
             llm_fn,
             "design",
             _design_messages(
@@ -1867,7 +2021,45 @@ async def run_design_loop_async(
                 part_scale=part_scale,
             ),
             _design_system(stated_dims, part_scale),
+            deadline_armed=attempt_timeout is not None,
         )
+        _scad_or_result: LLMResult | DesignResult
+        if attempt_timeout is not None:
+            # The deadline can fire: ``_await_with_per_attempt_deadline``
+            # returns ``LLMResult`` on success, the best-so-far
+            # exhausted ``DesignResult`` on expiry (the loop's own
+            # per-attempt deadline — issue #417). The type union is
+            # handled just below: a ``DesignResult`` is the terminal
+            # result itself.
+            _scad_or_result = await _await_with_per_attempt_deadline(
+                scad_co,
+                timeout=attempt_timeout,
+                iteration=iteration,
+                on_timeout=lambda it=iterations, b=best, s=best_score: _exhausted(
+                    it, b, s, failure_reason="design_loop_timed_out"
+                ),
+            )
+        else:
+            # The deadline is disabled (the seam) — plain await; the
+            # result is unambiguously an ``LLMResult``.
+            _scad_or_result = await scad_co
+        if isinstance(_scad_or_result, DesignResult):
+            # The deadline (or the inner per-LLM-call timeout) fired
+            # mid-LLM-call: append the killed attempt's burned budget,
+            # then rebuild the (frozen) result carrying the loop's own
+            # measured numbers — attempt count + per-attempt latencies —
+            # and return it. The rebuild goes through
+            # ``dataclasses.replace`` (a fresh instance with the same
+            # fields, two of them overridden — frozen dataclasses refuse
+            # in-place assignment).
+            _attempt_latencies.append(time.monotonic() - _attempt_started)
+            return replace(
+                _scad_or_result,
+                attempt_latencies=tuple(_attempt_latencies),
+                attempts_started=len(_attempt_latencies),
+            )
+        scad = _scad_or_result
+        _attempt_latencies.append(time.monotonic() - _attempt_started)
         design_hash = scad.prompt_hash
         if log is not None:
             log("design", design_hash, scad.status)
@@ -2562,14 +2754,94 @@ def _container_error_stop(
     )
 
 
+async def _await_with_per_attempt_deadline(
+    scad_co: Any,
+    *,
+    timeout: float,
+    iteration: int,
+    on_timeout: Callable[[], DesignResult],
+) -> LLMResult | DesignResult:
+    """Await one design LLM call under the loop's per-attempt deadline
+    (issue #417) — THE single home for the design's two-tier timeout
+    model.
+
+    Two tiers bound a slow or hung design call, and both lead to the
+    same keep-best ``design_loop_timed_out`` result: the INNER per-call
+    bound (:data:`d33d.design_llm.LLM_CALL_TIMEOUT_SECONDS`, 120 s —
+    the httpx per-request timeout on the production edge; a slow model
+    trips it first and httpx raises its own
+    ``httpx.TimeoutException``) and this OUTER per-attempt deadline
+    (``asyncio.wait_for`` around the awaited call, whose timeout is the
+    same 120 s in production — so the inner bound always wins for a
+    slow call, and a truly hung one trips this deadline instead). On
+    expiry the run ends WITH the best-so-far rendered candidate
+    (``on_timeout`` builds the best-so-far exhausted result — the same
+    result path an exhausted loop uses, with the structured
+    ``design_loop_timed_out`` reason), never a fabricated empty result.
+
+    The budget is per ATTEMPT (never a flat whole-loop total), so three
+    slow attempts are not cut off by one flat lid, and no single LLM
+    call may hang forever. Cancellation is a best-effort interruption,
+    not a kill: the cancelled coroutine (and any ``to_thread`` worker
+    thread it awaited on — a different lifetime, bounded by the render
+    worker's own 120 s subprocess timeout one level down) may LINGER
+    until its task is collected; the deadline here does not wait for the
+    cancellation to finish, and must not.
+
+    The loop OWNS this per-attempt LLM-call budget; the render that
+    follows is bounded separately by the render worker's subprocess
+    timeout, and post-checks by their own logic. The adapter's deadline
+    (per-attempt budget × iteration cap + margin, in
+    ``d33d.design_loop_events``) is a pure OUTER SAFETY NET that fires
+    only for a run that stops yielding frames before the loop's own
+    deadline can.
+    """
+    try:
+        return await asyncio.wait_for(scad_co, timeout=timeout)
+    except httpx.TimeoutException:
+        # The INNER per-LLM-call bound fired (the full two-tier design
+        # is in the docstring above): it must lead to the SAME keep-best
+        # ``design_loop_timed_out`` result, not crash or exhaust (the
+        # bug issue #417 is about). Only the per-call timeout is caught:
+        # a cancellation (CancelledError) or a real error propagates
+        # unchanged.
+        logger.warning(
+            "design loop attempt %s hit the per-LLM-call timeout (%ss) — "
+            "returning the best-so-far candidate",
+            iteration,
+            timeout,
+        )
+        return on_timeout()
+    except TimeoutError:
+        logger.warning(
+            "design loop attempt %s exceeded the %ss per-attempt deadline "
+            "— returning the best-so-far candidate",
+            iteration,
+            timeout,
+        )
+        return on_timeout()
+
+
 def _exhausted(
     iterations: list[IterationRecord],
-    best: IterationRecord,
+    best: IterationRecord | None,
     best_score: Score | None,
+    failure_reason: str | None = None,
 ) -> DesignResult:
     """Build the exhaustion result: best-scoring candidate + a STRUCTURED
     failure reason (weakest gate bit of the best, never free text, never
     silently the last attempt).
+
+    ``best`` is ``None`` ONLY when the per-attempt deadline cut the run
+    off before any render (nothing rendered yet); the gate-bit
+    derivation needs a scored candidate and is skipped in that case.
+
+    ``failure_reason`` (issue #417) overrides the derived reason when the
+    exhaustion is deadline-driven (the per-attempt deadline fired mid-run
+    — the run's structured reason is the loop-level
+    ``design_loop_timed_out``, never a gate bit of the best candidate
+    which may have been a healthy render that simply didn't score a
+    pass): ``None`` (the default) keeps today's derivation.
 
     Issue #277: when the FIRST failing gate bit is bit 0
     (``error_class_not_ok``) and the best render carries a NON-"ok"
@@ -2581,24 +2853,25 @@ def _exhausted(
     is None``) and a best render with error_class "ok" keep today's
     behaviour.
     """
-    reason: str | None = None
-    if best_score is not None:
-        for bit, name in zip(best_score.bits, GATE_REASON_BITS):
-            if not bit:
-                reason = name
-                break
-    # Issue #277: when the FIRST failing gate bit is bit 0 (the generic
-    # ``error_class_not_ok``) and the best render carries a NON-"ok"
-    # error_class, swap in that specific class — never the generic name.
-    # A render-less record (``best.render is None``) keeps today's
-    # behaviour; a best render with error_class "ok" that fails a LATER
-    # gate keeps that gate's name.
-    if (
-        best.render is not None
-        and best.render.error_class != "ok"
-        and (reason is None or reason == GATE_REASON_BITS[0])
-    ):
-        reason = best.render.error_class
+    reason: str | None = failure_reason
+    if reason is None and best is not None:
+        if best_score is not None:
+            for bit, name in zip(best_score.bits, GATE_REASON_BITS):
+                if not bit:
+                    reason = name
+                    break
+        # Issue #277: when the FIRST failing gate bit is bit 0 (the generic
+        # ``error_class_not_ok``) and the best render carries a NON-"ok"
+        # error_class, swap in that specific class — never the generic name.
+        # A render-less record (``best.render is None``) keeps today's
+        # behaviour; a best render with error_class "ok" that fails a LATER
+        # gate keeps that gate's name.
+        if (
+            best.render is not None
+            and best.render.error_class != "ok"
+            and (reason is None or reason == GATE_REASON_BITS[0])
+        ):
+            reason = best.render.error_class
     return DesignResult(
         status="exhausted",
         best=best,

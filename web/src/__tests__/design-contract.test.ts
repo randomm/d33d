@@ -2073,7 +2073,12 @@ describe("design contract", () => {
     // copy names a second failure.
     expect((copy.failure as Record<string, unknown>).askInstead).toBeUndefined();
     for (const key of Object.keys(copy.failure.reasons)) {
-      const value = (copy.failure.reasons as unknown as Record<string, string>)[key];
+      const value = (copy.failure.reasons as unknown as Record<string, unknown>)[key];
+      // `reasons` is a closed string map (issue #417: the templated
+      // slow-model copy is a sibling key, `copy.failure.slowModelTimeout`,
+      // not an entry) — but guard the loop against a non-string value
+      // rather than assuming the type (the scan is a tripwire, not a cast).
+      if (typeof value !== "string") continue;
       expect(value).not.toMatch(/\btwice\b|\bsecond\b/i);
     }
   });

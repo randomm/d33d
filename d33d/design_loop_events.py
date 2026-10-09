@@ -33,6 +33,7 @@ import inspect
 import io
 import json
 import logging
+import math
 import re
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -41,13 +42,17 @@ from typing import Any
 from PIL import Image
 
 from d33d.design_loop import (
+    DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS,
+    MAX_ITERATIONS,
     MODEL_UNCONFIGURED,
     RENDERER_IMAGE_STALE,
     BboxInfo,
     _bbox_target,
     _gate_selection_extents,
+    scad_looks_valid,
 )
-from d33d.render_worker import VIEWS, RenderResult
+from d33d.loop_timeout import AttemptTracker, archive_deadline
+from d33d.render_worker import DEFAULT_TIMEOUT_S, VIEWS, RenderResult
 
 logger = logging.getLogger(__name__)
 
@@ -63,22 +68,46 @@ EMPTY_PHOTO_DATA_URI = (
     "SUVORK5CYII="
 )
 
-#: Total wall-clock deadline for ONE design-loop run, in seconds
-#: (issue #221). Measured from the start of the adapter generator (the
-#: start of the ``to_thread`` task), NOT per-frame or idle time: the
-#: guarantee is "the loop does not complete within a bounded time",
-#: matching the render worker's own bounded-subprocess model (``
-#: render_worker.run_container``'s 120s timeout) one level up. A stream
-#: that keeps emitting liveness frames (per-view progress, LLM tokens)
-#: while the loop itself never terminates MUST still be cut off, so the
-#: deadline is total, not idle. Must be read as a module-level constant
-#: inside the wait loop (so tests can ``monkeypatch.setattr`` it to a
-#: small value — the same pattern as ``versions_routes
-#: ._DRAIN_TIMEOUT_SECONDS``), never inlined.
-#: The client-side ``STREAM_TOTAL_TIMEOUT_MS`` (``web/src/lib/api.ts``)
-#: must exceed this with margin (240s > 180s) so the server's structured
-#: ``design_loop_timed_out`` frame normally arrives first.
-DESIGN_LOOP_TIMEOUT_SECONDS = 180.0
+#: Wall-clock deadline for the design loop's per-attempt LLM CALL (issue
+#: #417), in seconds — the single named constant
+#: :data:`d33d.design_loop.DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS` (120 s)
+#: imported into this module; the full two-tier timeout design is
+#: documented in one place:
+#: ``d33d.design_loop._await_with_per_attempt_deadline``. Must be read as
+#: a module-level constant inside the adapter's wait loop (so tests can
+#: ``monkeypatch.setattr`` it to a small value — the same pattern as
+#: ``versions_routes._DRAIN_TIMEOUT_SECONDS``), never inlined.
+
+#: The margin over the derived per-attempt worst-case total the adapter's
+#: OUTER SAFETY NET deadline adds (issue #417): 60 s of headroom so a
+#: legitimately slow run that the loop's own per-attempt deadline has
+#: already cut off (returning its best-so-far result through the ordinary
+#: exhaustion path) is never cut off twice by the adapter.
+ADAPTER_DEADLINE_MARGIN_SECONDS = 60.0
+
+#: The per-attempt render allowance in the adapter safety-net sizing
+#: (issue #417 lens round 3): the render worker's OWN subprocess timeout
+#: (:data:`d33d.render_worker.DEFAULT_TIMEOUT_S`, 120 s), imported — never
+#: re-literalised — so the net tracks the worker's real worst case. Each
+#: attempt's wall clock is its budgeted LLM call
+#: (:data:`DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS`) PLUS the render
+#: (``run_container``'s ``subprocess.run`` wall-clock timeout, bounded by
+#: ``DEFAULT_TIMEOUT_S``) plus post-checks, so the net is sized from
+#: (LLM budget + render allowance) × ``MAX_ITERATIONS`` + margin — the
+#: old LLM-only sizing (120 × 3 + 60 = 420 s) killed a legitimately
+#: slow, progressing run (LLM ~90 s + render ~60 s, × 3 = ~450 s) with
+#: NO version kept, the exact QA failure #417 exists to fix.
+ADAPTER_RENDER_ALLOWANCE_SECONDS = DEFAULT_TIMEOUT_S
+
+#: The adapter's OUTER SAFETY NET total deadline in seconds (issue
+#: #417): the per-attempt worst case (LLM budget + render allowance) ×
+#: ``MAX_ITERATIONS`` plus the fixed margin — (120 s + 120 s) × 3 + 60 s
+#: = 780 s. It stays below the client's ``STREAM_TOTAL_TIMEOUT_MS``
+#: (``web/src/lib/api.ts``, 840 s = 14 min) with a 60 s margin so the
+#: server's structured frame arrives before the client's generic
+#: "stream interrupted" kill. Read at call time (module-level name
+#: lookup, so tests can ``monkeypatch.setattr`` it to small values — the
+#: same pattern as the other constants).
 
 #: The distinct structured reason code for a deadline-triggered terminal
 #: error frame. Deliberately NOT the render-worker's ``"timeout"``
@@ -922,6 +951,51 @@ def _run_in_loop(coro: Any) -> Any:
     return asyncio.run(coro)
 
 
+def _slow_model_fields(
+    latencies: list[float] | None = None,
+    count: int = 0,
+) -> tuple[float | None, int]:
+    """Derive the slow-model copy's measured fields from the
+    per-attempt latencies and attempt count (issue #417).
+
+    ``latencies`` is the list of measured seconds (one per timed
+    attempt, in attempt order); ``count`` is the number of attempts
+    that started. Returns ``(mean_latency, count)`` where the mean is
+    the arithmetic mean of ``latencies`` rounded up to a whole second
+    (a killed attempt that burned 0.2 s reads as "about 1s an attempt",
+    never "about 0s"), or ``None`` when no latency was measured
+    (honest absence — the field is omitted, never fabricated). The
+    count is passed through (``0`` → omit). Both the adapter
+    safety-net deadline path and the loop's own timeout-version path
+    use this helper (no re-derivation).
+    """
+    _avg = sum(latencies) / len(latencies) if latencies else None
+    _ceil = math.ceil(_avg) if _avg is not None and _avg > 0 else None
+    return _ceil, count
+
+
+def _slow_model_frame(
+    latency: float | None,
+    count: int,
+    total_deadline: float,
+) -> dict[str, Any]:
+    """The terminal ``design_loop_timed_out`` error frame (the
+    slow-model copy: the measured mean latency + attempt count,
+    omit-not-null)."""
+    _error_data: dict[str, Any] = {
+        "message": (
+            "Design loop timed out after "
+            f"{int(total_deadline)}s"
+        ),
+        "reason": DESIGN_LOOP_TIMED_OUT_REASON,
+    }
+    if latency is not None:
+        _error_data["attempt_latency_seconds"] = int(latency)
+    if count > 0:
+        _error_data["attempt_count"] = count
+    return _error_data
+
+
 def _version_bbox_extents(result: Any) -> tuple[float, float, float] | None:
     """The best candidate's per-axis measured extents for persistence
     (issue #137), or ``None``.
@@ -1653,34 +1727,6 @@ async def _resolve_version_create(
     return int(version["id"])
 
 
-class _DeadlinedLoopResult:
-    """A synthetic exhausted ``DesignResult`` for the deadline-kill
-    archive (issue #396).
-
-    A whole-loop timeout (the ``run_design_loop_with_events`` deadline
-    cutting off a stalled loop) produces NO real loop result — the
-    loop never returned, so the hook the app wires at the loop seam
-    (``record_production_failure``) never sees it, and the timeout
-    would never reach ``failures.jsonl``. This stub carries just what
-    the hook reads (``status``, ``failure_reason``, ``best``) so the
-    deadline path can archive the stall with the loop-level
-    :data:`DESIGN_LOOP_TIMED_OUT_REASON` class and the best available
-    candidate text, never a fabricated full result.
-    """
-
-    status = "exhausted"
-    failure_reason = DESIGN_LOOP_TIMED_OUT_REASON
-
-    def __init__(self, scad: str = "") -> None:
-        self.scad_source = scad
-
-    @property
-    def best(self) -> Any:
-        # The hook reads ``best.scad_source`` for the archive row; a
-        # stall has no candidate of its own, so the row carries the
-        # last SCAD the loop's frames surfaced (``""`` when nothing
-        # rendered).
-        return self
 
 
 async def run_design_loop_with_events(
@@ -1734,6 +1780,14 @@ async def run_design_loop_with_events(
     # yielded while the render is still running (see the ``asyncio.wait``
     # below), not after it completes.
     _frame_queue: asyncio.Queue[tuple[str, dict[str, Any]] | None] = asyncio.Queue()
+    # The frame-derived attempt tracker (issue #417): assigned ONLY on
+    # the awaitable path (the ``to_thread`` wait loop owns it), and
+    # ``None`` on the sync path where no frames are drained — the
+    # timeout-version fallback below must guard against ``None`` (a
+    # sync stub loop returning a deadline-shaped result with no
+    # ``attempt_latencies`` would otherwise raise ``NameError``/
+    # ``AttributeError`` on the fallback).
+    _attempt_tracker: AttemptTracker | None = None
 
     run_loop = getattr(app.state, "run_design_loop", None)
     if run_loop is None:
@@ -1777,7 +1831,6 @@ async def run_design_loop_with_events(
         if kind not in ("view-start", "view-done"):
             return
         view = payload.get("view", "")
-        iteration = payload.get("iteration", 0)
         if not view:
             return
         step_name = (
@@ -1785,7 +1838,7 @@ async def run_design_loop_with_events(
         )
         _loop.call_soon_threadsafe(
             _frame_queue.put_nowait,
-            ("progress", {"step": step_name, "view": view, "iteration": iteration}),
+            ("progress", {"step": step_name, "view": view, "iteration": payload.get("iteration", 0)}),
         )
 
     yield ("progress", {"step": "design-loop-start"})
@@ -1804,6 +1857,12 @@ async def run_design_loop_with_events(
     # variant that DOES consume them would need to supply real callables
     # (the ``None`` placeholders are not a fallback — see the production
     # seam's ``render_fn=render_for_design_loop`` hardcode).
+    # ``attempt_timeout`` (issue #417) is the loop's per-attempt wall-clock
+    # deadline — a REAL kwarg the loop consumes (``run_design_loop_async``
+    # times each design LLM call against it and returns the best-so-far
+    # candidate on expiry). The production closure forwards it like
+    # every other kwarg; a stub seam that does not consume it simply
+    # ignores it (the ``**kwargs`` contract).
     #
     # ``request`` carries the CURRENT user's message (``user_message`` —
     # issue #97: the message used to be forwarded only as the
@@ -1844,6 +1903,11 @@ async def run_design_loop_with_events(
         )
         or request_text,
         "on_progress": _on_progress,
+        # Issue #417: the loop's per-attempt LLM-call deadline (full
+        # design in d33d.design_loop._await_with_per_attempt_deadline);
+        # this adapter's deadline below is a generous outer safety net
+        # only.
+        "attempt_timeout": DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS,
     }
 
     # The production closure (``_build_production_design_loop``) takes
@@ -2117,6 +2181,7 @@ async def run_design_loop_with_events(
             # asyncio.to_thread(...)`` hoarded them and delivered the whole
             # batch in a single instant at render completion).
             render_task = asyncio.ensure_future(asyncio.to_thread(_run_in_loop, raw))
+            _attempt_tracker = AttemptTracker(_loop, MAX_ITERATIONS)
             # The total wall-clock deadline (issue #221) — measured from
             # HERE (generator start, before the first drain), never
             # reset by incoming frames. The deadline must race against
@@ -2134,81 +2199,86 @@ async def run_design_loop_with_events(
             # here is logged and swallowed — the deadline frame is the
             # user-visible guarantee (the hook's errors-swallowed
             # contract elsewhere).
-            def _archive_deadline() -> None:
-                sink = getattr(app.state, "failures_jsonl_path", None)
-                if sink is None:
-                    return
-                try:
-                    from d33d.evals.failure_capture import (
-                        record_production_failure,
-                    )
 
-                    # The request text the loop was handed (the same
-                    # ``request`` kwarg the hook archives for
-                    # result-based failures); a blank request degrades
-                    # to the user's message.
-                    request = str(kwargs.get("request") or user_message or "")
-                    # The model id the app's production closure injects
-                    # for the hook (the ``model`` kwarg it pops before
-                    # the real loop runs — the hook archives it, the
-                    # loop never sees it): a bare-string id, an object
-                    # with a ``.model`` field, or ``None``.
-                    # Fallback: ``app.state.model_id`` — a plain
-                    # ``create_app`` without the closure (a test stub)
-                    # carries no ``model`` kwarg, so the archive reads
-                    # it from ``app.state`` instead (set by the test
-                    # harness; production always resolves the model via
-                    # the closure, so the kwarg path is the live one).
-                    raw_model = kwargs.get("model")
-                    model_id = getattr(raw_model, "model", None)
-                    if not isinstance(model_id, str) or not model_id:
-                        model_id = (
-                            raw_model
-                            if isinstance(raw_model, str) and raw_model
-                            else None
-                        )
-                    if not model_id:
-                        model_id = getattr(app.state, "model_id", None)
-                    if not model_id:
-                        # A row with an unidentifiable model is not
-                        # foldable — skip rather than fabricate an id
-                        # (the deadline frame still fires).
-                        logger.warning(
-                            "failures.jsonl deadline archive skipped for "
-                            "project %s: no model id available",
-                            project_id,
-                        )
-                        return
-                    # The last SCAD source the loop's frames have
-                    # surfaced (a token frame, on a pass, or a
-                    # progress frame carrying ``scad_source``) — the
-                    # stall has no result, so the best available
-                    # candidate text is ``""`` when nothing rendered.
-                    # Invariant: ``_last_scad_source`` is updated on
-                    # every yielded frame carrying a truthy
-                    # ``scad_source``, on both the ``get_nowait`` and
-                    # ``asyncio.wait`` paths; ``output_scad`` reads it
-                    # at deadline time.
-                    output_scad = _last_scad_source
-                    record_production_failure(
-                        design_result=_DeadlinedLoopResult(scad=output_scad),
-                        photo=photo,
-                        region_mark=kwargs.get("region_mark"),
-                        request=request,
-                        model=model_id,
-                        prompt_version="",
-                        output_scad=output_scad,
-                        path=sink,
-                    )
-                except Exception:
-                    logger.exception(
-                        "failures.jsonl deadline archive failed for "
-                        "project %s; emitting the timeout frame anyway",
-                        project_id,
-                    )
+            # The loop's OWN per-attempt deadline (issue #417 — full
+            # design in
+            # d33d.design_loop._await_with_per_attempt_deadline) does the
+            # actual cutting off for a slow model: ``run_design_loop_async``
+            # returns a best-so-far exhausted result with the structured
+            # ``design_loop_timed_out`` reason, and the ordinary
+            # exhaustion path below surfaces it (and version-creates the
+            # kept candidate when one rendered). This adapter deadline is
+            # a GENEROUS OUTER SAFETY NET — the per-attempt WORST case
+            # (the budgeted LLM call, ``DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS``,
+            # plus the render worker's own subprocess timeout,
+            # ``ADAPTER_RENDER_ALLOWANCE_SECONDS``, plus post-checks)
+            # times the iteration cap, plus a fixed margin, and below the
+            # client's ``STREAM_TOTAL_TIMEOUT_MS`` (web/src/lib/api.ts)
+            # with documented headroom — that fires only for a run that
+            # stops yielding frames before the loop's own deadline can
+            # (a thread stuck in a blocking call, not a slow model). A
+            # legitimately slow run that finishes within its budget is
+            # never cut off here.
+            _total_deadline = (
+                (DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS + ADAPTER_RENDER_ALLOWANCE_SECONDS)
+                * MAX_ITERATIONS
+                + ADAPTER_DEADLINE_MARGIN_SECONDS
+            )
+            _deadline = _loop.time() + _total_deadline
 
-            _last_scad_source: str = ""
-            _deadline = _loop.time() + DESIGN_LOOP_TIMEOUT_SECONDS
+            async def _deadline_outcome() -> list[tuple[str, dict[str, Any]]]:
+                """The adapter-deadline cut-off (issue #417): the OUTER
+                SAFETY NET — it fires only for a run that stopped
+                yielding frames before the loop's own per-attempt
+                deadline could (a thread stuck in a blocking call; a
+                slow model is handled by the loop, which returns its
+                best-so-far result through the ordinary exhaustion
+                path below). Archive the stall, then the terminal frames
+                in FINAL ORDER: [photo notice(s), terminal error].
+
+                The safety net does NOT create a version: it only
+                archives the stall and emits the terminal error frame.
+                The loop's own timeout-version path (the primary
+                slow-model path) is the sole version-creation point for
+                a timed-out run.
+
+                Returns the terminal frames (the caller yields them and
+                then cancels the ``to_thread`` task — the worker thread
+                cannot be killed mid-flight, so the cancel runs only
+                after the user-visible guarantee has been emitted).
+                """
+                _latencies = _attempt_tracker.latencies()
+                _attempt_count = _attempt_tracker.attempt_count
+                logger.warning(
+                    "design loop for project %s exceeded the %ss "
+                    "adapter safety-net deadline (per-attempt LLM %ss + "
+                    "render %ss, × %s attempts + %ss margin; measured %r "
+                    "s per attempt) — emitting terminal design_loop_timed_out "
+                    "frame",
+                    project_id,
+                    _total_deadline,
+                    DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS,
+                    ADAPTER_RENDER_ALLOWANCE_SECONDS,
+                    MAX_ITERATIONS,
+                    ADAPTER_DEADLINE_MARGIN_SECONDS,
+                    _latencies,
+                )
+                archive_deadline(
+                    app,
+                    project_id,
+                    kwargs=kwargs,
+                    photo=photo,
+                    attempt_tracker=_attempt_tracker,
+                    deadline_reason=DESIGN_LOOP_TIMED_OUT_REASON,
+                    attempt_count=_attempt_count,
+                    latencies=_latencies,
+                )
+                _latency, _count = _slow_model_fields(_latencies, _attempt_count)
+                _frames: list[tuple[str, dict[str, Any]]] = _yield_notice()
+                _frames.append(
+                    ("error", _slow_model_frame(_latency, _count, _total_deadline))
+                )
+                return _frames
             while True:
                 if render_task.done():
                     break
@@ -2217,9 +2287,7 @@ async def run_design_loop_with_events(
                 except asyncio.QueueEmpty:
                     _f = None
                 if _f is not None:
-                    _scad = _f[1].get("scad_source")
-                    if isinstance(_scad, str) and _scad:
-                        _last_scad_source = _scad
+                    _attempt_tracker.observe(_f)
                     yield _f
                     continue
                 _remaining = _deadline - _loop.time()
@@ -2228,29 +2296,7 @@ async def run_design_loop_with_events(
                     # structured error frame. No further frames may be
                     # yielded after this one (the deadline frame is
                     # terminal by contract).
-                    logger.warning(
-                        "design loop for project %s exceeded the %ss "
-                        "total deadline — emitting terminal "
-                        "design_loop_timed_out frame",
-                        project_id,
-                        DESIGN_LOOP_TIMEOUT_SECONDS,
-                    )
-                    _archive_deadline()
-                    _deadline_frames: list[tuple[str, dict[str, Any]]] = (
-                        _yield_notice()
-                    )
-                    _deadline_frames.append(
-                        (
-                            "error",
-                            {
-                                "message": (
-                                    "Design loop timed out after "
-                                    f"{int(DESIGN_LOOP_TIMEOUT_SECONDS)}s"
-                                ),
-                                "reason": DESIGN_LOOP_TIMED_OUT_REASON,
-                            },
-                        )
-                    )
+                    _deadline_frames = await _deadline_outcome()
                     for _f in _deadline_frames:
                         yield _f
                     # Cancel the ``to_thread`` render task AFTER the frame
@@ -2290,9 +2336,7 @@ async def run_design_loop_with_events(
                         # Sentinel: the render finished (the drain thread
                         # enqueued the ``None`` before the loop exited).
                         break
-                    _scad = _f[1].get("scad_source")
-                    if isinstance(_scad, str) and _scad:
-                        _last_scad_source = _scad
+                    _attempt_tracker.observe(_f)
                     yield _f
                     continue
                 _get_task.cancel()
@@ -2313,9 +2357,7 @@ async def run_design_loop_with_events(
                 if _f is None:
                     # Sentinel: stop the drain, take the result.
                     break
-                _scad = _f[1].get("scad_source")
-                if isinstance(_scad, str) and _scad:
-                    _last_scad_source = _scad
+                _attempt_tracker.observe(_f)
                 yield _f
             result = render_task.result()
         else:
@@ -2533,6 +2575,121 @@ async def run_design_loop_with_events(
         mismatches = _axis_mismatches(result)
         if mismatches is not None:
             error_data["mismatches"] = mismatches
+        # Issue #417 — the timeout-version path: when the loop's own
+        # per-attempt LLM-call deadline fired (full design in
+        # d33d.design_loop._await_with_per_attempt_deadline — a slow
+        # model hits it, the adapter's deadline below never does) and
+        # the loop kept a rendered best candidate
+        # (a real, scored ``IterationRecord`` — never unvalidated text),
+        # version it BEFORE the terminal error frame — the same
+        # frame order the adapter-deadline path uses (version-created
+        # before the error: the ticket's gate resolution). An
+        # exhausted loop's ``best`` is NOT versioned today (pass is the
+        # sole version trigger); this is the NEW timeout-version path
+        # that names it. Only a candidate that actually RENDRED is
+        # version-grade (``render`` not ``None`` — the synthetic
+        # pre-flight placeholder and fail-fast empty-scad records carry
+        # ``render=None``/empty SCAD and are never kept); with zero
+        # rendered candidates the run ends without a version. The
+        # structured ``design_loop_timed_out`` reason stays on the
+        # terminal error frame — the SPA renders the version and the
+        # slow-model copy (with the measured per-attempt latency the
+        # frame carries) together, failure first.
+        #
+        # The numbers are LOOP-SOURCED (issue #417): the loop owns the
+        # wall clock — ``result.attempts_started`` (the attempts it
+        # STARTED, including the one killed mid-LLM-call) and
+        # ``result.attempt_latencies`` (one measured value per started
+        # attempt; a killed attempt keeps the budget it burned, a
+        # completed one its full duration). The frame's
+        # ``attempt_latency_seconds`` is the MEAN of those values (the
+        # copy says "about Ns an attempt" — a mean, not a max, not a
+        # last). The frame-derived ``_attempt_tracker`` is only a
+        # FALLBACK for results that carry no loop-sourced numbers
+        # (non-deadline-shaped results, or a stub loop the loop's own
+        # deadline did not cut — the adapter safety-net path is the
+        # only other timeout path, and it builds its own frame).
+        _timeout_kept_version_id: int | None = None
+        if (
+            reason == DESIGN_LOOP_TIMED_OUT_REASON
+            and getattr(result, "status", None) == "exhausted"
+        ):
+            _kept_best = getattr(result, "best", None)
+            _kept_render = getattr(_kept_best, "render", None)
+            _kept_scad = getattr(_kept_best, "scad_source", None)
+            if (
+                _kept_best is not None
+                and _kept_render is not None
+                and isinstance(_kept_scad, str)
+                and _kept_scad.strip()
+                and scad_looks_valid(_kept_scad)
+            ):
+                try:
+                    _timeout_kept_version_id = await _resolve_version_create(
+                        app,
+                        project_id,
+                        result,
+                        user_message,
+                        stated_axes=stated_axes,
+                    )
+                except Exception:
+                    logger.exception(
+                        "timeout-kept version creation failed for "
+                        "project %s — emitting the timeout frame "
+                        "without a version",
+                        project_id,
+                    )
+                    _timeout_kept_version_id = None
+                # The slow-model copy's measured per-attempt latency
+                # ("about Ns an attempt" — the SPA renders it from the
+                # terminal frame's ``attempt_latency_seconds`` /
+                # ``attempt_count`` fields, both omit-not-null): the
+                # LOOP-SOURCED numbers above — the mean of the loop's
+                # own per-attempt wall clock, rounded up to a whole
+                # second (a killed attempt's 0.2 s burns read as
+                # "about 1s an attempt", never "about 0s"). Omitted
+                # when no attempt was measured (an unmeasured number
+                # would violate the SPA's "never render a number the
+                # SPA has not established" invariant).
+                _loop_latencies = getattr(result, "attempt_latencies", None)
+                _started = getattr(result, "attempts_started", None)
+                if not isinstance(_started, int) or _started <= 0:
+                    _started = len(_loop_latencies) if _loop_latencies else 0
+                _latency, _count = _slow_model_fields(
+                    _loop_latencies, _started
+                )
+                # Fallback: the frame-derived attempt tracker (the
+                # adapter safety-net path — see the comment above).
+                # Only exists on the awaitable path; a sync stub
+                # loop with no loop-sourced numbers falls through to
+                # omitting both fields (no fabricated numbers — the
+                # SPA never renders a number it has not established).
+                if _latency is None and _attempt_tracker is not None:
+                    _fallback_latency, _fallback_count = _slow_model_fields(
+                        _attempt_tracker.latencies(),
+                        _attempt_tracker.attempt_count,
+                    )
+                    _latency = _fallback_latency
+                    _count = _fallback_count
+                if _latency is not None:
+                    error_data["attempt_latency_seconds"] = _latency
+                if _count > 0:
+                    error_data["attempt_count"] = _count
+        # Frame order (issue #417 gate resolution): [photo notice(s),
+        # version-created (when the kept candidate was stored), terminal
+        # error] — the SAME order the adapter-deadline path uses, and the
+        # SPA handles it: the version-created frame refetches the
+        # timeline (the kept version appears in the Brief), then the
+        # terminal error renders the failure turn with the slow-model
+        # copy beside the version the frame just announced.
+        if _timeout_kept_version_id is not None:
+            yield (
+                "progress",
+                {
+                    "step": "version-created",
+                    "version_id": _timeout_kept_version_id,
+                },
+            )
         for _f in _yield_notice():
             yield _f
         yield ("error", error_data)
