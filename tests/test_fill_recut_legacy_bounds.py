@@ -12,6 +12,7 @@ stored part mesh (the committed ``part.stl`` under
 from __future__ import annotations
 
 import asyncio
+import itertools
 from pathlib import Path
 from typing import Any
 
@@ -268,6 +269,87 @@ def test_legacy_report_translated_part_center_hole_selects_true_center(app_with_
         f"expected the true-centre hole (160, 140), got: {offer}"
     )
     assert offer.get("diameter_mm") == 4.0, offer
+
+def test_legacy_report_empty_mesh_degrades_to_extents_fallback(
+    app_with_projects, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #414 (adversarial review): a legacy report whose stored mesh
+    loads with NO geometry (``mesh.bounds is None`` — the documented
+    empty-mesh case, e.g. an empty Scene from a degenerate STL) must
+    degrade to the extents/2 fallback — NOT crash the chat turn with an
+    uncaught ``TypeError`` from the ``lo, hi = mesh.bounds`` unpack.
+
+    The origin-anchored #396 shape (bbox 0..40 × 0..40, centre (20, 20))
+    keeps its extents/2 pick: the (10, 0) hole at 22.4 mm from the centre,
+    within the 30 mm match threshold."""
+    import struct
+
+    from d33d import part_mesh
+
+    def _empty_mesh(raw: bytes, fmt: str):
+        """A loadable mesh with ``bounds is None`` — the documented
+        empty-mesh case the ``_load_mesh_bounds`` docstring names."""
+
+        class _NoBounds:
+            bounds = None
+
+        return _NoBounds()
+
+    monkeypatch.setattr(part_mesh, "load_part_geometry", _empty_mesh)
+    # A 0-triangle binary STL (a real, non-empty file on disk — the
+    # fallback's mesh load is the only thing the test intercepts).
+    empty_stl = b"H" * 20 + struct.pack("<I", 0)
+    tmp = Path("/tmp") / f"legacy_empty_stl_{next(itertools.count())}.stl"
+    tmp.write_bytes(empty_stl)
+    try:
+        return _legacy_extents_fallback_case(app_with_projects, tmp)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _legacy_extents_fallback_case(app: Any, part_stl: Path):
+    """Shared body for the extents/2-fallback legacy cases: legacy report
+    (origin-anchored #396 shape) + committed part.stl → the extents/2
+    pick (the (10, 0) Ø30 hole, 22.4 mm from centre)."""
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "LegacyEmptyMesh"})
+        pid = r.json()["id"]
+        legacy_report = {
+            "hole_count": 3,
+            "holes": [
+                {"center": [0.0, 0.0, 5.0], "axis": [0.0, 0.0, 1.0], "diameter_mm": 10.0},
+                {"center": [-10.0, 0.0, 5.0], "axis": [0.0, 0.0, 1.0], "diameter_mm": 20.0},
+                {"center": [10.0, 0.0, 5.0], "axis": [0.0, 0.0, 1.0], "diameter_mm": 30.0},
+            ],
+            "bbox_file_units": [40.0, 40.0, 10.0],
+        }
+        _set_legacy_part(app, pid, legacy_report)
+        _commit_stl(app, pid, part_stl)
+        r2 = await client.post(
+            f"/api/projects/{pid}/chat", json={"message": "make the center hole 38 mm"}
+        )
+        source = app.state.event_sources.get(pid)
+        frames = []
+        assert source is not None
+        async for event, data in source:
+            frames.append((event, data))
+            if event in ("done", "error"):
+                break
+        svc = app.state.versions
+        return r2.status_code, frames, svc.get_pending_offer(pid)
+
+    status, frames, offer = _run_async(app, _call)
+    assert status == 202, status
+    # extents/2 (20, 20): the (10, 0) Ø30 hole is nearest (22.4 mm) —
+    # the extents/2 fallback pick must be made, not a crash or a
+    # no-match.
+    assert offer is not None, f"extents/2 fallback must still pick: {frames}"
+    assert list(offer.get("center", [])[:2]) == [10.0, 0.0], (
+        f"expected the extents/2 pick (10, 0), got: {offer}"
+    )
+    assert offer.get("diameter_mm") == 30.0, offer
+
 
 def test_legacy_report_missing_mesh_keeps_extents_fallback(app_with_projects) -> None:
     """Issue #414: a legacy report whose stored mesh is UNAVAILABLE (no

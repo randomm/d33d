@@ -37,73 +37,8 @@ from d33d.hole_select import (
     select_measured_hole,
 )
 from d33d.part_holes import HOLE_NOUNS, no_hole_reply, part_has_hole_evidence
+from d33d.part_mesh import PartUploadError
 from d33d.part_units import USABLE_UNIT_STATUSES
-
-
-def _stored_part_bounds_sync(app: Any, project_id: int) -> list[list[float]] | None:
-    """The synchronous (no-loop) form of :func:`stored_part_bounds_mm`
-    (issue #414, part 2): the stored part mesh's ``mesh.bounds`` in mm, or
-    ``None`` (3MF import, missing file, unloadable mesh, missing v1 row,
-    or a missing/non-positive scale — the caller keeps extents/2).
-
-    ``row`` and ``conn`` are the project's row and connection acquired on
-    the CALLING thread (the app's sqlite handle is thread-bound — a read
-    inside a worker thread would raise ``ProgrammingError``); :func:
-    ``_load_part_bounds_file_units`` does the (off-loop-able) trimesh load.
-    """
-    file_bounds = _load_part_bounds_file_units(app, project_id)
-    if file_bounds is None:
-        return None
-    return _scaled_part_bounds(file_bounds, _part_scale_factor(app, project_id))
-
-
-def _load_part_bounds_file_units(app: Any, project_id: int) -> list[list[float]] | None:
-    """The stored part mesh's ``mesh.bounds`` in FILE units (XY only) —
-    the mesh half of the issue #414 (part 2) legacy-report fallback.
-
-    Runs on the caller's thread (the app's sqlite handle is thread-bound,
-    so the v1-row read happens here, on the event-loop thread); the
-    async wrapper dispatches THIS function to a thread pool, but the
-    trimesh load itself is the only expensive step and is safe on a pool
-    thread once the row and part path are resolved.
-
-    ``None`` when the part is unavailable (a 3MF import, a missing file,
-    an unloadable mesh, a missing v1 row, or an unreadable row) — the
-    caller keeps extents/2.
-    """
-    from d33d.part_mesh import PartUploadError
-
-    try:
-        row, part_path = _resolve_stored_part(app, project_id)
-    except (sqlite3.Error, ValueError, OSError) as e:
-        # An unreadable row (``sqlite3.Error``/``ValueError``) or a
-        # vanished part file (``OSError``) degrades to the extents/2
-        # fallback — logged so a persistent degradation is greppable.
-        logger.warning(
-            "stored part bounds for project %s: row/part resolution "
-            "failed (%s) — caller keeps the extents/2 fallback",
-            project_id,
-            type(e).__name__,
-            exc_info=True,
-        )
-        return None
-    if row is None or part_path is None:
-        return None
-
-    try:
-        return _load_mesh_bounds(part_path, row.get("part_format"))
-    except (PartUploadError, OSError) as e:
-        # An unloadable mesh or unreadable file degrades to the extents/2
-        # fallback (3MF imports are not loadable here by design); logged
-        # so a persistent degradation is greppable.
-        logger.warning(
-            "stored part bounds for project %s: mesh load failed (%s) "
-            "— caller keeps the extents/2 fallback",
-            project_id,
-            type(e).__name__,
-            exc_info=True,
-        )
-        return None
 
 
 def stored_part_bounds_mm(app: Any, project_id: int) -> list[list[float]] | None:
@@ -113,21 +48,25 @@ def stored_part_bounds_mm(app: Any, project_id: int) -> list[list[float]] | None
     and ``bbox_file_units`` live in) scaled by ``part_scale`` to mm.
 
     ``fill_recut_turn`` is a sync function called synchronously from
-    ``d33d.projects.post_chat`` (on the event-loop thread). The project
-    row and the v1 part path are resolved ON the event-loop thread (the
-    app's sqlite handle is thread-bound); the trimesh load is then
-    dispatched off the loop via ``loop.run_in_executor`` (the
-    ``part_import`` pattern). When the mesh is unavailable (a 3MF import,
-    a missing file, an unloadable file, a missing v1 row, or a missing /
+    ``d33d.projects.post_chat`` (on the event-loop thread). EVERYTHING —
+    the project-row read, the v1 part-path resolution (the app's sqlite
+    handle is thread-bound — a read in a worker thread would raise
+    ``sqlite3.ProgrammingError``), and the trimesh load — runs on the
+    CALLING thread. The load is bounded by ``MAX_PART_UPLOAD_BYTES`` and
+    the face cap, so the brief block is the price of keeping the sqlite
+    access thread-safe; a ``run_in_executor`` dispatch would need the
+    row and path resolved first (the executor would still only offload
+    the load, and ``.result()`` on a failed future raises
+    ``InvalidStateError`` instead of the load's own exception — the
+    load's exceptions are handled here, in one place).
+
+    When the mesh is unavailable (a 3MF import, a missing file, an
+    unloadable file, an empty mesh, a missing v1 row, or a missing /
     non-positive scale) ``None`` is returned and the caller keeps the old
     extents/2 behaviour — never an error out of the chat route.
     """
-    import asyncio
-
-    from d33d.part_mesh import PartUploadError
-
     try:
-        row, part_path = _resolve_stored_part(app, project_id)
+        (row, part_path), factor = _resolve_stored_part(app, project_id)
     except (sqlite3.Error, ValueError, OSError) as e:
         # An unreadable row (``sqlite3.Error``/``ValueError``) or a
         # vanished part file (``OSError``) degrades to the extents/2
@@ -142,76 +81,62 @@ def stored_part_bounds_mm(app: Any, project_id: int) -> list[list[float]] | None
         return None
     if row is None or part_path is None:
         return None
-
-    def _load_mesh(path, fmt):
-        return _load_mesh_bounds(path, fmt)
-
     try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        # No running loop: load on this thread.
-        try:
-            file_bounds = _load_mesh(part_path, row.get("part_format"))
-        except (PartUploadError, OSError) as e:
-            logger.warning(
-                "stored part bounds for project %s: mesh load failed (%s) "
-                "— caller keeps the extents/2 fallback",
-                project_id,
-                type(e).__name__,
-                exc_info=True,
-            )
-            return None
-    else:
-        try:
-            file_bounds = loop.run_in_executor(
-                None, _load_mesh, part_path, row.get("part_format")
-            ).result()
-        except (PartUploadError, OSError, asyncio.InvalidStateError) as e:
-            # Executor failure (e.g. the file vanished between resolve and
-            # load) → sync retry below, then the extents/2 fallback.
-            logger.warning(
-                "stored part bounds for project %s: mesh load failed in "
-                "executor (%s) — retrying on this thread",
-                project_id,
-                type(e).__name__,
-                exc_info=True,
-            )
-            try:
-                file_bounds = _load_mesh(part_path, row.get("part_format"))
-            except (PartUploadError, OSError) as e2:
-                logger.warning(
-                    "stored part bounds for project %s: sync retry also "
-                    "failed (%s) — caller keeps the extents/2 fallback",
-                    project_id,
-                    type(e2).__name__,
-                    exc_info=True,
-                )
-                return None
-    return _scaled_part_bounds(file_bounds, _part_scale_factor(app, project_id))
+        file_bounds = _load_mesh_bounds(part_path, row.get("part_format"))
+    except (PartUploadError, OSError) as e:
+        # An unloadable mesh or unreadable file degrades to the extents/2
+        # fallback (3MF imports are not loadable here by design); logged
+        # so a persistent degradation is greppable.
+        logger.warning(
+            "stored part bounds for project %s: mesh load failed (%s) "
+            "— caller keeps the extents/2 fallback",
+            project_id,
+            type(e).__name__,
+            exc_info=True,
+        )
+        return None
+    if file_bounds is None:
+        return None
+    return _scaled_part_bounds(file_bounds, factor)
 
 
 def _resolve_stored_part(
     app: Any, project_id: int
-) -> tuple[dict[str, Any] | None, Any]:
-    """The project's row and its committed part file path, acquired on the
-    CALLING thread (the app's sqlite handle is thread-bound — a read inside
-    a worker thread would raise ``sqlite3.ProgrammingError``).
+) -> tuple[tuple[dict[str, Any] | None, Any], float]:
+    """The project's row, its committed part file path, and its
+    ``part_scale`` — ONE database read (the app's sqlite handle is
+    thread-bound — a read inside a worker thread would raise
+    ``sqlite3.ProgrammingError``), acquired on the CALLING thread.
 
-    ``(None, None)`` when the project row is absent, the project has no
-    committed part, or the part file is missing on disk. Raises
-    ``sqlite3.Error``/``ValueError`` (an unreadable row) or ``OSError``
-    (the file vanished) — the caller degrades to the extents/2 fallback.
+    Returns ``((row, part_path), factor)``: ``part_path is None`` when
+    the project has no committed part or the file is missing on disk;
+    ``factor`` is the ``part_scale`` as a positive float (``0.0`` for a
+    missing/non-numeric/non-positive value — the caller keeps extents/2).
+    Raises ``sqlite3.Error``/``ValueError`` (an unreadable row) or
+    ``OSError`` (the file vanished) — the caller degrades to the
+    extents/2 fallback.
     """
     row = app.state.conn.get_project(project_id)
     if row is None:
-        return None, None
+        return (row, None), 0.0
     from d33d.part_http import resolve_v1_part_path
 
     part_path, _repo_dir = resolve_v1_part_path(row, app.state.conn)
     if part_path is None or not part_path.exists():
-        return row, None
-    return row, part_path
+        return (row, None), _scale_factor(row)
+    return (row, part_path), _scale_factor(row)
 
+
+def _scale_factor(row: dict[str, Any]) -> float:
+    """The row's ``part_scale`` as a positive factor, or ``0.0``
+    (missing/non-numeric/non-positive) — the caller keeps extents/2.
+    """
+    scale = row.get("part_scale")
+    try:
+        factor = float(scale) if scale is not None else 0.0
+    except (TypeError, ValueError):
+        factor = 0.0
+    return factor if factor > 0 else 0.0
 
 
 def _load_mesh_bounds(part_path: Any, fmt: Any) -> list[list[float]] | None:
@@ -227,36 +152,16 @@ def _load_mesh_bounds(part_path: Any, fmt: Any) -> list[list[float]] | None:
 
     raw = read_part_file_atomic(part_path, MAX_PART_UPLOAD_BYTES)
     mesh = load_part_geometry(raw, fmt or "stl")
-    lo, hi = mesh.bounds
+    bounds = mesh.bounds
+    if bounds is None:
+        # A loadable mesh with no geometry (``bounds is None`` — the
+        # empty-mesh case the docstring names): nothing to centre on.
+        # Returning None (not raising) keeps the chat turn on the
+        # extents/2 fallback instead of an uncaught ``TypeError`` from
+        # the unpack.
+        return None
+    lo, hi = bounds
     return [[float(lo[0]), float(lo[1])], [float(hi[0]), float(hi[1])]]
-
-
-def _part_scale_factor(app: Any, project_id: int) -> float:
-    """The project's ``part_scale`` as a positive factor, or ``0.0``
-    (missing/non-numeric/non-positive) — the caller keeps extents/2.
-    """
-    try:
-        row = app.state.conn.get_project(project_id)
-    except (sqlite3.Error, ValueError) as e:
-        # A row that becomes unreadable between the resolution read and
-        # this read degrades to the extents/2 fallback; logged so a
-        # persistent degradation is greppable.
-        logger.warning(
-            "stored part bounds for project %s: scale read failed (%s) — "
-            "caller keeps the extents/2 fallback",
-            project_id,
-            type(e).__name__,
-            exc_info=True,
-        )
-        return 0.0
-    if row is None:
-        return 0.0
-    scale = row.get("part_scale")
-    try:
-        factor = float(scale) if scale is not None else 0.0
-    except (TypeError, ValueError):
-        factor = 0.0
-    return factor if factor > 0 else 0.0
 
 
 def _scaled_part_bounds(
