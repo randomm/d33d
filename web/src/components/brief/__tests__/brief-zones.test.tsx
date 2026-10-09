@@ -370,6 +370,31 @@ describe("BriefZones — part present (two zones)", () => {
     // The change rows are hidden (folded).
     expect(screen.queryByTestId("brief-row-p0")).toBeNull();
   });
+
+  it("part_width/part_depth/part_height param rows are never under 'Your changes' (issue #416, defect 2)", () => {
+    // The model emits `part_width` / `part_depth` / `part_height` params
+    // (the part's own W/D/H as named parameters). These are the part's own
+    // dimensions — they must NOT appear under "Your changes". They are
+    // excluded by `isPartRow` (the same rule that excludes literal W/D/H
+    // param rows).
+    const entries: DesignStateEntry[] = [
+      { name: "part_width", kind: "param", label: "Part width", value: 20, unit: "mm", provenance: "stated" },
+      { name: "part_depth", kind: "param", label: "Part depth", value: 20, unit: "mm", provenance: "stated" },
+      { name: "part_height", kind: "param", label: "Part height", value: 20, unit: "mm", provenance: "stated" },
+      stated("rod_bore", 34),
+    ];
+    render(<Brief {...baseProps} entries={entries} part={settledPart()} />);
+    // The part zone is present.
+    expect(screen.getByTestId("brief-zone-part-header")).toBeTruthy();
+    // The "Your changes" header is present (rod_bore is a change).
+    expect(screen.getByTestId("brief-zone-changes-header")).toBeTruthy();
+    // The part_width/part_depth/part_height rows are NOT rendered as change rows.
+    expect(screen.queryByTestId("brief-row-part_width")).toBeNull();
+    expect(screen.queryByTestId("brief-row-part_depth")).toBeNull();
+    expect(screen.queryByTestId("brief-row-part_height")).toBeNull();
+    // The rod_bore row IS rendered.
+    expect(screen.getByTestId("brief-row-rod_bore")).toBeTruthy();
+  });
 });
 
 describe("BriefZones — part block absent (part=null)", () => {

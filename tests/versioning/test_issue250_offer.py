@@ -486,6 +486,42 @@ def test_tier2_user_quoted_unmapped_number_offered():
     assert name == "lift_gap"
 
 
+def test_tier2_non_size_role_never_offered():
+    """Issue #416, defect 1: a param whose name or label names a non-size
+    role (cut_extension / overshoot / overhang / clearance) is NEVER
+    offered in tier 2, regardless of value match. The QA scenario:
+    an imported box with hole=5, params include cut_extension=5.0 and
+    hole_diameter=8.0; the user says "make the through-hole 8 mm" and
+    the quoted set is {5.0, 8.0} (5.0 from history, 8.0 from this turn).
+    The tier-2 selection must pick hole_diameter (the size param),
+    NEVER cut_extension (the non-size role)."""
+    from d33d.confirm_offer import select_offer_candidate
+
+    params = {"cut_extension": 5.0, "hole_diameter": 8.0}
+    meta = {
+        "cut_extension": {"label": "Cut extension beyond mesh", "unit": "mm"},
+        "hole_diameter": {"label": "Hole diameter", "unit": "mm"},
+    }
+    name = select_offer_candidate(
+        params, meta, None, set(), None, user_quoted_mm={5.0, 8.0}
+    )
+    assert name == "hole_diameter"
+    # When the ONLY matching param is a non-size role, tier 2 is empty
+    # and selection falls through to tier 3 (declared-axis order, else
+    # confirm_first) — the cut_extension param is never offered in tier 2.
+    name2 = select_offer_candidate(
+        {"cut_extension": 5.0},
+        {"cut_extension": {"label": "Cut extension beyond mesh", "unit": "mm"}},
+        None,
+        set(),
+        None,
+        user_quoted_mm={5.0},
+    )
+    # cut_extension has no declared axis → tier 3 falls to confirm_first,
+    # which is None → no offer.
+    assert name2 is None
+
+
 def test_tier2_empty_falls_through_to_tier3():
     """Tier 2 EMPTY (no user-quoted unmapped number matches an eligible
     param's value) falls through to tier 3 (the #250 order — declared-

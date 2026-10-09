@@ -276,6 +276,23 @@ def sanitize_dimension_phrase(
 
     result = _DIM_TRIPLE_RE.sub(_strip_triple, name)
     result = _DIM_MM_RE.sub(_strip_mm, result)
+    # Issue #416 (defect 3): a strip that removed an ``N mm`` phrase
+    # mid-name leaves a dangling preposition ("to" / "by" / "at") when
+    # the phrase was the preposition's object ("Bore center hole to 8 mm"
+    # → "Bore center hole to"). The preposition is dangling ONLY when the
+    # number after it was removed — a preposition whose object was kept
+    # ("Hole by 2 mm" with 2 matching the bbox → "Hole by 2 mm" unchanged)
+    # is never stripped. The lookahead checks that no digit immediately
+    # follows the preposition (the number was stripped) before removing
+    # the preposition; a number that was kept (the number matches the
+    # bbox) leaves a digit after the preposition, so the preposition is
+    # never stripped in that case.
+    if result != name:
+        result = re.sub(
+            r"\b(to|by|at)\s+(?![\d.])",
+            " ",
+            result,
+        )
     # A strip that removed a mid-name phrase leaves a dangling separator
     # ("Tray 60x45x20, rev 2" → "Tray , rev 2"): collapse a separator that
     # is stranded between two spaces before the whitespace re-collapse, so
