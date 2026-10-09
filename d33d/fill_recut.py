@@ -453,20 +453,21 @@ __all__ = [
 
 
 def __getattr__(name: str):
-    """Lazy re-export of ``fill_recut_turn`` (which lives in
-    :mod:`d33d.fill_recut_turn`).
+    """Lazy re-export of ``fill_recut_turn`` / ``fill_recut_turn_async``
+    (which live in :mod:`d33d.fill_recut_turn`).
 
     A top-level ``from d33d.fill_recut_turn import fill_recut_turn`` would
     be a circular import: ``fill_recut_turn`` imports the constants and
     helpers it uses FROM ``d33d.fill_recut``, so the two modules must not
     import each other at module load. PEP 562's module ``__getattr__``
-    re-exports ``fill_recut_turn`` lazily — ``d33d.projects.post_chat`` and
-    the tests do ``from d33d.fill_recut import fill_recut_turn`` and get the
-    same function object (``d33d.fill_recut_turn.fill_recut_turn``) without
-    the cycle.
+    re-exports both entry points lazily — ``d33d.projects.post_chat``
+    awaits ``d33d.fill_recut.fill_recut_turn_async`` (issue #414, part 3:
+    the legacy-report mesh load is awaited off the event loop) and the
+    tests call the sync ``fill_recut_turn``; both resolve to the same
+    function objects (``d33d.fill_recut_turn.*``) without the cycle.
     """
-    if name == "fill_recut_turn":
-        from d33d.fill_recut_turn import fill_recut_turn
+    if name in ("fill_recut_turn", "fill_recut_turn_async"):
+        from d33d import fill_recut_turn as _frt
 
-        return fill_recut_turn
+        return getattr(_frt, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

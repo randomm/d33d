@@ -17,7 +17,6 @@ This module pins the fix:
 from __future__ import annotations
 
 import json
-import threading
 from pathlib import Path
 from typing import Any
 
@@ -118,50 +117,74 @@ def app_paths(tmp_path: Path) -> dict[str, Path]:
     }
 
 
-def test_legacy_mesh_load_runs_off_the_loop_thread(
+def test_legacy_mesh_load_does_not_block_the_event_loop(
     app_with_projects, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The mesh load must NOT run on the event-loop thread.
+    """Issue #414 (adversarial review): the mesh load must not block the
+    EVENT LOOP. A thread + join (``threading.Event.wait``) on the calling
+    thread is a FAKE fix — the load goes off the loop's thread but the
+    loop's thread still waits the whole time. This test proves the loop
+    STAYS RESPONSIVE: a concurrent coroutine ticks every 10 ms while a
+    legacy fill-recut turn runs, and a patched ``_load_mesh_bounds``
+    sleeps 0.5 s. If the loop is blocked, the ticker makes no progress
+    during the load; if the load is genuinely off the loop
+    (``await asyncio.to_thread`` in the async caller), the ticker keeps
+    ticking through the whole 0.5 s.
 
-    A spy on ``_load_mesh_bounds`` records ``threading.current_thread()``
-    at call time; the caller records its own thread before invoking
-    ``fill_recut_turn``. The two must be DIFFERENT threads — the load
-    went through ``asyncio.to_thread`` (the default executor), not
-    straight onto the loop."""
+    This replaces the thread-identity test as the responsiveness pin:
+    thread identity alone cannot distinguish "the loop waits on a worker"
+    (blocked) from "the loop awaits a future" (responsive)."""
     import asyncio
+    import time
 
     stl = _make_stl()
     original_load = frt._load_mesh_bounds
-    worker_threads: list[threading.Thread] = []
-    loop_thread: list[threading.Thread] = []
 
-    def _spy_load(part_path: Any, fmt: Any):
-        worker_threads.append(threading.current_thread())
+    def _slow_load(part_path: Any, fmt: Any):
+        time.sleep(0.5)  # simulate a slow (large) mesh parse
         return original_load(part_path, fmt)
 
-    monkeypatch.setattr(frt, "_load_mesh_bounds", _spy_load)
+    monkeypatch.setattr(frt, "_load_mesh_bounds", _slow_load)
 
     async def _turn():
         conn = app_with_projects.state.conn
-        pid = conn.create_project(name="OffLoop")
+        pid = conn.create_project(name="Ticker")
         _set_legacy_part(app_with_projects, pid, _legacy_report())
         _commit_stl(app_with_projects, pid, stl)
-        loop_thread.append(threading.current_thread())
-        frt.fill_recut_turn(app_with_projects, pid, "make the center hole 8 mm")
+
+        ticks = 0
+        load_running = False
+
+        async def _ticker():
+            nonlocal ticks
+            while load_running:
+                ticks += 1
+                await asyncio.sleep(0.01)
+
+        ticker = asyncio.create_task(_ticker())
+        load_running = True
+        await frt.fill_recut_turn_async(app_with_projects, pid, "make the center hole 8 mm")
+        load_running = False
+        await asyncio.sleep(0.0)  # let the ticker finish its final sleep
+        ticker.cancel()
+        try:
+            await ticker
+        except asyncio.CancelledError:
+            pass
+        return ticks
 
     async def _run():
         async with app_with_projects.router.lifespan_context(app_with_projects):
-            await _turn()
+            return await _turn()
 
-    asyncio.run(_run())
-    assert worker_threads, "the mesh load did not run"
-    assert loop_thread, "the caller thread was not recorded"
-    assert any(
-        w is not lt for w, lt in zip(worker_threads, loop_thread)
-    ), (
-        "the mesh load ran on the event-loop (caller) thread — it must be "
-        f"dispatched via asyncio.to_thread. worker={worker_threads!r} "
-        f"loop={loop_thread!r}"
+    ticks = asyncio.run(_run())
+    # The load slept 0.5 s; a responsive loop ticks ~every 10 ms, so the
+    # ticker must make progress DURING the load (at least a few ticks).
+    # A blocked loop (thread + join / Event.wait) makes ZERO progress.
+    assert ticks > 3, (
+        f"the event loop was blocked during the mesh load — only {ticks} "
+        f"ticker ticks in ~0.5 s (a responsive loop makes ~50). The load "
+        "must be awaited via asyncio.to_thread, not thread+join."
     )
 
 

@@ -5,8 +5,9 @@ the turn-level logic that ``d33d.fill_recut`` re-exports (``fill_recut``
 keeps the trigger, the boundary copy, the offer instruction, and the
 module-level regexes/word sets; the heavier per-turn handler lives here so
 the offer module stays under its size budget). ``d33d.projects.post_chat``
-calls it (via the ``d33d.fill_recut.fill_recut_turn`` re-export) after the
-missing-source check and BEFORE the #250 offer / question pre-routes.
+awaits :func:`fill_recut_turn_async` (via the ``d33d.fill_recut`` re-export)
+after the missing-source check and BEFORE the #250 offer / question
+pre-routes.
 """
 
 from __future__ import annotations
@@ -15,7 +16,6 @@ import asyncio
 import json
 import logging
 import sqlite3
-import threading
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -119,19 +119,18 @@ def cache_stored_part_bounds(
         )
 
 
-def load_mesh_bounds_sync(app: Any, project_id: int) -> list[list[float]] | None:
+async def load_mesh_bounds_async(app: Any, project_id: int) -> list[list[float]] | None:
     """The LEGACY-report fallback for :func:`d33d.hole_select.report_bounds_mm`
     — the stored part mesh's ``mesh.bounds`` (in FILE units, the same
     space the stored holes and ``bbox_file_units`` live in).
 
     Issue #414 (part 3): the row + part path resolve HERE, on the
-    calling thread (sqlite is thread-bound), and ONLY the mesh load —
-    up to ``MAX_PART_UPLOAD_BYTES`` / 2 M faces — goes off the loop.
-    In an async context the load is dispatched through the loop's
-    executor (``run_in_executor`` — the same executor ``asyncio.to_thread``
-    uses) and awaited on a private worker thread, so the event loop is
-    never blocked; in a sync context (no running loop — the tests) the
-    load runs directly, bounded as before.
+    calling (event-loop) thread (sqlite is thread-bound), and ONLY the
+    mesh load — up to ``MAX_PART_UPLOAD_BYTES`` / 2 M faces — goes off
+    the loop via ``asyncio.to_thread``, AWAITED on the loop, so the loop
+    keeps serving other requests for the whole load (a thread + join on
+    the calling thread would block the loop for the whole load — the
+    reviewer's fake fix; ``asyncio.to_thread`` is the real one).
 
     On success the file bounds are CACHED into the stored part report
     (:func:`cache_stored_part_bounds`), so a second turn takes
@@ -146,7 +145,9 @@ def load_mesh_bounds_sync(app: Any, project_id: int) -> list[list[float]] | None
     if row is None or part_path is None or factor <= 0:
         return None
     try:
-        file_bounds = _run_mesh_load(part_path, row.get("part_format"))
+        file_bounds = await asyncio.to_thread(
+            _load_mesh_bounds, part_path, row.get("part_format")
+        )
     except (PartUploadError, OSError) as e:
         # An unloadable mesh or unreadable file degrades to the extents/2
         # fallback (3MF imports are not loadable here by design); logged
@@ -165,32 +166,29 @@ def load_mesh_bounds_sync(app: Any, project_id: int) -> list[list[float]] | None
     return file_bounds
 
 
-def _run_mesh_load(part_path: Any, fmt: Any) -> list[list[float]] | None:
-    """``_load_mesh_bounds`` — dispatched off the loop via the running
-    loop's executor when a loop is running (the ``post_chat`` case; the
-    executor is exactly what ``asyncio.to_thread`` uses, and the caller
-    is synchronous code ON the loop, so the wait happens on a private
-    worker thread while the loop keeps serving), or directly otherwise
-    (the sync/test case — the load is bounded, so the brief direct block
-    is the documented degradation)."""
+def _load_mesh_bounds_direct(app: Any, project_id: int) -> list[list[float]] | None:
+    """The sync-path legacy mesh bounds load (the tests): resolve the row
+    + part path on the calling thread, load the mesh DIRECTLY (bounded —
+    a large mesh briefly blocks the caller, the documented degradation
+    for the non-async path), and cache the result on success."""
+    row, part_path, factor = _resolve_stored_part(app, project_id)
+    if row is None or part_path is None or factor <= 0:
+        return None
     try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return _load_mesh_bounds(part_path, fmt)
-    result: list[list[float]] | None = None
-    done = threading.Event()
-
-    def _worker() -> None:
-        nonlocal result
-        try:
-            result = _load_mesh_bounds(part_path, fmt)
-        finally:
-            done.set()
-
-    t = threading.Thread(target=_worker, daemon=True)
-    t.start()
-    done.wait()
-    return result
+        file_bounds = _load_mesh_bounds(part_path, row.get("part_format"))
+    except (PartUploadError, OSError) as e:
+        logger.warning(
+            "stored part bounds for project %s: mesh load failed (%s) "
+            "— caller keeps the extents/2 fallback",
+            project_id,
+            type(e).__name__,
+            exc_info=True,
+        )
+        return None
+    if file_bounds is None:
+        return None
+    cache_stored_part_bounds(app, project_id, file_bounds)
+    return file_bounds
 
 
 def _load_mesh_bounds(part_path: Any, fmt: Any) -> list[list[float]] | None:
@@ -244,48 +242,16 @@ def _scale_factor(row: dict[str, Any]) -> float:
     return factor if factor > 0 else 0.0
 
 
-def _scale_factor(row: dict[str, Any]) -> float:
-    """The row's ``part_scale`` as a positive factor, or ``0.0``
-    (missing/non-numeric/non-positive) — the caller keeps extents/2."""
-    scale = row.get("part_scale")
-    try:
-        factor = float(scale) if scale is not None else 0.0
-    except (TypeError, ValueError):
-        factor = 0.0
-    return factor if factor > 0 else 0.0
-
-
-def fill_recut_turn(
-    app: Any, project_id: int, message: str
+async def _fill_recut_turn_impl(
+    app: Any, project_id: int, message: str, *, async_load: bool
 ) -> dict[str, Any] | None:
-    """The fill-and-recut pre-route's ONE entry point for ONE chat turn
-    (issue #332's sub-issue 3). Called by ``d33d.projects.post_chat``
-    AFTER the missing-source check and BEFORE the #250 offer / question
-    pre-routes (the unsettled-part guard runs first, upstream).
+    """The shared body of :func:`fill_recut_turn` / :func:`fill_recut_turn_async`.
 
-    Returns ``{"kind": "answer", "answer": <sentence>, "run_loop": bool,
-    "outcome": "fresh_offer" | "decline" | "accept" | "no_feature" | "no_match"}``
-    when the turn is handled here (the caller registers the sentence as a
-    ``kind: "answer"`` done frame — and, when ``run_loop`` is True, runs
-    the design loop with the ``instruction`` field appended to the
-    request text), else ``None`` (fall-through to the existing routes).
-
-    The ``outcome`` discriminator is the SAME contract the region-edit
-    seam's :func:`d33d.fill_recut_region.fill_recut_region_edit` returns:
-    the caller keys OFF ``outcome`` — the done frame's ``fill_recut_offer``
-    flag (the SPA's [Yes, do that] / [Leave it] buttons) is set ONLY for
-    ``fresh_offer``; a clean ``decline`` re-emitting it would re-render
-    the buttons for an offer that no longer exists.
-
-    Handled cases: a LIVE fill-recut offer (``kind: "fill_recut"``
-    pending, server-side state) — a clean "yes" clears the offer and
-    runs the loop with the explicit fill-and-recut instruction; a clean
-    "no" clears it and replies quietly; anything else supersedes the
-    offer and re-evaluates this message as a fresh turn; and a fresh
-    trigger on an assumed/settled part — the boundary sentence plus the
-    offer recorded server-side (``kind: "fill_recut"``), or the honest
-    no-hole reply for a hole-family noun with explicit
-    ``hole_count == 0`` (issue #351).
+    ``async_load`` selects the legacy-report mesh-bounds path: ``True``
+    awaits :func:`load_mesh_bounds_async` (``asyncio.to_thread`` on the
+    event loop — the async chat route); ``False`` loads the mesh directly
+    on the calling thread (the sync tests; bounded, the documented
+    degradation for a non-async caller).
     """
     from d33d.part_http import part_public
 
@@ -395,15 +361,24 @@ def fill_recut_turn(
                         # imports predate the fix). Derive the bounds from
                         # the project's stored part mesh: ``mesh.bounds``
                         # (in FILE units — the same space the holes live
-                        # in) scaled by the part's scale. The load runs
-                        # OFF the event loop and is cached into the
-                        # stored report (``load_mesh_bounds_sync``), so
-                        # it happens once per legacy project. When the
-                        # stored mesh is unavailable (a 3MF import, a
-                        # missing file), keep the old extents/2 behaviour
-                        # (the origin-anchored special case).
-                        file_bounds = load_mesh_bounds_sync(app, project_id)
-                        bounds_mm = _scaled_part_bounds(file_bounds, _scale_factor(row)) if file_bounds else None
+                        # in) scaled by the part's scale. The load is
+                        # AWAITED off the event loop (``asyncio.to_thread``
+                        # via ``load_mesh_bounds_async`` in the async path
+                        # — the sync path loads directly, bounded) and is
+                        # cached into the stored report, so it happens
+                        # once per legacy project. When the stored mesh is
+                        # unavailable (a 3MF import, a missing file), keep
+                        # the old extents/2 behaviour (the origin-anchored
+                        # special case).
+                        if async_load:
+                            file_bounds = await load_mesh_bounds_async(app, project_id)
+                        else:
+                            file_bounds = _load_mesh_bounds_direct(app, project_id)
+                        bounds_mm = (
+                            _scaled_part_bounds(file_bounds, _scale_factor(row))
+                            if file_bounds
+                            else None
+                        )
                     if isinstance(report, dict):
                         bbox_fu = report.get("bbox_file_units")
                         # Guard the scale and bbox arithmetic against
@@ -484,6 +459,66 @@ def fill_recut_turn(
     return None
 
 
+async def fill_recut_turn_async(
+    app: Any, project_id: int, message: str
+) -> dict[str, Any] | None:
+    """The ASYNC entry point for ONE fill-and-recut chat turn — the one
+    the async ``d33d.projects.post_chat`` handler awaits (issue #414,
+    part 3): the ONLY difference from :func:`fill_recut_turn` is that the
+    legacy-report mesh bounds load (:func:`load_mesh_bounds_async` —
+    ``await asyncio.to_thread`` on the stored part mesh) is AWAITED on
+    the event loop, so a slow mesh parse never blocks the loop. The
+    result is cached into the stored part report by the loader, so a
+    second turn takes the direct ``report_bounds_mm`` path.
+
+    The synchronous :func:`fill_recut_turn` keeps a direct (bounded)
+    mesh load for non-async callers — the tests — and is NOT used by the
+    chat route.
+
+    Returns the same ``{"kind": "answer", ...}`` dict (or ``None``)
+    as :func:`fill_recut_turn`.
+    """
+    return await _fill_recut_turn_impl(
+        app, project_id, message, async_load=True
+    )
+
+
+def fill_recut_turn(
+    app: Any, project_id: int, message: str
+) -> dict[str, Any] | None:
+    """The SYNCHRONOUS entry point for ONE fill-and-recut chat turn —
+    for non-async callers (the tests). The async chat route
+    (``d33d.projects.post_chat``) awaits :func:`fill_recut_turn_async`.
+
+    Delegates to the shared :func:`_fill_recut_turn_impl` with
+    ``async_load=False``: the legacy-report mesh bounds load is done
+    DIRECTLY on the calling thread (the ``async_load=False`` branch never
+    reaches its ``await``), so a synchronous caller can drive the coroutine
+    to completion without a running loop. All other behaviour — the LIVE
+    offer, clean yes/no, the fresh trigger, hole selection, and the
+    no-match / point-at / fresh-offer replies — is identical to
+    :func:`fill_recut_turn_async`.
+
+    Returns ``{"kind": "answer", "answer": <sentence>, "run_loop": bool,
+    "outcome": "fresh_offer" | "decline" | "accept" | "no_feature" | "no_match"}``
+    when the turn is handled here, else ``None`` (fall-through to the
+    existing routes).
+    """
+    coro = _fill_recut_turn_impl(app, project_id, message, async_load=False)
+    # Drive the coroutine synchronously. The ``async_load=False`` branch
+    # never executes an ``await`` (the mesh loads directly), so the
+    # coroutine runs to completion on the first send without needing a
+    # running loop. (If it somehow did suspend — it cannot on this path —
+    # ``next`` would raise StopIteration-free and the caller would see a
+    # coroutine; but the direct-load branch is terminal.)
+    try:
+        coro.send(None)
+    except StopIteration as stop:
+        return stop.value
+    return None  # pragma: no cover — unreachable on the sync path
+
+
 __all__ = [
     "fill_recut_turn",
+    "fill_recut_turn_async",
 ]

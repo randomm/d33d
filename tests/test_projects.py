@@ -1663,7 +1663,7 @@ def test_fill_recut_turn_failure_releases_inflight_flag(app_with_projects, monke
     def _boom_turn(*args, **kwargs):
         raise RuntimeError("forced fill-recut pre-route failure (test)")
 
-    monkeypatch.setattr(_fr, "fill_recut_turn", _boom_turn)
+    monkeypatch.setattr(_fr, "fill_recut_turn_async", _boom_turn)
     app_with_projects.state.answer_question = None
 
     async def _call(client):
