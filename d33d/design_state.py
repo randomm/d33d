@@ -512,6 +512,21 @@ def state_block_from_params(
 #: ``unknown``), never silently becomes ``stated``/``measured``.
 AXIS_PARAM_NAMES: tuple[str, str, str] = ("W", "D", "H")
 
+#: The literal parameter names that name a W/D/H dimension WITHOUT a
+#: model-declared axis (issue #416, defect 2): ``part_width`` / ``part_depth``
+#: / ``part_height`` (the model's own naming for the part's own W/D/H) —
+#: these map to their axis the same way a literal ``W``/``D``/``H`` name does,
+#: so ``_dedupe_agreeing_param_rows`` can collapse them into their axis row
+#: when they agree with the measured extent.
+#: The mapping is a closed set — never inferred from name substrings.
+#: (The same three names are also checked inline in ``BriefZones.tsx``
+#: ``isPartRow`` — keep both in sync if a new naming variant is added.)
+_PART_DIM_NAME_TO_AXIS: dict[str, str] = {
+    "part_width": "W",
+    "part_depth": "D",
+    "part_height": "H",
+}
+
 
 def persisted_bbox_extents(measurement: Any) -> tuple[float, float, float] | None:
     """The per-axis extents to compare stated values against, or ``None``
@@ -910,6 +925,12 @@ def _dedupe_agreeing_param_rows(
         axis = e.get("axis")
         if axis not in AXIS_PARAM_NAMES:
             axis = e.get("name")
+        if axis not in AXIS_PARAM_NAMES:
+            # Issue #416 (defect 2): a ``part_width`` / ``part_depth`` /
+            # ``part_height`` param (the model's own W/D/H name) maps to its
+            # axis via the closed name table — the same path a literal
+            # ``W``/``D``/``H`` name takes, so the collapse can fire.
+            axis = _PART_DIM_NAME_TO_AXIS.get(e.get("name", ""))
         if axis not in AXIS_PARAM_NAMES:
             continue
         value = e.get("value")

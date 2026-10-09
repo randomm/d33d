@@ -111,6 +111,22 @@ __all__ = [
     "validate_confirm_first",
 ]
 
+def _is_non_size_role(entry: dict[str, Any]) -> bool:
+    """True when the param's name or label names a non-size role (issue
+    #416, defect 1: "a cut-extension/overshoot parameter is never a
+    user-stated size"). The check is on a closed set of role keywords
+    (lower-cased substring match against the param name and label) —
+    never inferred from unit, value, or axis."""
+    non_size_keywords = ("extension", "overshoot", "overhang", "clearance")
+    for field in (entry.get("name", ""), entry.get("label", "")):
+        if not isinstance(field, str):
+            continue
+        lowered = field.lower()
+        if any(kw in lowered for kw in non_size_keywords):
+            return True
+    return False
+
+
 def _is_number(value: Any) -> bool:
     """True for int/float (bool is excluded — it is not a measurement)."""
     return isinstance(value, (int, float)) and not isinstance(value, bool)
@@ -310,8 +326,13 @@ def select_offer_candidate(
                 return entry["name"]
     if user_quoted_mm is not None and user_quoted_mm:
         # Tier 2: a value that equals (±1e-6) a user-quoted unmapped mm
-        # number (declaration order).
+        # number (declaration order). Issue #416 (defect 1): a param
+        # whose role does not fit (a cut-extension / overshoot param —
+        # a non-size role) is never a user-stated size and is never
+        # offered in tier 2, regardless of value match.
         for entry in eligible:
+            if _is_non_size_role(entry):
+                continue
             value = entry.get("value")
             if _is_number(value) and any(
                 abs(float(value) - n) <= CONFIRMED_VALUE_TOLERANCE

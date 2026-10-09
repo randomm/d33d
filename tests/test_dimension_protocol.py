@@ -989,6 +989,43 @@ class TestOfferTierSignals:
         assert released is None
         assert quoted == set()
 
+    def test_tier2_qa_scenario_stale_5mm_not_offered(self):
+        """Issue #416, defect 1: after "the hole was 5 mm" (unmapped 5.0)
+        and then "make the through-hole 8 mm" (unmapped 8.0), the quoted
+        set contains both 5.0 and 8.0. The 5.0 is from an earlier message
+        and is a feature size (hole diameter) — it must NOT be matched
+        against a non-size parameter (cut extension / overshoot) in the
+        tier-2 offer. The 8.0 is the current turn's value and is the
+        correct quote for the hole-diameter param.
+
+        This test verifies the quoted set contains both values (the helper
+        is correct); the role filter that prevents 5.0 from matching a
+        non-size param lives in confirm_offer.select_offer_candidate
+        (issue #416, defect 1 — the role filter is a separate concern
+        from the quoted-set computation)."""
+        released, quoted = offer_tier_signals(
+            "make the through-hole 8 mm",
+            ["the hole was 5 mm"],
+        )
+        assert released is None
+        # Both 5.0 (from history) and 8.0 (from current turn) are unmapped
+        # — the helper returns both. The role filter in select_offer_candidate
+        # prevents 5.0 from matching a non-size param.
+        assert quoted == {5.0, 8.0}
+
+    def test_tier2_superseded_value_not_in_quoted(self):
+        """Issue #416, defect 1 (supersession): after "the hole was 5 mm"
+        and then "make it 5 mm tall" (which maps 5.0 to H), the 5.0 is
+        no longer eligible — the user has restated it, so it is mapped
+        and excluded from the quoted set."""
+        released, quoted = offer_tier_signals(
+            "make it 5 mm tall",
+            ["the hole was 5 mm"],
+        )
+        assert released is None
+        # 5.0 is mapped by the newer message → not in the quoted set.
+        assert quoted == set()
+
 
 class TestNewestWinsPerAxis:
     """Issue #369: per axis, the NEWEST explicit stated value wins; a

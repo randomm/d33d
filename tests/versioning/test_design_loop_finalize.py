@@ -697,6 +697,55 @@ def test_name_sanitization_strip_leaves_no_dangling_separator():
     )
 
 
+def test_name_sanitization_strip_leaves_no_dangling_preposition():
+    """Issue #416, defect 3: when an ``N mm`` phrase is stripped from a
+    version name, the dangling preposition ("to" / "by" / "at") that was
+    the number's introducer must also be removed. The three QA examples:
+
+    - "Bore center hole to 8 mm" with bbox 20×20×20 (8 does not match any
+      extent) → the "8 mm" is stripped, leaving "Bore center hole to" —
+      the dangling "to" is also removed → "Bore center hole".
+    - "Bore to 8 mm" → "Bore" (the "to" is dangling, removed).
+    - "Through-hole to 8 mm" → "Through-hole" (the "to" is dangling).
+
+    The edge case: "Hole by 2 mm" with bbox 20×20×2 (2 matches the H
+    extent) → the "2 mm" is KEPT, so "by" is not dangling and the name
+    is unchanged. The preposition is only removed when the number was
+    actually stripped (the lookahead checks for a digit after the
+    preposition — a kept number leaves a digit, so the preposition is
+    never removed in that case).
+    """
+    from d33d.versions import sanitize_dimension_phrase
+
+    # QA example 1: "Bore center hole to 8 mm" → "Bore center hole"
+    assert (
+        sanitize_dimension_phrase(
+            "Bore center hole to 8 mm", (20.0, 20.0, 20.0)
+        )
+        == "Bore center hole"
+    )
+    # QA example 2: "Bore to 8 mm" → "Bore"
+    assert sanitize_dimension_phrase("Bore to 8 mm", (20.0, 20.0, 20.0)) == "Bore"
+    # QA example 3: "Through-hole to 8 mm" → "Through-hole"
+    assert (
+        sanitize_dimension_phrase("Through-hole to 8 mm", (20.0, 20.0, 20.0))
+        == "Through-hole"
+    )
+    # Edge case: number matches bbox → kept, preposition is not dangling.
+    assert (
+        sanitize_dimension_phrase("Hole by 2 mm", (20.0, 20.0, 2.0))
+        == "Hole by 2 mm"
+    )
+    # Edge case: a legitimate preposition in a name with NO mm phrase to
+    # strip is never touched (the strip is gated on "a dimension was
+    # actually removed" — "Bore at the end" has no mm to strip, so the
+    # "at" is not dangling and is never stripped).
+    assert (
+        sanitize_dimension_phrase("Bore at the end", (20.0, 20.0, 20.0))
+        == "Bore at the end"
+    )
+
+
 # ---------------------------------------------------------------------------
 # (3) The design loop is injected (DI seam)
 # ---------------------------------------------------------------------------
