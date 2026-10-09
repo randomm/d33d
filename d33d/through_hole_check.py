@@ -348,7 +348,27 @@ def route_through_hole_repair(
             genus,
         )
         return None
-    return (evidence, THROUGH_HOLE_INSTRUCTION)
+    return (evidence, _instruction_with_span(THROUGH_HOLE_INSTRUCTION, stl))
+
+
+def _instruction_with_span(instruction: str, stl: str | None) -> str:
+    """Issue #432: append the measured part z-span to the repair instruction,
+    so the next attempt cuts a solid that reaches past both faces by a known
+    margin. Abstains to the bare instruction when the STL cannot be read."""
+    if not isinstance(stl, str) or not stl:
+        return instruction
+    try:
+        import trimesh
+
+        zmin, zmax = (float(v) for v in trimesh.load(stl, process=False, force="mesh").bounds[:, 2])
+    except (OSError, ValueError, RuntimeError, TypeError, IndexError):
+        return instruction
+    thickness = zmax - zmin
+    return (
+        f"{instruction} Measured: the part is {thickness:g} mm thick "
+        f"(z {zmin:g} to {zmax:g} mm); the cutting solid must span z "
+        f"{zmin - 1:g} to {zmax + 1:g} mm (1 mm past each face)."
+    )
 
 
 def through_hole_check(

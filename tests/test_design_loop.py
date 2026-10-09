@@ -2939,7 +2939,8 @@ def test_screw_clearance_undersize_at_cap_returns_best_effort():
     result = _run_screw_loop(llm, "a 60 × 45 mm plate with an M4 hole")
     assert result.status == "exhausted"
     assert result.iterations_used == MAX_ITERATIONS == 3
-    assert result.failure_reason is None
+    # Issue #432: the undersize hole is now a loop-level reason, not a gate bit.
+    assert result.failure_reason == "screw_clearance_wrong"
     for iteration in result.iterations:
         assert iteration.failure_class == "geometrically_wrong"
         assert iteration.repair is not None
@@ -3127,7 +3128,9 @@ def test_through_hole_pocket_request_fails_geometrically_wrong(tmp_path):
     # The all-green candidate does NOT pass: the post-check routes the
     # repair and the loop takes the repair iterations within the cap.
     assert result.status == "exhausted"
-    assert result.iterations_used == MAX_ITERATIONS == 3
+    # Issue #432: the scripted pocket is identical on every attempt, so the
+    # identical-repair stop ends the loop after attempt 2.
+    assert result.iterations_used == 2
     first = result.iterations[0]
     # All five gate bits green (genus is not a gate bit) yet the
     # structured repair fired.
@@ -3137,6 +3140,11 @@ def test_through_hole_pocket_request_fails_geometrically_wrong(tmp_path):
     assert first.repair["failure_class"] == "geometrically_wrong"
     assert "full thickness" in first.repair["instruction"]
     assert "does not pass" in first.repair["instruction"]
+    # Issue #432: the measured span rides the instruction, and the terminal
+    # reason is the loop-level through_hole_missing (not the generic message).
+    assert "Measured: the part is" in first.repair["instruction"]
+    assert result.failure_reason == "through_hole_missing"
+    assert first.repair["reason"] == "through_hole_missing"
 
 
 def test_through_hole_through_mesh_passes(tmp_path):
@@ -4246,7 +4254,8 @@ def test_unchanged_mesh_v100_repro_fires_geometrically_wrong(tmp_path):
     # repair and the loop exhausts (the scripted model repeats the
     # unchanged mesh to the cap).
     assert result.status == "exhausted"
-    assert result.iterations_used == MAX_ITERATIONS == 3
+    # Issue #432: the identical mesh repeats, so the loop stops after 2.
+    assert result.iterations_used == 2
     first = result.iterations[0]
     # All five gate bits green (the mesh IS the parent — a valid render)
     # yet the structured repair fired.

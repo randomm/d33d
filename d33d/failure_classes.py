@@ -53,6 +53,25 @@ from d33d.render_diagnostics import (
 from d33d.render_diagnostics import (
     unknown_variables as _unknown_variables,
 )
+from d33d.unchanged_mesh_check import MESH_UNCHANGED_REASON
+
+# Issue #432: loop-level reasons for the deterministic post-checks. Each
+# rides the existing ``geometrically_wrong`` class on the iteration's repair
+# (no new class, no new error_class); the repair dict carries the reason so
+# ``_exhausted`` can surface it when the loop gives up on that check.
+THROUGH_HOLE_REASON = "through_hole_missing"
+SCREW_CLEARANCE_REASON = "screw_clearance_wrong"
+STACK_HEIGHT_REASON = "stack_height_mismatch"
+
+#: Every post-check repair reason the loop surfaces as a terminal reason.
+POST_CHECK_REASONS: frozenset[str] = frozenset(
+    {
+        MESH_UNCHANGED_REASON,
+        THROUGH_HOLE_REASON,
+        SCREW_CLEARANCE_REASON,
+        STACK_HEIGHT_REASON,
+    }
+)
 
 # ---------------------------------------------------------------------------
 # Failure class enum

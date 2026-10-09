@@ -60,6 +60,10 @@ const LOOP_FAILURE_REASONS = [
   // (geometry fingerprint identical) exhausted without the change
   // taking; the terminal frame carries `reason: "mesh_unchanged"`.
   "mesh_unchanged",
+  // Issue #432: the post-check reasons (each has its own copy sentence).
+  "through_hole_missing",
+  "screw_clearance_wrong",
+  "stack_height_mismatch",
 ];
 
 const CLOSED_SET = [...GATE_REASON_BITS, ...ERROR_CLASSES, ...LOOP_FAILURE_REASONS];

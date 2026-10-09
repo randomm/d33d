@@ -70,7 +70,11 @@ from d33d.config.probes import CapabilityResult
 from d33d.config.resolve import resolve_model
 from d33d.design_llm import LLMResult, send
 from d33d.failure_classes import (
+    POST_CHECK_REASONS,
     REPAIRABLE_CLASSES,
+    SCREW_CLEARANCE_REASON,
+    STACK_HEIGHT_REASON,
+    THROUGH_HOLE_REASON,
     ClassifiedFailure,
     classify_failure,
     detect_magic_numbers,
@@ -1201,6 +1205,20 @@ def _unchanged_mesh_post_check(
     )
 
 
+def _render_fingerprint(stl: str | None) -> tuple[str, int] | None:
+    """Issue #432: the geometry fingerprint of one candidate's rendered STL,
+    used by the identical-repair stop (the same fingerprint the unchanged-mesh
+    check compares). ``None`` abstains (no STL, or an unreadable mesh)."""
+    from d33d.unchanged_mesh_check import _load_mesh, mesh_fingerprint
+
+    if not isinstance(stl, str) or not stl:
+        return None
+    mesh = _load_mesh(stl)
+    if mesh is None:
+        return None
+    return mesh_fingerprint(mesh)
+
+
 def _stack_height_post_check(
     scad_source: str,
     measured_z: float | None,
@@ -2014,6 +2032,9 @@ async def run_design_loop_async(
     best: IterationRecord | None = None
     best_score: Score | None = None
     prev_score: Score | None = None
+    # Issue #432: the previous iteration's post-check (reason, fingerprint)
+    # — a repeat of the same post-check on an identical mesh stops the loop.
+    prev_post: tuple[str, tuple[str, int]] | None = None
     consecutive_no_improvement = 0
     iterations: list[IterationRecord] = []
     # The loop's OWN per-attempt wall clock (issue #417): one
@@ -2318,6 +2339,7 @@ async def run_design_loop_async(
                         "instruction": _instr,
                         "scad_source": scad_source,
                         "evidence": _evidence,
+                        "reason": SCREW_CLEARANCE_REASON,
                     }
                     _screw_repair_fired = True
 
@@ -2355,6 +2377,7 @@ async def run_design_loop_async(
                     "instruction": _instruction,
                     "scad_source": scad_source,
                     "evidence": _evidence,
+                    "reason": THROUGH_HOLE_REASON,
                 }
                 _through_repair_fired = True
 
@@ -2399,7 +2422,12 @@ async def run_design_loop_async(
                     from d33d.stack_height_check import STACK_HEIGHT_INSTRUCTION
 
                     _stack_repair = directive.to_dict()
-                    _stack_repair["instruction"] = STACK_HEIGHT_INSTRUCTION
+                    _stack_repair["instruction"] = (
+                        f"The declared stack sums to {_declared:g} mm but the "
+                        f"part renders {_measured:g} mm tall. "
+                        f"{STACK_HEIGHT_INSTRUCTION}"
+                    )
+                    _stack_repair["reason"] = STACK_HEIGHT_REASON
                     next_repair = _stack_repair
                     _stack_repair_fired = True
 
@@ -2448,6 +2476,24 @@ async def run_design_loop_async(
                 }
                 _unchanged_repair_fired = True
 
+        # Issue #432: identical-repair stop. A post-check repair whose
+        # rendered mesh equals the PREVIOUS iteration's (same post-check
+        # reason) cannot move — stop after this attempt instead of repairing
+        # to an identical mesh until the budget runs out.
+        _post_reason = (
+            next_repair.get("reason") if isinstance(next_repair, dict) else None
+        )
+        _repeat_post_check = False
+        if _post_reason in POST_CHECK_REASONS:
+            _post_fp = await asyncio.to_thread(_render_fingerprint, render.stl)
+            if _post_fp is not None:
+                _repeat_post_check = prev_post == (_post_reason, _post_fp)
+                prev_post = (_post_reason, _post_fp)
+            else:
+                prev_post = None
+        else:
+            prev_post = None
+
         record = IterationRecord(
             iteration=iteration,
             scad_source=scad_source,
@@ -2494,6 +2540,9 @@ async def run_design_loop_async(
         # reaches this check (it ``continue``s before any render call).
         if render.error_class == "container_error":
             return _container_error_stop(iterations, best)
+
+        if _repeat_post_check:
+            return _exhausted(iterations, best, best_score)
 
         repair = next_repair
         if consecutive_no_improvement >= NO_IMPROVEMENT_LIMIT:
@@ -2980,10 +3029,15 @@ def _exhausted(
         # ``failure_reason`` override (the per-attempt deadline, issue #417)
         # wins — it is already set here, so this swap only fires when the
         # derivation found no reason at all.
+        # Issue #432: the same rule for the through-hole, screw-clearance and
+        # stack-height post-checks — each carries its own reason on the repair.
         if reason is None:
             _repair = getattr(best, "repair", None)
-            if isinstance(_repair, dict) and _repair.get("reason") == MESH_UNCHANGED_REASON:
-                reason = MESH_UNCHANGED_REASON
+            _repair_reason = (
+                _repair.get("reason") if isinstance(_repair, dict) else None
+            )
+            if _repair_reason in POST_CHECK_REASONS:
+                reason = _repair_reason
     return DesignResult(
         status="exhausted",
         best=best,

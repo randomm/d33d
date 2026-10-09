@@ -294,6 +294,29 @@ def test_hooked_loop_unchanged_mesh_exhaustion_archives_line(tmp_path: Path):
     assert "mesh_unchanged" in LOOP_LEVEL_FAILURE_REASONS
 
 
+@pytest.mark.parametrize(
+    "reason",
+    ["through_hole_missing", "screw_clearance_wrong", "stack_height_mismatch"],
+)
+def test_hooked_post_check_exhaustion_archives_line(tmp_path: Path, reason: str):
+    """Issue #432: an exhausted post-check result (through-hole, screw-clearance
+    or stack-height) archives a row under its own loop-level reason."""
+    out = tmp_path / "failures.jsonl"
+    event = record_production_failure(
+        design_result=_exhausted_result(reason),
+        request="four 4 mm holes through the corners",
+        model="model-x",
+        prompt_version="deadbeef",
+        output_scad="cube();",
+        path=out,
+    )
+    assert event is not None
+    assert event.failure_class == reason
+    events = read_failure_events(out)
+    assert [e.failure_class for e in events] == [reason]
+    assert reason in LOOP_LEVEL_FAILURE_REASONS
+
+
 def test_hook_rejects_unknown_failure_class(tmp_path: Path):
     """A ``failure_reason`` outside the closed enum is a hard error —
     the hook raises ``ValueError`` and appends NOTHING (no silent
