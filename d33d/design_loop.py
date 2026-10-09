@@ -2481,6 +2481,9 @@ async def run_design_loop_async(
         # where a solid was named). Runs last in the post-check chain; a
         # fired earlier repair suppresses it. Rides ``geometrically_wrong``
         # and the #432 loop-level reason ``hollow_solid``.
+        # ``part_scale is None``: a scaled-import part is skipped by design —
+        # its STL is the imported model's, not the requested solid, so the
+        # volume ratio is not a fair signal for it (stated in the PR body).
         _hollow_repair_fired = False
         if (
             render.error_class == "ok"
