@@ -43,6 +43,31 @@ from d33d.part_holes import HOLE_NOUNS, no_hole_reply, part_has_hole_evidence
 from d33d.part_mesh import PartUploadError
 from d33d.part_units import USABLE_UNIT_STATUSES
 
+#: The off-loop legacy mesh load bound (issue #414, round 2): the stored
+#: part mesh (up to ``MAX_PART_UPLOAD_BYTES`` / 2 M faces) is loaded via
+#: ``asyncio.wait_for(asyncio.to_thread(...), timeout)`` so a pathological
+#: parse cannot hold the turn open indefinitely. NOTE: ``to_thread`` runs
+#: in a worker thread that is NOT cancellable — on timeout the loop stops
+#: WAITING for the result (the turn degrades to the extents/2 fallback)
+#: while the worker thread keeps running until the load finishes.
+LEGACY_BOUNDS_LOAD_TIMEOUT_SECONDS = 20.0
+
+#: The realistic exception set of a mesh load (issue #414, round 2):
+#: ``PartUploadError`` / ``OSError`` from the read, ``ValueError`` / ``IndexError`` / ``KeyError`` /
+#: ``AttributeError`` / ``TypeError`` from ``load_part_geometry`` on
+#: exotic files (e.g. a 3MF ``Scene`` ``to_mesh()`` raising). Caught so a
+#: load failure degrades to the extents/2 fallback with a logged warning
+#: instead of 500-ing the chat route.
+_MESH_LOAD_ERRORS: tuple[type[BaseException], ...] = (
+    PartUploadError,
+    OSError,
+    ValueError,
+    TypeError,
+    AttributeError,
+    IndexError,
+    KeyError,
+)
+
 
 def _resolve_stored_part(app: Any, project_id: int) -> tuple[Any, Any, float]:
     """The legacy fallback's project row, committed part file path, and
@@ -119,6 +144,69 @@ def cache_stored_part_bounds(
         )
 
 
+def _load_and_cache_mesh_bounds_sync(
+    app: Any,
+    project_id: int,
+    part_path: Any,
+    row: dict[str, Any],
+) -> list[list[float]] | None:
+    """The SYNC (direct) load step of the shared resolve → guard → load
+    → cache sequence (issue #414, round 2): load the mesh directly on
+    the calling thread, catching the full realistic mesh-load exception
+    set, and cache the file bounds on success. The async path's load
+    step is :func:`_load_and_cache_mesh_bounds_async` — same sequence,
+    the load injected as an awaited, bounded off-loop load."""
+    try:
+        file_bounds = _load_mesh_bounds(part_path, row.get("part_format"))
+    except _MESH_LOAD_ERRORS as e:
+        logger.warning(
+            "stored part bounds for project %s: mesh load failed (%s) "
+            "— caller keeps the extents/2 fallback",
+            project_id,
+            type(e).__name__,
+            exc_info=True,
+        )
+        return None
+    if file_bounds is None:
+        return None
+    cache_stored_part_bounds(app, project_id, file_bounds)
+    return file_bounds
+
+
+async def _load_and_cache_mesh_bounds_async(
+    app: Any,
+    project_id: int,
+    part_path: Any,
+    row: dict[str, Any],
+) -> list[list[float]] | None:
+    """The ASYNC (off-loop, bounded) load step of the shared sequence
+    (issue #414, round 2): ``wait_for(to_thread(_load_mesh_bounds),
+    timeout)`` — the worker thread is NOT cancellable (on timeout the
+    loop stops waiting and the turn degrades to the extents/2 fallback;
+    the thread keeps running until the load finishes). Caches the file
+    bounds on success; the cache write itself runs on the loop.
+    Shared by :func:`load_mesh_bounds_async` and
+    :func:`_resolve_legacy_bounds_async` so the load step has ONE home."""
+    try:
+        file_bounds = await asyncio.wait_for(
+            asyncio.to_thread(_load_mesh_bounds, part_path, row.get("part_format")),
+            timeout=LEGACY_BOUNDS_LOAD_TIMEOUT_SECONDS,
+        )
+    except _MESH_LOAD_ERRORS as e:
+        logger.warning(
+            "stored part bounds for project %s: mesh load failed (%s) "
+            "— caller keeps the extents/2 fallback",
+            project_id,
+            type(e).__name__,
+            exc_info=True,
+        )
+        return None
+    if file_bounds is None:
+        return None
+    cache_stored_part_bounds(app, project_id, file_bounds)
+    return file_bounds
+
+
 async def load_mesh_bounds_async(app: Any, project_id: int) -> list[list[float]] | None:
     """The LEGACY-report fallback for :func:`d33d.hole_select.report_bounds_mm`
     — the stored part mesh's ``mesh.bounds`` (in FILE units, the same
@@ -127,10 +215,16 @@ async def load_mesh_bounds_async(app: Any, project_id: int) -> list[list[float]]
     Issue #414 (part 3): the row + part path resolve HERE, on the
     calling (event-loop) thread (sqlite is thread-bound), and ONLY the
     mesh load — up to ``MAX_PART_UPLOAD_BYTES`` / 2 M faces — goes off
-    the loop via ``asyncio.to_thread``, AWAITED on the loop, so the loop
-    keeps serving other requests for the whole load (a thread + join on
-    the calling thread would block the loop for the whole load — the
-    reviewer's fake fix; ``asyncio.to_thread`` is the real one).
+    the loop via ``asyncio.wait_for(asyncio.to_thread(...), timeout)``,
+    AWAITED on the loop, so the loop keeps serving other requests for
+    the whole load (a thread + join on the calling thread would block
+    the loop for the whole load — the reviewer's fake fix;
+    ``asyncio.to_thread`` is the real one). Issue #414 (round 2): the
+    load is BOUNDED by :data:`LEGACY_BOUNDS_LOAD_TIMEOUT_SECONDS`; on
+    timeout the loop stops waiting and the turn degrades to the
+    extents/2 fallback (the worker thread itself is not cancellable and
+    keeps running until the load finishes — the documented trade-off of
+    ``to_thread``).
 
     On success the file bounds are CACHED into the stored part report
     (:func:`cache_stored_part_bounds`), so a second turn takes
@@ -138,57 +232,13 @@ async def load_mesh_bounds_async(app: Any, project_id: int) -> list[list[float]]
 
     ``None`` for every unavailable-mesh case (a 3MF import, a missing
     file, an unloadable file, an empty mesh, a missing v1 row, a
-    missing / non-positive scale) — the caller keeps the old extents/2
-    behaviour; never an error out of the chat route.
+    missing / non-positive scale, a load timeout) — the caller keeps
+    the old extents/2 behaviour; never an error out of the chat route.
     """
-    row, part_path, factor = _resolve_stored_part(app, project_id)
-    if row is None or part_path is None or factor <= 0:
+    row, part_path, _factor = _resolve_stored_part(app, project_id)
+    if row is None or part_path is None:
         return None
-    try:
-        file_bounds = await asyncio.to_thread(
-            _load_mesh_bounds, part_path, row.get("part_format")
-        )
-    except (PartUploadError, OSError) as e:
-        # An unloadable mesh or unreadable file degrades to the extents/2
-        # fallback (3MF imports are not loadable here by design); logged
-        # so a persistent degradation is greppable.
-        logger.warning(
-            "stored part bounds for project %s: mesh load failed (%s) "
-            "— caller keeps the extents/2 fallback",
-            project_id,
-            type(e).__name__,
-            exc_info=True,
-        )
-        return None
-    if file_bounds is None:
-        return None
-    cache_stored_part_bounds(app, project_id, file_bounds)
-    return file_bounds
-
-
-def _load_mesh_bounds_direct(app: Any, project_id: int) -> list[list[float]] | None:
-    """The sync-path legacy mesh bounds load (the tests): resolve the row
-    + part path on the calling thread, load the mesh DIRECTLY (bounded —
-    a large mesh briefly blocks the caller, the documented degradation
-    for the non-async path), and cache the result on success."""
-    row, part_path, factor = _resolve_stored_part(app, project_id)
-    if row is None or part_path is None or factor <= 0:
-        return None
-    try:
-        file_bounds = _load_mesh_bounds(part_path, row.get("part_format"))
-    except (PartUploadError, OSError) as e:
-        logger.warning(
-            "stored part bounds for project %s: mesh load failed (%s) "
-            "— caller keeps the extents/2 fallback",
-            project_id,
-            type(e).__name__,
-            exc_info=True,
-        )
-        return None
-    if file_bounds is None:
-        return None
-    cache_stored_part_bounds(app, project_id, file_bounds)
-    return file_bounds
+    return await _load_and_cache_mesh_bounds_async(app, project_id, part_path, row)
 
 
 def _load_mesh_bounds(part_path: Any, fmt: Any) -> list[list[float]] | None:
@@ -196,9 +246,9 @@ def _load_mesh_bounds(part_path: Any, fmt: Any) -> list[list[float]] | None:
     3-vectors — the ``report_bounds_mm`` / ``_numeric_vec`` contract).
 
     ``None`` when the mesh is empty (a 3MF import that loaded with no
-    geometry); raises ``PartUploadError``/``OSError`` when the file is
-    unreadable or the mesh is unloadable — the caller degrades to the
-    extents/2 fallback.
+    geometry); raises ``PartUploadError`` / ``OSError`` / the realistic
+    mesh-load exception set when the file is unreadable or the mesh is
+    unloadable — the caller degrades to the extents/2 fallback.
     """
     from d33d.part_http import MAX_PART_UPLOAD_BYTES
     from d33d.part_mesh import load_part_geometry, read_part_file_atomic
@@ -242,16 +292,22 @@ def _scale_factor(row: dict[str, Any]) -> float:
     return factor if factor > 0 else 0.0
 
 
-async def _fill_recut_turn_impl(
-    app: Any, project_id: int, message: str, *, async_load: bool
+def _fill_recut_turn_body(
+    app: Any,
+    project_id: int,
+    message: str,
+    *,
+    legacy_bounds_mm: list[list[float]] | None,
 ) -> dict[str, Any] | None:
-    """The shared body of :func:`fill_recut_turn` / :func:`fill_recut_turn_async`.
+    """The PLAIN sync turn body shared by :func:`fill_recut_turn` and
+    :func:`fill_recut_turn_async` (issue #414, round 2: a coroutine shim
+    driven with ``send``/``StopIteration`` is fragile and silently
+    returns ``None`` if the body ever awaits — the body is now a plain
+    function and the legacy bounds are resolved by the caller and
+    passed in).
 
-    ``async_load`` selects the legacy-report mesh-bounds path: ``True``
-    awaits :func:`load_mesh_bounds_async` (``asyncio.to_thread`` on the
-    event loop — the async chat route); ``False`` loads the mesh directly
-    on the calling thread (the sync tests; bounded, the documented
-    degradation for a non-async caller).
+    ``legacy_bounds_mm`` is the already-resolved, SCALED legacy-report
+    mesh bounds (``None`` keeps the extents/2 fallback).
     """
     from d33d.part_http import part_public
 
@@ -358,27 +414,15 @@ async def _fill_recut_turn_impl(
                         # → ``None``), and extents/2 is the part centre
                         # ONLY for origin-anchored parts — wrong for every
                         # off-origin part already imported (most real
-                        # imports predate the fix). Derive the bounds from
-                        # the project's stored part mesh: ``mesh.bounds``
-                        # (in FILE units — the same space the holes live
-                        # in) scaled by the part's scale. The load is
-                        # AWAITED off the event loop (``asyncio.to_thread``
-                        # via ``load_mesh_bounds_async`` in the async path
-                        # — the sync path loads directly, bounded) and is
-                        # cached into the stored report, so it happens
-                        # once per legacy project. When the stored mesh is
-                        # unavailable (a 3MF import, a missing file), keep
-                        # the old extents/2 behaviour (the origin-anchored
-                        # special case).
-                        if async_load:
-                            file_bounds = await load_mesh_bounds_async(app, project_id)
-                        else:
-                            file_bounds = _load_mesh_bounds_direct(app, project_id)
-                        bounds_mm = (
-                            _scaled_part_bounds(file_bounds, _scale_factor(row))
-                            if file_bounds
-                            else None
-                        )
+                        # imports predate the fix). The caller has
+                        # already resolved (and, for the async path,
+                        # awaited off the event loop + cached) the mesh
+                        # bounds — ``legacy_bounds_mm`` — or ``None``
+                        # when the stored mesh is unavailable (a 3MF
+                        # import, a missing file, a load timeout), in
+                        # which case the old extents/2 behaviour (the
+                        # origin-anchored special case) is kept.
+                        bounds_mm = legacy_bounds_mm
                     if isinstance(report, dict):
                         bbox_fu = report.get("bbox_file_units")
                         # Guard the scale and bbox arithmetic against
@@ -459,27 +503,103 @@ async def _fill_recut_turn_impl(
     return None
 
 
+def _report_is_legacy(report: dict[str, Any] | None) -> bool:
+    """True when the stored report is a LEGACY report (issue #414):
+    it exists but lacks ``bbox_bounds_file_units`` — the mesh-load
+    fallback applies. ``None`` (no report) and cached reports are not
+    legacy: the fallback must NOT load the mesh for them."""
+    return isinstance(report, dict) and "bbox_bounds_file_units" not in report
+
+
+def _resolve_legacy_bounds(
+    app: Any,
+    project_id: int,
+    row: dict[str, Any] | None,
+    report: dict[str, Any] | None,
+) -> list[list[float]] | None:
+    """Resolve the legacy-report mesh bounds for a turn (issue #414,
+    round 2): one shared resolve → guard → load → cache sequence; the
+    LOAD step is injected so the sync path loads directly on the
+    calling thread and the async path awaits the off-loop (bounded)
+    load. GATED on :func:`_report_is_legacy` — a cached or non-legacy
+    report keeps the direct ``report_bounds_mm`` path and never loads
+    the mesh. ``None`` keeps the extents/2 fallback. The part's
+    ``part_scale`` factor is REUSED from :func:`_resolve_stored_part`
+    (round 2, LOW: no recomputation via ``_scale_factor`` in the body)."""
+    if not _report_is_legacy(report):
+        return None
+    resolved = _resolve_stored_part(app, project_id)
+    if resolved[0] is None or resolved[1] is None:
+        return None
+    _row, part_path, factor = resolved
+    if factor <= 0:
+        return None
+    file_bounds = _load_and_cache_mesh_bounds_sync(app, project_id, part_path, resolved[0])
+    if file_bounds is None:
+        return None
+    return _scaled_part_bounds(file_bounds, factor)
+
+
+async def _resolve_legacy_bounds_async(
+    app: Any,
+    project_id: int,
+    row: dict[str, Any] | None,
+    report: dict[str, Any] | None,
+) -> list[list[float]] | None:
+    """The async-path resolve (issue #414, round 2): row + path resolve
+    ON the loop (sqlite is thread-bound), the load is AWAITED off the
+    loop via :func:`_load_and_cache_mesh_bounds_async` (`wait_for
+    (to_thread)`` — bounded by
+    :data:`LEGACY_BOUNDS_LOAD_TIMEOUT_SECONDS`), and the cache write
+    lands on the loop. GATED on :func:`_report_is_legacy`; same
+    guard/scale contract as :func:`_resolve_legacy_bounds`."""
+    if not _report_is_legacy(report):
+        return None
+    resolved = _resolve_stored_part(app, project_id)
+    if resolved[0] is None or resolved[1] is None:
+        return None
+    _row, part_path, factor = resolved
+    if factor <= 0:
+        return None
+    file_bounds = await _load_and_cache_mesh_bounds_async(
+        app, project_id, part_path, resolved[0]
+    )
+    if file_bounds is None:
+        return None
+    return _scaled_part_bounds(file_bounds, factor)
+
+
 async def fill_recut_turn_async(
     app: Any, project_id: int, message: str
 ) -> dict[str, Any] | None:
     """The ASYNC entry point for ONE fill-and-recut chat turn — the one
     the async ``d33d.projects.post_chat`` handler awaits (issue #414,
-    part 3): the ONLY difference from :func:`fill_recut_turn` is that the
-    legacy-report mesh bounds load (:func:`load_mesh_bounds_async` —
-    ``await asyncio.to_thread`` on the stored part mesh) is AWAITED on
-    the event loop, so a slow mesh parse never blocks the loop. The
-    result is cached into the stored part report by the loader, so a
-    second turn takes the direct ``report_bounds_mm`` path.
+    part 3): the legacy-report mesh bounds are resolved HERE — row +
+    path on the loop, the mesh load AWAITED off the loop via
+    ``await asyncio.wait_for(asyncio.to_thread(...))`` (bounded by
+    :data:`LEGACY_BOUNDS_LOAD_TIMEOUT_SECONDS`), the cache write on the
+    loop — so a slow mesh parse never blocks the loop. The result is
+    cached into the stored part report by the loader, so a second turn
+    takes the direct ``report_bounds_mm`` path.
 
-    The synchronous :func:`fill_recut_turn` keeps a direct (bounded)
-    mesh load for non-async callers — the tests — and is NOT used by the
-    chat route.
+    The turn body itself is the plain :func:`_fill_recut_turn_body`
+    (issue #414, round 2) — the legacy bounds are passed in as an
+    argument.
 
     Returns the same ``{"kind": "answer", ...}`` dict (or ``None``)
     as :func:`fill_recut_turn`.
     """
-    return await _fill_recut_turn_impl(
-        app, project_id, message, async_load=True
+    row = app.state.conn.get_project(project_id)
+    if row is None:
+        legacy_bounds = None
+    else:
+        from d33d.part_http import part_public
+
+        part = part_public(row) if row.get("part_filename") else None
+        report = part.get("report") if part else None
+        legacy_bounds = await _resolve_legacy_bounds_async(app, project_id, row, report)
+    return _fill_recut_turn_body(
+        app, project_id, message, legacy_bounds_mm=legacy_bounds
     )
 
 
@@ -490,32 +610,29 @@ def fill_recut_turn(
     for non-async callers (the tests). The async chat route
     (``d33d.projects.post_chat``) awaits :func:`fill_recut_turn_async`.
 
-    Delegates to the shared :func:`_fill_recut_turn_impl` with
-    ``async_load=False``: the legacy-report mesh bounds load is done
-    DIRECTLY on the calling thread (the ``async_load=False`` branch never
-    reaches its ``await``), so a synchronous caller can drive the coroutine
-    to completion without a running loop. All other behaviour — the LIVE
-    offer, clean yes/no, the fresh trigger, hole selection, and the
-    no-match / point-at / fresh-offer replies — is identical to
-    :func:`fill_recut_turn_async`.
+    Resolves the legacy-report mesh bounds with a DIRECT sync loader
+    (issue #414, round 2: no coroutine shim, no ``send`` /
+    ``StopIteration`` — the body is the plain
+    :func:`_fill_recut_turn_body` and the bounds are an argument) and
+    calls the shared body.
 
     Returns ``{"kind": "answer", "answer": <sentence>, "run_loop": bool,
     "outcome": "fresh_offer" | "decline" | "accept" | "no_feature" | "no_match"}``
     when the turn is handled here, else ``None`` (fall-through to the
     existing routes).
     """
-    coro = _fill_recut_turn_impl(app, project_id, message, async_load=False)
-    # Drive the coroutine synchronously. The ``async_load=False`` branch
-    # never executes an ``await`` (the mesh loads directly), so the
-    # coroutine runs to completion on the first send without needing a
-    # running loop. (If it somehow did suspend — it cannot on this path —
-    # ``next`` would raise StopIteration-free and the caller would see a
-    # coroutine; but the direct-load branch is terminal.)
-    try:
-        coro.send(None)
-    except StopIteration as stop:
-        return stop.value
-    return None  # pragma: no cover — unreachable on the sync path
+    row = app.state.conn.get_project(project_id)
+    if row is None:
+        legacy_bounds = None
+    else:
+        from d33d.part_http import part_public
+
+        part = part_public(row) if row.get("part_filename") else None
+        report = part.get("report") if part else None
+        legacy_bounds = _resolve_legacy_bounds(app, project_id, row, report)
+    return _fill_recut_turn_body(
+        app, project_id, message, legacy_bounds_mm=legacy_bounds
+    )
 
 
 __all__ = [

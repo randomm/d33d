@@ -21,6 +21,12 @@ from httpx import ASGITransport, AsyncClient
 
 from d33d.app import create_app
 
+# Shared helpers (issue #414, round 2, LOW).
+from tests.legacy_bounds_fixtures import (
+    _commit_stl,
+    _set_legacy_part,
+)
+
 FIXTURES = Path(__file__).parent / "fixtures" / "stl"
 
 
@@ -53,56 +59,8 @@ def _legacy_report_with_holes():
     }
 
 
-def _set_legacy_part(app: Any, pid: int, report: dict) -> None:
-    """Set the part columns with a LEGACY report (no bounds key) directly
-    on the DB."""
-    import json
-
-    conn = app.state.conn
-    conn.raw.execute(
-        "UPDATE projects SET part_filename='part.stl', part_format='stl', "
-        "part_unit='mm', part_unit_status='settled', part_scale=1.0, part_report=? "
-        "WHERE id=?",
-        (json.dumps(report), pid),
-    )
-    conn.commit()
-
-
-def _commit_stl(app: Any, pid: int, path: Path) -> None:
-    """Commit a part.stl to the project's v1 directory (the layout
-    ``_v1_part_path`` reads: ``{repo}/versions/{v1}/part.stl``). Inserts
-    a v1 version row first when the project has none (legacy-row tests
-    create the project but no import — the real import path writes both).
-    """
-    conn = app.state.conn
-    v1 = conn.raw.execute(
-        "SELECT * FROM versions WHERE project_id = ? ORDER BY id ASC LIMIT 1",
-        (pid,),
-    ).fetchone()
-    if v1 is None:
-        conn.raw.execute(
-            "INSERT INTO versions (project_id, name, params, param_meta) "
-            "VALUES (?, ?, ?, NULL)",
-            (pid, "v1", "{}"),
-        )
-        conn.commit()
-        v1 = conn.raw.execute(
-            "SELECT * FROM versions WHERE project_id = ? ORDER BY id ASC LIMIT 1",
-            (pid,),
-        ).fetchone()
-    v1_id = v1["id"]
-    repo = Path(
-        conn.raw.execute(
-            "SELECT git_repo_path FROM projects WHERE id = ?", (pid,)
-        ).fetchone()[0]
-    )
-    target_dir = repo / "versions" / str(v1_id)
-    target_dir.mkdir(parents=True, exist_ok=True)
-    (target_dir / "part.stl").write_bytes(path.read_bytes())
-
-
 @pytest.fixture
-def app_with_projects(app_paths: dict[str, Path], tmp_path: Path):
+def app_with_projects(app_paths):
     """Isolated app with tmp-path repos (the test_projects pattern)."""
     import d33d.db as db_mod
 
@@ -111,8 +69,7 @@ def app_with_projects(app_paths: dict[str, Path], tmp_path: Path):
     def _tmp_default_git_path(name: str) -> str:
         import uuid
 
-        slug = uuid.uuid4().hex[:12]
-        base = tmp_path / "repos" / slug
+        base = app_paths["tmp"] / "repos" / uuid.uuid4().hex[:12]
         base.mkdir(parents=True, exist_ok=True)
         return str(base)
 
@@ -127,11 +84,12 @@ def app_with_projects(app_paths: dict[str, Path], tmp_path: Path):
 
 
 @pytest.fixture
-def app_paths(tmp_path: Path) -> dict[str, Path]:
+def app_paths(tmp_path):
     return {
         "db": tmp_path / "d33d.sqlite3",
         "key": tmp_path / "master.key",
         "cat": tmp_path / "models.yaml",
+        "tmp": tmp_path,
     }
 
 
@@ -241,7 +199,7 @@ def test_legacy_report_translated_part_center_hole_selects_true_center(app_with_
             r = await client.post("/api/projects", json={"name": "LegacyTranslated2"})
             pid = r.json()["id"]
             _set_legacy_part(app_with_projects, pid, report)
-            _commit_stl(app_with_projects, pid, tmp_stl)
+            _commit_stl(app_with_projects, pid, tmp_stl.read_bytes())
             r2 = await client.post(
                 f"/api/projects/{pid}/chat",
                 json={"message": "make the center hole 38 mm"},
@@ -325,7 +283,7 @@ def _legacy_extents_fallback_case(app: Any, part_stl: Path):
             "bbox_file_units": [40.0, 40.0, 10.0],
         }
         _set_legacy_part(app, pid, legacy_report)
-        _commit_stl(app, pid, part_stl)
+        _commit_stl(app, pid, part_stl.read_bytes())
         r2 = await client.post(
             f"/api/projects/{pid}/chat", json={"message": "make the center hole 38 mm"}
         )

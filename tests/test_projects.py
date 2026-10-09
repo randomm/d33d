@@ -3073,7 +3073,7 @@ def test_offer_translated_part_corner_only_holes_no_match(app_with_projects) -> 
     """Issue #414: the same translated part (bounds [100..220] ×
     [50..130]) with ONLY corner holes (none near the true centre) +
     "the center hole" → no-match (the nearest corner hole is 61.06 mm
-    from (160, 90), beyond the 15%-of-diagonal threshold of 21.6 mm)."""
+    from (160, 90), beyond the fixed 30 mm match threshold)."""
 
     async def _call(client):
         r = await client.post("/api/projects", json={"name": "TranslatedNoMatch"})

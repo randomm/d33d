@@ -17,74 +17,23 @@ This module pins the fix:
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from typing import Any
 
 import pytest
 
 from d33d import fill_recut_turn as frt
 
-FIXTURES = Path(__file__).parent / "fixtures" / "stl"
-
-
-def _make_stl() -> bytes:
-    """A small, valid, non-empty STL (the off_centre_plate fixture — 0..120
-    x 0..80 x 0..6 in file units)."""
-    return (FIXTURES / "off_centre_plate.stl").read_bytes()
-
-
-def _set_legacy_part(app: Any, pid: int, report: dict) -> None:
-    conn = app.state.conn
-    conn.raw.execute(
-        "UPDATE projects SET part_filename='part.stl', part_format='stl', "
-        "part_unit='mm', part_unit_status='settled', part_scale=1.0, part_report=? "
-        "WHERE id=?",
-        (json.dumps(report), pid),
-    )
-    conn.commit()
-
-
-def _commit_stl(app: Any, pid: int, stl_bytes: bytes) -> None:
-    """Commit part.stl to the project's v1 dir (mirrors the helper in
-    test_fill_recut_legacy_bounds.py)."""
-    conn = app.state.conn
-    v1 = conn.raw.execute(
-        "SELECT * FROM versions WHERE project_id = ? ORDER BY id ASC LIMIT 1",
-        (pid,),
-    ).fetchone()
-    if v1 is None:
-        conn.raw.execute(
-            "INSERT INTO versions (project_id, name, params, param_meta) "
-            "VALUES (?, ?, ?, NULL)",
-            (pid, "v1", "{}"),
-        )
-        conn.commit()
-        v1 = conn.raw.execute(
-            "SELECT * FROM versions WHERE project_id = ? ORDER BY id ASC LIMIT 1",
-            (pid,),
-        ).fetchone()
-    repo = Path(
-        conn.raw.execute(
-            "SELECT git_repo_path FROM projects WHERE id = ?", (pid,)
-        ).fetchone()[0]
-    )
-    target_dir = repo / "versions" / str(v1["id"])
-    target_dir.mkdir(parents=True, exist_ok=True)
-    (target_dir / "part.stl").write_bytes(stl_bytes)
-
-
-def _legacy_report() -> dict:
-    return {
-        "hole_count": 1,
-        "holes": [
-            {"center": [5.0, 5.0, 3.0], "axis": [0.0, 0.0, 1.0], "diameter_mm": 4.0},
-        ],
-        "bbox_file_units": [10.0, 10.0, 6.0],
-    }
+# Shared helpers (issue #414, round 2, LOW).
+from tests.legacy_bounds_fixtures import (
+    _commit_stl,
+    _legacy_report,
+    _make_stl,
+    _set_legacy_part,
+)
 
 
 @pytest.fixture
-def app_with_projects(app_paths: dict[str, Path]):
+def app_with_projects(app_paths):
     import d33d.db as db_mod
     from d33d.app import create_app
 
@@ -108,7 +57,7 @@ def app_with_projects(app_paths: dict[str, Path]):
 
 
 @pytest.fixture
-def app_paths(tmp_path: Path) -> dict[str, Path]:
+def app_paths(tmp_path):
     return {
         "db": tmp_path / "d33d.sqlite3",
         "key": tmp_path / "master.key",
@@ -207,25 +156,6 @@ def test_legacy_second_turn_does_not_reload_mesh(
         return original_load(part_path, fmt)
 
     monkeypatch.setattr(frt, "_load_mesh_bounds", _spy_load)
-    # Patch ``report_bounds_mm`` where ``fill_recut_turn`` LOOKS it up
-    # (module attribute) and count direct calls — the second turn must
-    # hit the cached bounds directly, so the fallback (and therefore
-    # the mesh load) must not fire again.
-    from d33d import hole_select
-
-    direct_bounds_calls = 0
-    original_rbm = hole_select.report_bounds_mm
-
-    def _counting_rbm(report, scale):
-        nonlocal direct_bounds_calls
-        result = original_rbm(report, scale)
-        if result is not None:
-            direct_bounds_calls += 1
-        return result
-
-    import d33d.fill_recut_turn as frt_mod
-
-    monkeypatch.setattr(frt_mod, "report_bounds_mm", _counting_rbm)
 
     async def _two_turns():
         conn = app_with_projects.state.conn
@@ -299,4 +229,97 @@ def test_legacy_bounds_cached_into_stored_report(
     assert "bbox_bounds_file_units" in report, (
         "the mesh-derived bounds were not written back to the stored "
         f"part report (cache miss — every turn would re-load the mesh): {report}"
+    )
+
+
+def test_legacy_mesh_load_type_error_degrades_to_extents_fallback(
+    app_with_projects, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #414 (round 2, HIGH): errors from ``load_part_geometry``
+    OUTSIDE its ``PartUploadError`` wrapping — e.g. a 3MF ``Scene``
+    ``to_mesh()`` raising ``TypeError``/``AttributeError`` — must NOT
+    escape the loader and lose the turn: the turn degrades to the
+    extents/2 fallback (a warning is logged, the turn completes with an
+    offer or no-match) instead of 500-ing the chat route."""
+    import asyncio
+
+    from d33d import part_mesh
+
+    def _raising_load(raw: bytes, fmt: str):
+        raise TypeError("scene has no geometry")
+
+    monkeypatch.setattr(part_mesh, "load_part_geometry", _raising_load)
+    stl = _make_stl()
+
+    async def _turn():
+        pid = app_with_projects.state.conn.create_project(name="TypeErrorLoad")
+        _set_legacy_part(app_with_projects, pid, _legacy_report())
+        _commit_stl(app_with_projects, pid, stl)
+        return frt.fill_recut_turn(app_with_projects, pid, "make the center hole 8 mm")
+
+    async def _run():
+        async with app_with_projects.router.lifespan_context(app_with_projects):
+            return await _turn()
+
+    result = asyncio.run(_run())
+
+    assert result is not None, (
+        "the turn must complete (degraded to the extents/2 fallback), not "
+        "drop out with an escaped TypeError from load_part_geometry"
+    )
+    assert result["kind"] == "answer"
+    # The legacy report's single hole at (5, 5) sits exactly at the
+    # extents/2 centre (bbox_file_units [10, 10, 6] → centre (5, 5)) —
+    # the turn completes a fresh offer, never raising.
+    assert result["outcome"] == "fresh_offer", result
+
+
+def test_legacy_async_mesh_load_timeout_degrades_to_extents_fallback(
+    app_with_projects, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #414 (round 2, MEDIUM): the off-loop mesh load is BOUNDED
+    — ``asyncio.wait_for(asyncio.to_thread(...), LEGACY_BOUNDS_LOAD_TIMEOUT_SECONDS)``.
+    A loader slower than the (shortened) timeout degrades to the
+    extents/2 fallback with a logged ``TimeoutError`` instead of
+    holding the turn open indefinitely."""
+    import asyncio
+    import time
+
+    stl = _make_stl()
+
+    def _slow_load(part_path: Any, fmt: Any):
+        time.sleep(0.5)  # much longer than the monkeypatched 0.2 s timeout
+    
+    monkeypatch.setattr(frt, "_load_mesh_bounds", _slow_load)
+    monkeypatch.setattr(frt, "LEGACY_BOUNDS_LOAD_TIMEOUT_SECONDS", 0.2)
+
+    async def _turn():
+        conn = app_with_projects.state.conn
+        pid = conn.create_project(name="TimeoutLoad")
+        _set_legacy_part(app_with_projects, pid, _legacy_report())
+        _commit_stl(app_with_projects, pid, stl)
+        result = await frt.fill_recut_turn_async(
+            app_with_projects, pid, "make the center hole 8 mm"
+        )
+        # Read the cache state while the DB is still open (inside the
+        # lifespan context).
+        raw = conn.raw.execute(
+            "SELECT part_report FROM projects WHERE id = ?", (pid,)
+        ).fetchone()[0]
+        return result, json.loads(raw) if raw else {}
+
+    async def _run():
+        async with app_with_projects.router.lifespan_context(app_with_projects):
+            return await _turn()
+
+    result, report = asyncio.run(_run())
+    assert result is not None, (
+        "the turn must degrade to the extents/2 fallback after the load "
+        "timeout — not hang or raise"
+    )
+    assert result["outcome"] in ("fresh_offer", "no_match")
+    # No cache write landed (the load never completed): the stored
+    # report must still lack ``bbox_bounds_file_units``.
+    assert "bbox_bounds_file_units" not in report, (
+        f"the timed-out load must not cache a result: {report}"
     )
