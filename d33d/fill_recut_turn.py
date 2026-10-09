@@ -36,6 +36,153 @@ from d33d.part_holes import HOLE_NOUNS, no_hole_reply, part_has_hole_evidence
 from d33d.part_units import USABLE_UNIT_STATUSES
 
 
+def _stored_part_bounds_sync(app: Any, project_id: int) -> list[list[float]] | None:
+    """The synchronous (no-loop) form of :func:`stored_part_bounds_mm`
+    (issue #414, part 2): the stored part mesh's ``mesh.bounds`` in mm, or
+    ``None`` (3MF import, missing file, unloadable mesh, missing v1 row,
+    or a missing/non-positive scale — the caller keeps extents/2).
+
+    ``row`` and ``conn`` are the project's row and connection acquired on
+    the CALLING thread (the app's sqlite handle is thread-bound — a read
+    inside a worker thread would raise ``ProgrammingError``); :func:
+    ``_load_part_bounds_file_units`` does the (off-loop-able) trimesh load.
+    """
+    file_bounds = _load_part_bounds_file_units(app, project_id)
+    if file_bounds is None:
+        return None
+    try:
+        row = app.state.conn.get_project(project_id)
+        if row is None:
+            return None
+    except Exception:  # noqa: BLE001 - a corrupt row degrades to None
+        return None
+    scale = row.get("part_scale")
+    try:
+        factor = float(scale) if scale is not None else 0.0
+    except (TypeError, ValueError):
+        factor = 0.0
+    if factor <= 0:
+        return None
+    return [
+        [v * factor for v in file_bounds[0]],
+        [v * factor for v in file_bounds[1]],
+    ]
+
+
+def _load_part_bounds_file_units(app: Any, project_id: int) -> list[list[float]] | None:
+    """The stored part mesh's ``mesh.bounds`` in FILE units (XY only) —
+    the mesh half of the issue #414 (part 2) legacy-report fallback.
+
+    Runs on the caller's thread (the app's sqlite handle is thread-bound,
+    so the v1-row read happens here, on the event-loop thread); the
+    async wrapper dispatches THIS function to a thread pool, but the
+    trimesh load itself is the only expensive step and is safe on a pool
+    thread once the row and part path are resolved.
+
+    ``None`` when the part is unavailable (a 3MF import, a missing file,
+    an unloadable mesh, a missing v1 row, or an unreadable row) — the
+    caller keeps extents/2.
+    """
+    try:
+        row = app.state.conn.get_project(project_id)
+        if row is None:
+            return None
+        from d33d.part_http import resolve_v1_part_path
+
+        part_path, _repo_dir = resolve_v1_part_path(row, app.state.conn)
+        if part_path is None or not part_path.exists():
+            return None
+    except Exception:  # noqa: BLE001 - a corrupt row degrades to None
+        return None
+
+    def _load_mesh(path, fmt):
+        from d33d.part_http import MAX_PART_UPLOAD_BYTES
+        from d33d.part_mesh import load_part_geometry, read_part_file_atomic
+
+        raw = read_part_file_atomic(path, MAX_PART_UPLOAD_BYTES)
+        mesh = load_part_geometry(raw, fmt or "stl")
+        lo, hi = mesh.bounds
+        return [[float(lo[0]), float(lo[1])], [float(hi[0]), float(hi[1])]]
+
+    try:
+        return _load_mesh(part_path, row.get("part_format"))
+    except Exception:  # noqa: BLE001 - unavailable → extents/2 fallback
+        return None
+
+
+def stored_part_bounds_mm(app: Any, project_id: int) -> list[list[float]] | None:
+    """Issue #414 (part 2): the LEGACY-report fallback for
+    :func:`d33d.hole_select.report_bounds_mm` — the project's stored part
+    mesh's ``mesh.bounds`` (in FILE units, the same space the stored holes
+    and ``bbox_file_units`` live in) scaled by ``part_scale`` to mm.
+
+    ``fill_recut_turn`` is a sync function called synchronously from
+    ``d33d.projects.post_chat`` (on the event-loop thread). The project
+    row and the v1 part path are resolved ON the event-loop thread (the
+    app's sqlite handle is thread-bound); the trimesh load is then
+    dispatched off the loop via ``loop.run_in_executor`` (the
+    ``part_import`` pattern). When the mesh is unavailable (a 3MF import,
+    a missing file, an unloadable file, a missing v1 row, or a missing /
+    non-positive scale) ``None`` is returned and the caller keeps the old
+    extents/2 behaviour — never an error out of the chat route.
+    """
+    import asyncio
+
+    try:
+        row = app.state.conn.get_project(project_id)
+        if row is None:
+            return None
+        from d33d.part_http import resolve_v1_part_path
+
+        part_path, _repo_dir = resolve_v1_part_path(row, app.state.conn)
+        if part_path is None or not part_path.exists():
+            return None
+    except Exception:  # noqa: BLE001 - a corrupt row degrades to None
+        return None
+
+    def _load_mesh(path, fmt):
+        from d33d.part_http import MAX_PART_UPLOAD_BYTES
+        from d33d.part_mesh import load_part_geometry, read_part_file_atomic
+
+        raw = read_part_file_atomic(path, MAX_PART_UPLOAD_BYTES)
+        mesh = load_part_geometry(raw, fmt or "stl")
+        lo, hi = mesh.bounds
+        return [[float(lo[0]), float(lo[1])], [float(hi[0]), float(hi[1])]]
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        try:
+            file_bounds = _load_mesh(part_path, row.get("part_format"))
+        except Exception:  # noqa: BLE001 - unavailable → extents/2 fallback
+            return None
+    else:
+        try:
+            file_bounds = loop.run_in_executor(
+                None, _load_mesh, part_path, row.get("part_format")
+            ).result()
+        except Exception:  # noqa: BLE001 - executor failure → sync retry
+            file_bounds = None
+    if file_bounds is None:
+        try:
+            file_bounds = _load_mesh(part_path, row.get("part_format"))
+        except Exception:  # noqa: BLE001 - unavailable → extents/2 fallback
+            return None
+    if file_bounds is None:
+        return None
+    scale = row.get("part_scale")
+    try:
+        factor = float(scale) if scale is not None else 0.0
+    except (TypeError, ValueError):
+        factor = 0.0
+    if factor <= 0:
+        return None
+    return [
+        [v * factor for v in file_bounds[0]],
+        [v * factor for v in file_bounds[1]],
+    ]
+
+
 def fill_recut_turn(
     app: Any, project_id: int, message: str
 ) -> dict[str, Any] | None:
@@ -165,6 +312,20 @@ def fill_recut_turn(
                     holes = holes_in_mm(report, scale) if report else []
                     bounds_mm = report_bounds_mm(report, scale) if report else None
                     bbox_mm: list[float] | None = None
+                    if report_bounds_mm(report, scale) is None:
+                        # Issue #414 (part 2): a LEGACY report has no
+                        # ``bbox_bounds_file_units`` (``report_bounds_mm``
+                        # → ``None``), and extents/2 is the part centre
+                        # ONLY for origin-anchored parts — wrong for every
+                        # off-origin part already imported (most real
+                        # imports predate the fix). Derive the bounds from
+                        # the project's stored part mesh: ``mesh.bounds``
+                        # (in FILE units — the same space the holes live
+                        # in) scaled by the part's scale. When the stored
+                        # mesh is unavailable (a 3MF import, a missing
+                        # file), keep the old extents/2 behaviour (the
+                        # origin-anchored special case).
+                        bounds_mm = stored_part_bounds_mm(app, project_id)
                     if isinstance(report, dict):
                         bbox_fu = report.get("bbox_file_units")
                         # Guard the scale and bbox arithmetic against
