@@ -543,38 +543,60 @@ def user_quoted_unmapped_mm(messages: list[str] | tuple[str, ...]) -> set[float]
     unmapped and eligible ("a 20 mm wide thing, lift it 12 mm" → {12.0} —
     the 20 is mapped to W, the 12 is not, and per-number evaluation is
     what makes the 12 eligible even though its clause held no axis word).
+
+    Supersession (issue #416, defect 1): a number is also excluded when a
+    NEWER message in the scan assigns THAT SAME value to an axis — the
+    user has since stated it, so it is no longer an unassigned quote the
+    tier-2 offer may attribute to a parameter. The value-level rule does
+    not need to know which feature the older number described: the
+    acceptance criterion requires only that an explicitly re-stated
+    value never rides the stale quote back into an offer
+    ("the hole was 5 mm" … "make it 5 mm tall" → 5.0 is mapped). A value
+    stated for one feature is not re-opened when a DIFFERENT feature
+    takes a new number ("… the hole was 5 mm" … "make it 20 mm wide" →
+    5.0 stays eligible: the 20 is the W mapping, the 5 belongs to the
+    hole, and the value-level rule cannot see that).
     """
     from d33d.axis_lexicon import classify
 
-    unmapped: set[float] = set()
-    for msg in list(messages)[history_window_start(len(messages)) :]:
+    window = list(messages)[history_window_start(len(messages)) :]
+    # Issue #416 (defect 1) — the per-message mapped sets, precomputed so
+    # the supersession pass below can ask of any older message "did a
+    # NEWER message assign this value to an axis?". The per-message
+    # mapping rules are unchanged; only the cross-message exclusion is
+    # new.
+    per_msg_mapped: list[set[float]] = []
+    for msg in window:
         text = str(msg)
-        # Mapped by the lexicon: the mm numbers it assigned to an axis
-        # (``classify(text).absolute`` — an axis-word clause with its
-        # number). An mm number the lexicon saw but did NOT assign ("a
-        # 15 mm hole") is unmapped either way.
         lexicon_absolute = classify(text).absolute
         lexicon_mapped: set[float] = set(lexicon_absolute.values())
-        # Mapped by an explicit protocol cue in the SAME message
-        # ("W: 42" / "a 20 mm cube" — the ``_extract_stated`` axis pass
-        # and the equal-axis shorthand).
         mapped_by_protocol = _mm_cue_values(text)
-        # Triple override: when a triple assigns an axis, the lexicon's
-        # value for that axis (if different) is OVERRIDDEN and becomes
-        # unmapped ("a 60 × 45 × 20 mm tray 40 mm wide" → W=60 from the
-        # triple, so the lexicon's W=40 is unmapped and eligible for the
-        # tier-2 offer).
         triple_axes, _ = _extract_triple(text)
         if triple_axes:
             for axis, tv in triple_axes.items():
                 lv = lexicon_absolute.get(axis)
                 if lv is not None and abs(lv - tv) > 1e-6:
                     lexicon_mapped.discard(lv)
+        per_msg_mapped.append(lexicon_mapped | mapped_by_protocol)
+
+    # The values any NEWER message assigned to an axis (index > i),
+    # precomputed so the per-message loop stays a single pass.
+    n = len(window)
+    newer_mapped: list[set[float]] = [set() for _ in range(n)]
+    acc: set[float] = set()
+    for i in range(n - 1, -1, -1):
+        newer_mapped[i] = set(acc)
+        acc |= per_msg_mapped[i]
+
+    unmapped: set[float] = set()
+    for i, msg in enumerate(window):
+        text = str(msg)
+        mapped_here = per_msg_mapped[i] | newer_mapped[i]
         for n in re.findall(r"\b(\d+(?:\.\d+)?)" r"\s*mm\b", text):
             value = float(n)
-            if value in lexicon_mapped:
-                continue
-            if any(abs(value - pv) < 1e-6 for pv in mapped_by_protocol):
+            if any(abs(value - p) < 1e-6 for p in mapped_here):
                 continue
             unmapped.add(value)
     return unmapped
+
+
