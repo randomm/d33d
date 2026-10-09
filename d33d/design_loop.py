@@ -2037,6 +2037,9 @@ async def run_design_loop_async(
     # Issue #432: the previous iteration's post-check (reason, fingerprint)
     # — a repeat of the same post-check on an identical mesh stops the loop.
     prev_post: tuple[str, tuple[str, int]] | None = None
+    # Issue #432: the last RENDERED attempt's record (the identical-repair stop
+    # reports it; a non-render attempt never overwrites it).
+    prev_rendered: IterationRecord | None = None
     consecutive_no_improvement = 0
     iterations: list[IterationRecord] = []
     # The loop's OWN per-attempt wall clock (issue #417): one
@@ -2160,6 +2163,9 @@ async def run_design_loop_async(
                 confirm_sentence=_confirm_sentence,
             )
             iterations.append(record)
+            # Issue #432: a non-render attempt breaks the consecutive-renders
+            # premise of the identical-repair stop - reset the tracker.
+            prev_post = None
             if best is None or is_best(candidate_score, best_score):
                 best = record
                 best_score = candidate_score
@@ -2547,10 +2553,14 @@ async def run_design_loop_async(
             # Issue #432 operator decision: the repeated attempt N's mesh is
             # identical to attempt N-1's, so N-1 is the reported best and
             # the repeated post-check's reason is the terminal reason.
-            _prev = iterations[-2]
+            # The prior RENDERED attempt's record (never iterations[-2], which
+            # may be a non-render record in between).
+            _prev = prev_rendered
+            assert _prev is not None  # a repeat implies a prior rendered attempt
             return _exhausted(
                 iterations, _prev, _prev.score, failure_reason=_post_reason
             )
+        prev_rendered = record
 
         repair = next_repair
         if consecutive_no_improvement >= NO_IMPROVEMENT_LIMIT:

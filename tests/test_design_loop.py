@@ -4309,6 +4309,52 @@ def test_identical_repair_stop_reports_attempt_n_minus_1_as_best(tmp_path):
     assert "// attempt two" not in result.best.scad_source
 
 
+def test_non_render_attempt_resets_identical_repair_tracker(tmp_path, monkeypatch):
+    """Issue #432: an attempt that produced no render (empty SCAD) breaks the
+    consecutive-renders premise. Attempt 1 X (mesh F), attempt 2 empty, attempt
+    3 X (mesh F) must NOT stop at 3 on the stale attempt-1 fingerprint. The stop
+    fires at 4 (repeat of 3) and reports attempt 3 — the N-1 RENDERED record —
+    not iterations[-2], which is the empty attempt-2 record."""
+    fixture_dir = Path(__file__).parent / "fixtures" / "stl"
+    parent = str(fixture_dir / "v100-plate.stl")
+    base = _through_box_scad_source()
+    scads = [
+        f"// attempt one\n{base}",
+        "",
+        f"// attempt three\n{base}",
+        f"// attempt four\n{base}",
+    ]
+    calls = {"n": 0}
+    # Isolate the identical-repair tracker: the empty attempt is itself a
+    # no-improvement step, so the generic no-improvement stop would otherwise
+    # end the run at attempt 3 for an unrelated reason.
+    import d33d.design_loop as _dl
+
+    monkeypatch.setattr(_dl, "NO_IMPROVEMENT_LIMIT", 99)
+
+    def llm_fn(role, messages, system):
+        calls["n"] += 1
+        return _through_box_llm(scads[min(calls["n"], len(scads)) - 1])
+
+    render = _render_with_stl_and_bbox(parent, BboxInfo(20, 20, 20, 8000.0))
+    result = run_design_loop(
+        photo=PHOTO,
+        stated_dims=(0.0, 0.0, 0.0),
+        render_fn=lambda scad, defines: render,
+        llm_fn=llm_fn,
+        bbox_fn=lambda r: BboxInfo(20, 20, 20, 8000.0),
+        parent_mesh_stl=parent,
+        max_iterations=4,
+    )
+    assert result.status == "exhausted"
+    # Attempt 3 did not stop: the stop fires at 4, not 3.
+    assert result.iterations_used == 4
+    assert result.failure_reason == "mesh_unchanged"
+    assert result.best is result.iterations[2]
+    assert "// attempt three" in result.best.scad_source
+    assert result.best.render is not None
+
+
 def test_stack_height_identical_repeat_stops_at_attempt_2(tmp_path):
     """Issue #432: the identical-repair stop applies to the stack-height
     post-check too. A real STL whose mesh repeats across attempts stops the
