@@ -33,6 +33,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -4172,3 +4173,399 @@ def test_loop_unknown_variable_render_is_repair_naming_variable():
     assert result.iterations[0].repair is not None
     assert result.iterations[0].repair["failure_class"] == "unknown_variable"
     assert "H" in result.iterations[0].repair["evidence"]
+
+
+def test_per_attempt_deadline_returns_best_so_far_exhausted():
+    """The loop's per-attempt deadline (issue #417): a design LLM call
+    that outlives ``attempt_timeout`` is cut off by ``asyncio.wait_for``
+    and the run ends with a best-so-far exhausted result whose
+    ``failure_reason`` is ``design_loop_timed_out`` — never a fabricated
+    empty result. This is the SOLE loop-level timeout (the adapter's
+    derived total is a margin over the same value; the httpx per-call
+    timeout is per-phase, not a total): a slow-but-not-hung call that
+    trickles tokens is bounded by the per-attempt deadline, not by the
+    httpx per-phase cap.
+
+    The deadline CANCELS the design call (``asyncio.wait_for`` cancels
+    the inner task, which interrupts the async httpx request — unlike the
+    render worker's subprocess timeout, the call does NOT run on to
+    completion in the background). A hanging ``llm_fn`` (an ``await
+    asyncio.sleep(999)`` that never resolves) proves the cancellation:
+    with a 0.2 s deadline the call returns in ~0.2 s, not ~999 s.
+    """
+
+    async def _hanging_llm(role, messages, system):
+        # A design call that never resolves (a hung LLM): the deadline
+        # must cut it off (cancel it), not wait for it.
+        await asyncio.sleep(999)
+        raise AssertionError("hanging llm_fn should have been cancelled")
+
+    result = asyncio.run(
+        run_design_loop_async(
+            photo=PHOTO,
+            stated_dims=STATED,
+            render_fn=lambda scad, defines: _render(),
+            llm_fn=_hanging_llm,
+            max_iterations=MAX_ITERATIONS,
+            attempt_timeout=0.2,
+        )
+    )
+    assert result.status == "exhausted"
+    assert result.failure_reason == "design_loop_timed_out"
+    # The deadline fired on the FIRST attempt (no candidate yet): the run
+    # ends with an honest empty-iteration result (``best`` ``None``, zero
+    # iterations) — never a fabricated pass. The adapter's "no version"
+    # path handles the honest zero-render case.
+    assert result.iterations_used == 0
+    assert result.best is None
+
+
+def test_async_llm_success_within_per_attempt_deadline_passes(monkeypatch):
+    """Issue #417 success path: an ASYNC ``llm_fn`` that returns a valid
+    design WITHIN the per-attempt budget goes through ``asyncio.wait_for``
+    (the ``_await_with_per_attempt_deadline`` helper) and the loop passes
+    with the candidate — ``wait_for`` returns the ``LLMResult`` (not a
+    ``Task``), so ``scad.prompt_hash`` on the success path is valid."""
+    calls = {"n": 0}
+    scad = _scad_llm(GOOD_SCAD)
+
+    async def _async_llm(role, messages, system):
+        calls["n"] += 1
+        return scad
+
+    result = asyncio.run(
+        run_design_loop_async(
+            photo=PHOTO,
+            stated_dims=STATED,
+            render_fn=lambda s, d: _render(),
+            llm_fn=_async_llm,
+            bbox_fn=_bbox_ok,
+            max_iterations=MAX_ITERATIONS,
+            attempt_timeout=5.0,
+        )
+    )
+    assert calls["n"] == 1
+    assert result.status == "pass"
+    assert result.best.iteration == 1
+    assert "cube" in result.best.scad_source
+
+
+def test_sync_llm_success_within_per_attempt_deadline_passes(monkeypatch):
+    """Issue #417 success path: a SYNC ``llm_fn`` (the `_call` inline path,
+    no coroutine wrapping) that returns a valid design within the per-attempt
+    budget also goes through the deadline helper and the loop passes."""
+    scad = _scad_llm(GOOD_SCAD)
+
+    def _sync_llm(role, messages, system):
+        return scad
+
+    result = asyncio.run(
+        run_design_loop_async(
+            photo=PHOTO,
+            stated_dims=STATED,
+            render_fn=lambda s, d: _render(),
+            llm_fn=_sync_llm,
+            bbox_fn=_bbox_ok,
+            max_iterations=MAX_ITERATIONS,
+            attempt_timeout=5.0,
+        )
+    )
+    assert result.status == "pass"
+    assert result.best.iteration == 1
+    assert "cube" in result.best.scad_source
+
+
+def test_non_timeout_llm_exception_propagates_under_deadline():
+    """Issue #417 lens round 4: a NON-timeout LLM exception (an
+    ``httpx.ConnectError``) raised by the design call under the armed
+    per-attempt deadline propagates out of ``run_design_loop_async`` AS
+    ITS ORIGINAL TYPE — it is neither converted into the keep-best
+    ``design_loop_timed_out`` result (only timeouts take that path) nor
+    swallowed into an ``AttributeError`` at the ``scad = _scad_or_result``
+    seam. Good attempt 1 + ``ConnectError`` on attempt 2, deadline armed:
+    the exception must be the ConnectError itself (the same as before
+    #417, when a bare ``await`` let every non-TimeoutException propagate).
+    """
+    import httpx
+
+    good = _scad_llm(GOOD_SCAD)
+    calls = {"n": 0}
+    # The pre-flight probes are injected stubs, so only the LLM call
+    # (attempt 2) is reached before the exception fires.
+
+    async def _err_llm(role, messages, system):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return good
+        raise httpx.ConnectError("connect refused")
+
+    with pytest.raises(httpx.ConnectError):
+        asyncio.run(
+            run_design_loop_async(
+                photo=PHOTO,
+                stated_dims=STATED,
+                render_fn=lambda s, d: _render(),
+                llm_fn=_err_llm,
+                max_iterations=MAX_ITERATIONS,
+                attempt_timeout=5.0,
+            )
+        )
+    assert calls["n"] == 2, "attempt 2 was never made"
+
+
+def test_sync_llm_blocking_call_is_bounded_by_deadline():
+    """Issue #417 lens round 4: a SYNC ``llm_fn`` runs in a worker thread
+    (``asyncio.to_thread``) when the per-attempt deadline is armed, so
+    ``wait_for`` can actually bound it — a blocking 2 s call under a 0.3 s
+    budget returns the keep-best ``design_loop_timed_out`` result in well
+    under 1.5 s (before the fix the sync call ran inline on the event
+    loop, the deadline was a no-op, and the loop waited the full 2 s).
+    """
+    good = _scad_llm(GOOD_SCAD)
+    calls = {"n": 0}
+
+    def _blocking_llm(role, messages, system):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return good
+        time.sleep(2.0)
+        raise AssertionError("blocking sync llm_fn ran to completion")
+
+    t0 = time.monotonic()
+
+    def _loop():
+        return run_design_loop_async(
+            photo=PHOTO,
+            stated_dims=STATED,
+            render_fn=lambda s, d: _render(),
+            llm_fn=_blocking_llm,
+            max_iterations=MAX_ITERATIONS,
+            attempt_timeout=0.3,
+        )
+
+    async def _driver():
+        # The deadline fires at ~0.3 s; the loop result is available then.
+        # (Measured outside ``asyncio.run``'s shutdown join — the worker
+        # thread cannot be killed and its 2 s sleep outlives the deadline;
+        # the point is the WALL CLOCK of the result, not the thread's
+        # death.)
+        result = await _loop()
+        return result, time.monotonic() - t0
+
+    import asyncio as _asyncio
+
+    loop = _asyncio.new_event_loop()
+    try:
+        result, elapsed = loop.run_until_complete(_driver())
+    finally:
+        loop.close()
+    assert result.status == "exhausted"
+    assert result.failure_reason == "design_loop_timed_out"
+    # The keep-best path: attempt 1's candidate is kept.
+    assert result.best is not None
+    assert result.best.iteration == 1
+    assert "cube" in result.best.scad_source
+    # The deadline fired at ~0.3 s, not after the full 2 s blocking call.
+    assert elapsed < 1.5, f"sync blocking call stalled the loop {elapsed:.2f}s"
+
+
+def test_inner_per_call_llm_timeout_keeps_best_candidate(monkeypatch):
+    """Issue #417: the production per-LLM-call bound
+    (``d33d.design_llm.LLM_CALL_TIMEOUT_SECONDS``, 120 s — the httpx
+    per-request timeout on the production edge) defaults to the SAME value
+    as the loop's per-attempt deadline, so a SLOW model trips the INNER
+    per-call timeout first (httpx raises ``httpx.TimeoutException``) rather
+    than the outer ``wait_for``'s TimeoutError. That exception must lead
+    to the SAME keep-best ``design_loop_timed_out`` result, not crash or
+    exhaust. A good attempt 1 + an inner per-call timeout on attempt 2 →
+    the attempt-1 candidate is kept and the reason is
+    ``design_loop_timed_out``."""
+    import httpx
+
+    good = _scad_llm(GOOD_SCAD)
+    calls = {"n": 0}
+
+    async def _slow_llm(role, messages, system):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return good
+        # Production per-call timeout (the httpx bound) firing on attempt 2.
+        raise httpx.TimeoutException("timed out")
+
+    result = asyncio.run(
+        run_design_loop_async(
+            photo=PHOTO,
+            stated_dims=STATED,
+            render_fn=lambda s, d: _render(),
+            llm_fn=_slow_llm,
+            max_iterations=MAX_ITERATIONS,
+            attempt_timeout=5.0,
+        )
+    )
+    # The inner per-call timeout on attempt 2 routed to the keep-best path
+    # (not a crash / not a re-attempt): attempt 1's candidate is kept.
+    assert result.status == "exhausted"
+    assert result.failure_reason == "design_loop_timed_out"
+    assert result.best is not None
+    assert result.best.iteration == 1
+    assert "cube" in result.best.scad_source
+
+
+def test_preflight_renderer_probe_bounded(monkeypatch):
+    """Issue #417 bounded pre-flight: the pre-flight ``renderer_is_available``
+    probe (``None`` → real probe via ``to_thread``) that sleeps past a
+    monkeypatched short :data:`PREFLIGHT_PROBE_TIMEOUT_SECONDS` is cut off
+    by ``asyncio.wait_for`` and returns the SAME retryable
+    ``renderer_unavailable`` result the OSError path yields."""
+    import d33d.design_loop as _dl
+
+    def _sleepy_probe(*a, **kw):
+        time.sleep(2.0)  # past the 0.5 s monkeypatched bound
+        return True
+
+    monkeypatch.setattr(_dl, "renderer_is_available", _sleepy_probe)
+    monkeypatch.setattr(
+        _dl, "PREFLIGHT_PROBE_TIMEOUT_SECONDS", 0.5, raising=False
+    )
+
+    result = asyncio.run(
+        run_design_loop_async(
+            photo=PHOTO,
+            stated_dims=STATED,
+            render_fn=lambda s, d: _render(),
+            llm_fn=lambda role, m, s: _scad_llm(GOOD_SCAD),
+            max_iterations=1,
+        )
+    )
+    assert result.status == "exhausted"
+    assert result.failure_reason == "renderer_unavailable"
+    assert result.iterations_used == 0
+
+
+def test_preflight_image_probe_bounded(monkeypatch):
+    """Issue #417 bounded pre-flight: the pre-flight image probe (``None`` →
+    real ``default_image_check`` via ``to_thread``) that sleeps past a
+    monkeypatched short :data:`PREFLIGHT_PROBE_TIMEOUT_SECONDS` is cut off
+    and returns the SAME retryable ``renderer_unavailable`` result (never
+    the terminal ``renderer_image_stale``)."""
+    import d33d.design_loop as _dl
+
+    monkeypatch.setattr(
+        _dl, "renderer_is_available", lambda *a, **kw: True
+    )
+
+    def _sleepy_image_check(*a, **kw):
+        time.sleep(2.0)  # past the 0.5 s monkeypatched bound
+
+    monkeypatch.setattr(_dl, "default_image_check", _sleepy_image_check)
+    monkeypatch.setattr(
+        _dl, "PREFLIGHT_PROBE_TIMEOUT_SECONDS", 0.5, raising=False
+    )
+
+    result = asyncio.run(
+        run_design_loop_async(
+            photo=PHOTO,
+            stated_dims=STATED,
+            render_fn=lambda s, d: _render(),
+            llm_fn=lambda role, m, s: _scad_llm(GOOD_SCAD),
+            max_iterations=1,
+        )
+    )
+    assert result.status == "exhausted"
+    assert result.failure_reason == "renderer_unavailable"
+    assert result.iterations_used == 0
+    assert result.failure_reason != "renderer_image_stale"
+
+
+def test_real_send_readtimeout_keeps_best_candidate():
+    """Issue #417 (the PM's CRITICAL check): the production per-call bound
+    (``d33d.design_llm.LLM_CALL_TIMEOUT_SECONDS`` — the httpx per-request
+    timeout on the production edge) trips as ``httpx.ReadTimeout`` (a
+    subclass of ``httpx.TimeoutException``) INSIDE the real ``send()`` —
+    neither ``send()`` nor ``make_logged_llm_fn`` catches or re-raises it,
+    so it propagates to the loop and must lead to the SAME keep-best
+    ``design_loop_timed_out`` result as the outer per-attempt deadline.
+
+    This drives the REAL production chain: ``make_llm_fn`` + the REAL
+    ``d33d.design_llm.send`` (T1 fenced-JSON) over a ``httpx.AsyncClient``
+    with a ``httpx.MockTransport`` whose handler returns a good fenced
+    tool call on attempt 1 and raises ``httpx.ReadTimeout`` on attempt 2
+    (the wire-level ReadTimeout a slow remote model produces when the
+    per-request timeout fires). A good attempt 1 + a read-timeout attempt 2
+    → the attempt-1 candidate is kept with reason ``design_loop_timed_out``
+    (not a crash, not a re-attempt, not an empty result).
+    """
+    import json as _json
+
+    import httpx
+
+    from d33d.config.probes import CapabilityResult
+    from d33d.design_loop import make_llm_fn
+
+    wire_calls = {"n": 0}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        wire_calls["n"] += 1
+        if wire_calls["n"] == 1:
+            payload = {
+                "choices": [
+                    {
+                        "message": {
+                            "content": (
+                                "```json\n"
+                                + _json.dumps(
+                                    {
+                                        "tool": "emit_design",
+                                        "arguments": {"scad": GOOD_SCAD},
+                                    }
+                                )
+                                + "\n```"
+                            )
+                        }
+                    }
+                ]
+            }
+            return httpx.Response(200, json=payload)
+        # The production per-request httpx bound firing on attempt 2:
+        # the same exception the real edge raises (not the outer
+        # wait_for's TimeoutError).
+        raise httpx.ReadTimeout("read timed out")
+
+    async def _factory(body: dict) -> httpx.Response:
+        # The production edge's shape (d33d.app._http_request_factory's
+        # _factory): an AsyncClient whose transport injects the timeout.
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(_handler)
+        ) as client:
+            return await client.post(
+                "http://llm.test/v1/chat/completions",
+                json=body,
+                headers={"Authorization": "Bearer k"},
+            )
+
+    t1 = CapabilityResult(
+        tools=True, json_schema=False, vision=True, max_images=8, validated=True
+    )
+    llm_fn = make_llm_fn(_catalogue(), {"design": _factory}, {"design": t1})
+
+    result = asyncio.run(
+        run_design_loop_async(
+            photo=PHOTO,
+            stated_dims=STATED,
+            render_fn=lambda s, d: _render(),
+            llm_fn=llm_fn,
+            max_iterations=MAX_ITERATIONS,
+            attempt_timeout=10.0,
+        )
+    )
+    assert wire_calls["n"] == 2, (
+        f"expected 2 wire calls (good attempt 1 + read-timeout attempt 2), "
+        f"got {wire_calls['n']}"
+    )
+    # The REAL send()'s ReadTimeout routed to the keep-best path (not a
+    # crash / not a SenderError / not a re-attempt of the wire call).
+    assert result.status == "exhausted"
+    assert result.failure_reason == "design_loop_timed_out"
+    assert result.best is not None
+    assert result.best.iteration == 1
+    assert "cube" in result.best.scad_source
