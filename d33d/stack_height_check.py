@@ -16,8 +16,8 @@ sum to the measured Z (the bbox the loop already computes): in the
 SCAD's top-level parameter block, find a height-named derived
 parameter whose value is a sum of at least two parameters that each
 resolve to a positive constant, and fire when the declared sum and the
-measured Z disagree by MORE than the disagrees-major threshold
-(``max(20% of declared, 5 mm)`` — the same pair as bit 5).
+measured Z disagree by MORE than the stack threshold
+(``max(10% of declared, 0.5 mm)``, issue #436).
 
 The module is deliberately separate from ``d33d.design_loop`` (the
 loop orchestrates; this module owns the check's logic), mirroring
@@ -45,6 +45,7 @@ __all__ = [
     "declared_stack_sum",
     "is_height_name",
     "stack_height_check",
+    "stack_height_threshold",
 ]
 
 #: The evaluator's nesting cap (issue #409, lens review): the
@@ -403,6 +404,18 @@ def stack_height_instruction(declared: float, measured: float) -> str:
     )
 
 
+#: The stack-height tolerance (issue #436): 10% of the declared stack,
+#: floored at 0.5 mm. Deliberately its own pair, NOT bit 5's
+#: ``design_state._disagrees_major_flag`` (20% / 5 mm), which stays unchanged.
+STACK_HEIGHT_THRESHOLD_REL = 0.10
+STACK_HEIGHT_THRESHOLD_MIN_MM = 0.5
+
+
+def stack_height_threshold(declared: float) -> float:
+    """``max(10% of declared, 0.5 mm)`` - the stack-height tolerance."""
+    return max(STACK_HEIGHT_THRESHOLD_REL * declared, STACK_HEIGHT_THRESHOLD_MIN_MM)
+
+
 def stack_height_check(
     scad_source: str,
     measured_z: float | None,
@@ -416,11 +429,10 @@ def stack_height_check(
     or ``measured_z`` is missing (no mesh / no bbox).
 
     Otherwise returns the DETECTION tuple ``(declared, measured)`` when
-    ``abs(declared − measured_z)`` exceeds the disagrees-major
-    threshold ``max(20% of declared, 5 mm)`` (the same pair as bit 5 —
-    ``d33d.design_state.DISAGREES_MAJOR_THRESHOLD_REL`` /
-    ``DISAGREES_MAJOR_THRESHOLD_MIN_MM``); a diff AT the threshold
-    passes (strict ``>``, mirroring bit 5). The caller (
+    ``abs(declared − measured_z)`` exceeds the stack
+    threshold ``max(10% of declared, 0.5 mm)`` (issue #436 —
+    ``stack_height_threshold``); a diff AT the threshold passes
+    (strict ``>``). The caller (
     ``d33d.design_loop``) folds this into the repair dict — the EXISTING
     ``geometrically_wrong`` class, no new class — and routes it through
     ``route_repair``.
@@ -433,9 +445,6 @@ def stack_height_check(
         logger.info("stack-height check abstained: no measured Z (no mesh or bbox)")
         return None
     measured = float(measured_z)
-    from d33d.design_state import (  # same semantics as bit 5: 20% base on declared, strict >
-        _disagrees_major_flag,
-    )
-    if _disagrees_major_flag(measured, declared):
+    if abs(declared - measured) > stack_height_threshold(declared):
         return (declared, measured)
     return None
