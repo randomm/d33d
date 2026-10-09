@@ -530,6 +530,12 @@ export const failure = {
      *  fix — this sentence is the user-facing failure copy only. */
     mesh_unchanged:
       "The change didn't take — nothing in the part moved.",
+    through_hole_missing:
+      "The hole didn't go all the way through — it stopped short of the far face.",
+    screw_clearance_wrong:
+      "A screw hole is smaller than its clearance — the screw won't fit.",
+    stack_height_mismatch:
+      "The stacked parts don't add up to the height you asked for.",
     empty_model: "The design produced an empty model — there is nothing to print.",
     artifact_error: "The model file came out unreadable.",
     timeout: "The render ran out of time. A simpler shape will get through.",

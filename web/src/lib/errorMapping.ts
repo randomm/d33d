@@ -94,6 +94,11 @@ export const FAILURE_REASONS: readonly string[] = [
   // the change taking, and the SPA renders the deck's `mesh_unchanged`
   // sentence ("The change didn't take — nothing in the part moved.").
   "mesh_unchanged",
+  // Issue #432: the post-check reasons (d33d/failure_classes.py). Each rides
+  // `geometrically_wrong` on the repair; the loop exhausts with its own reason.
+  "through_hole_missing",
+  "screw_clearance_wrong",
+  "stack_height_mismatch",
 ];
 
 /** The generic fallback for a reason code outside the closed set. */
