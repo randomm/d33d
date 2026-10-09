@@ -11,7 +11,11 @@ missing-source check and BEFORE the #250 offer / question pre-routes.
 
 from __future__ import annotations
 
+import logging
+import sqlite3
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from d33d.fill_recut import (
     FILL_RECUT_DECLINE_REPLY,
@@ -50,23 +54,7 @@ def _stored_part_bounds_sync(app: Any, project_id: int) -> list[list[float]] | N
     file_bounds = _load_part_bounds_file_units(app, project_id)
     if file_bounds is None:
         return None
-    try:
-        row = app.state.conn.get_project(project_id)
-        if row is None:
-            return None
-    except Exception:  # noqa: BLE001 - a corrupt row degrades to None
-        return None
-    scale = row.get("part_scale")
-    try:
-        factor = float(scale) if scale is not None else 0.0
-    except (TypeError, ValueError):
-        factor = 0.0
-    if factor <= 0:
-        return None
-    return [
-        [v * factor for v in file_bounds[0]],
-        [v * factor for v in file_bounds[1]],
-    ]
+    return _scaled_part_bounds(file_bounds, _part_scale_factor(app, project_id))
 
 
 def _load_part_bounds_file_units(app: Any, project_id: int) -> list[list[float]] | None:
@@ -83,30 +71,38 @@ def _load_part_bounds_file_units(app: Any, project_id: int) -> list[list[float]]
     an unloadable mesh, a missing v1 row, or an unreadable row) — the
     caller keeps extents/2.
     """
-    try:
-        row = app.state.conn.get_project(project_id)
-        if row is None:
-            return None
-        from d33d.part_http import resolve_v1_part_path
+    from d33d.part_mesh import PartUploadError
 
-        part_path, _repo_dir = resolve_v1_part_path(row, app.state.conn)
-        if part_path is None or not part_path.exists():
-            return None
-    except Exception:  # noqa: BLE001 - a corrupt row degrades to None
+    try:
+        row, part_path = _resolve_stored_part(app, project_id)
+    except (sqlite3.Error, ValueError, OSError) as e:
+        # An unreadable row (``sqlite3.Error``/``ValueError``) or a
+        # vanished part file (``OSError``) degrades to the extents/2
+        # fallback — logged so a persistent degradation is greppable.
+        logger.warning(
+            "stored part bounds for project %s: row/part resolution "
+            "failed (%s) — caller keeps the extents/2 fallback",
+            project_id,
+            type(e).__name__,
+            exc_info=True,
+        )
+        return None
+    if row is None or part_path is None:
         return None
 
-    def _load_mesh(path, fmt):
-        from d33d.part_http import MAX_PART_UPLOAD_BYTES
-        from d33d.part_mesh import load_part_geometry, read_part_file_atomic
-
-        raw = read_part_file_atomic(path, MAX_PART_UPLOAD_BYTES)
-        mesh = load_part_geometry(raw, fmt or "stl")
-        lo, hi = mesh.bounds
-        return [[float(lo[0]), float(lo[1])], [float(hi[0]), float(hi[1])]]
-
     try:
-        return _load_mesh(part_path, row.get("part_format"))
-    except Exception:  # noqa: BLE001 - unavailable → extents/2 fallback
+        return _load_mesh_bounds(part_path, row.get("part_format"))
+    except (PartUploadError, OSError) as e:
+        # An unloadable mesh or unreadable file degrades to the extents/2
+        # fallback (3MF imports are not loadable here by design); logged
+        # so a persistent degradation is greppable.
+        logger.warning(
+            "stored part bounds for project %s: mesh load failed (%s) "
+            "— caller keeps the extents/2 fallback",
+            project_id,
+            type(e).__name__,
+            exc_info=True,
+        )
         return None
 
 
@@ -128,53 +124,146 @@ def stored_part_bounds_mm(app: Any, project_id: int) -> list[list[float]] | None
     """
     import asyncio
 
-    try:
-        row = app.state.conn.get_project(project_id)
-        if row is None:
-            return None
-        from d33d.part_http import resolve_v1_part_path
+    from d33d.part_mesh import PartUploadError
 
-        part_path, _repo_dir = resolve_v1_part_path(row, app.state.conn)
-        if part_path is None or not part_path.exists():
-            return None
-    except Exception:  # noqa: BLE001 - a corrupt row degrades to None
+    try:
+        row, part_path = _resolve_stored_part(app, project_id)
+    except (sqlite3.Error, ValueError, OSError) as e:
+        # An unreadable row (``sqlite3.Error``/``ValueError``) or a
+        # vanished part file (``OSError``) degrades to the extents/2
+        # fallback — the chat route must never raise for a legacy report.
+        logger.warning(
+            "stored part bounds for project %s: row/part resolution "
+            "failed (%s) — caller keeps the extents/2 fallback",
+            project_id,
+            type(e).__name__,
+            exc_info=True,
+        )
+        return None
+    if row is None or part_path is None:
         return None
 
     def _load_mesh(path, fmt):
-        from d33d.part_http import MAX_PART_UPLOAD_BYTES
-        from d33d.part_mesh import load_part_geometry, read_part_file_atomic
-
-        raw = read_part_file_atomic(path, MAX_PART_UPLOAD_BYTES)
-        mesh = load_part_geometry(raw, fmt or "stl")
-        lo, hi = mesh.bounds
-        return [[float(lo[0]), float(lo[1])], [float(hi[0]), float(hi[1])]]
+        return _load_mesh_bounds(path, fmt)
 
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
+        # No running loop: load on this thread.
         try:
             file_bounds = _load_mesh(part_path, row.get("part_format"))
-        except Exception:  # noqa: BLE001 - unavailable → extents/2 fallback
+        except (PartUploadError, OSError) as e:
+            logger.warning(
+                "stored part bounds for project %s: mesh load failed (%s) "
+                "— caller keeps the extents/2 fallback",
+                project_id,
+                type(e).__name__,
+                exc_info=True,
+            )
             return None
     else:
         try:
             file_bounds = loop.run_in_executor(
                 None, _load_mesh, part_path, row.get("part_format")
             ).result()
-        except Exception:  # noqa: BLE001 - executor failure → sync retry
-            file_bounds = None
-    if file_bounds is None:
-        try:
-            file_bounds = _load_mesh(part_path, row.get("part_format"))
-        except Exception:  # noqa: BLE001 - unavailable → extents/2 fallback
-            return None
-    if file_bounds is None:
-        return None
+        except (PartUploadError, OSError, asyncio.InvalidStateError) as e:
+            # Executor failure (e.g. the file vanished between resolve and
+            # load) → sync retry below, then the extents/2 fallback.
+            logger.warning(
+                "stored part bounds for project %s: mesh load failed in "
+                "executor (%s) — retrying on this thread",
+                project_id,
+                type(e).__name__,
+                exc_info=True,
+            )
+            try:
+                file_bounds = _load_mesh(part_path, row.get("part_format"))
+            except (PartUploadError, OSError) as e2:
+                logger.warning(
+                    "stored part bounds for project %s: sync retry also "
+                    "failed (%s) — caller keeps the extents/2 fallback",
+                    project_id,
+                    type(e2).__name__,
+                    exc_info=True,
+                )
+                return None
+    return _scaled_part_bounds(file_bounds, _part_scale_factor(app, project_id))
+
+
+def _resolve_stored_part(
+    app: Any, project_id: int
+) -> tuple[dict[str, Any] | None, Any]:
+    """The project's row and its committed part file path, acquired on the
+    CALLING thread (the app's sqlite handle is thread-bound — a read inside
+    a worker thread would raise ``sqlite3.ProgrammingError``).
+
+    ``(None, None)`` when the project row is absent, the project has no
+    committed part, or the part file is missing on disk. Raises
+    ``sqlite3.Error``/``ValueError`` (an unreadable row) or ``OSError``
+    (the file vanished) — the caller degrades to the extents/2 fallback.
+    """
+    row = app.state.conn.get_project(project_id)
+    if row is None:
+        return None, None
+    from d33d.part_http import resolve_v1_part_path
+
+    part_path, _repo_dir = resolve_v1_part_path(row, app.state.conn)
+    if part_path is None or not part_path.exists():
+        return row, None
+    return row, part_path
+
+
+
+def _load_mesh_bounds(part_path: Any, fmt: Any) -> list[list[float]] | None:
+    """The stored part mesh's ``mesh.bounds`` in FILE units (XY only).
+
+    ``None`` when the mesh is empty (a 3MF import that loaded with no
+    geometry); raises ``PartUploadError``/``OSError`` when the file is
+    unreadable or the mesh is unloadable — the caller degrades to the
+    extents/2 fallback.
+    """
+    from d33d.part_http import MAX_PART_UPLOAD_BYTES
+    from d33d.part_mesh import load_part_geometry, read_part_file_atomic
+
+    raw = read_part_file_atomic(part_path, MAX_PART_UPLOAD_BYTES)
+    mesh = load_part_geometry(raw, fmt or "stl")
+    lo, hi = mesh.bounds
+    return [[float(lo[0]), float(lo[1])], [float(hi[0]), float(hi[1])]]
+
+
+def _part_scale_factor(app: Any, project_id: int) -> float:
+    """The project's ``part_scale`` as a positive factor, or ``0.0``
+    (missing/non-numeric/non-positive) — the caller keeps extents/2.
+    """
+    try:
+        row = app.state.conn.get_project(project_id)
+    except (sqlite3.Error, ValueError) as e:
+        # A row that becomes unreadable between the resolution read and
+        # this read degrades to the extents/2 fallback; logged so a
+        # persistent degradation is greppable.
+        logger.warning(
+            "stored part bounds for project %s: scale read failed (%s) — "
+            "caller keeps the extents/2 fallback",
+            project_id,
+            type(e).__name__,
+            exc_info=True,
+        )
+        return 0.0
+    if row is None:
+        return 0.0
     scale = row.get("part_scale")
     try:
         factor = float(scale) if scale is not None else 0.0
     except (TypeError, ValueError):
         factor = 0.0
+    return factor if factor > 0 else 0.0
+
+
+def _scaled_part_bounds(
+    file_bounds: list[list[float]], factor: float
+) -> list[list[float]] | None:
+    """``file_bounds`` scaled by ``factor``; ``None`` when the factor is
+    non-positive — the caller keeps extents/2."""
     if factor <= 0:
         return None
     return [
