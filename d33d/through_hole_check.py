@@ -357,12 +357,25 @@ def _instruction_with_span(instruction: str, stl: str | None) -> str:
     margin. Abstains to the bare instruction when the STL cannot be read."""
     if not isinstance(stl, str) or not stl:
         return instruction
-    try:
-        import trimesh
+    import trimesh
 
-        zmin, zmax = (float(v) for v in trimesh.load(stl, process=False, force="mesh").bounds[:, 2])
-    except (OSError, ValueError, RuntimeError, TypeError, IndexError):
+    try:
+        bounds = trimesh.load(stl, process=False, force="mesh").bounds
+    except (OSError, ValueError, RuntimeError, TypeError) as exc:
+        logger.warning(
+            "through-hole span unavailable (stl %s): %r — repair sent without the measured z-span",
+            stl,
+            exc,
+            exc_info=True,
+        )
         return instruction
+    if bounds is None:
+        logger.warning(
+            "through-hole span unavailable (stl %s): empty mesh — repair sent without the measured z-span",
+            stl,
+        )
+        return instruction
+    zmin, zmax = (float(v) for v in bounds[:, 2])
     thickness = zmax - zmin
     return (
         f"{instruction} Measured: the part is {thickness:g} mm thick "

@@ -46,7 +46,7 @@ export { SIZE_AXIS_ADJECTIVES, SIZE_AXIS_WORDS } from "../copy";
  *  the terminal error frame's `reason` field can hold.
  *  `copy.failure.reasons` holds the sentences; this is the key set totality
  *  is asserted against. */
-export const FAILURE_REASONS: readonly string[] = [
+export const FAILURE_REASONS = [
   // GATE_REASON_BITS (d33d/design_loop.py, bit order)
   "error_class_not_ok",
   "views_blank_or_missing",
@@ -99,7 +99,10 @@ export const FAILURE_REASONS: readonly string[] = [
   "through_hole_missing",
   "screw_clearance_wrong",
   "stack_height_mismatch",
-];
+] as const;
+
+/** A loop-level reason code; `tsc` checks any `Record<FailureReason, …>` is total. */
+export type FailureReason = (typeof FAILURE_REASONS)[number];
 
 /** The generic fallback for a reason code outside the closed set. */
 const UNKNOWN_REASON_COPY =

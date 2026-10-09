@@ -2542,7 +2542,9 @@ async def run_design_loop_async(
             return _container_error_stop(iterations, best)
 
         if _repeat_post_check:
-            return _exhausted(iterations, best, best_score)
+            return _exhausted(
+                iterations, best, best_score, failure_reason=_post_reason
+            )
 
         repair = next_repair
         if consecutive_no_improvement >= NO_IMPROVEMENT_LIMIT:

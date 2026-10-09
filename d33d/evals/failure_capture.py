@@ -62,11 +62,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field, ValidationError
 
-from d33d.failure_classes import (
-    SCREW_CLEARANCE_REASON,
-    STACK_HEIGHT_REASON,
-    THROUGH_HOLE_REASON,
-)
+from d33d.failure_classes import POST_CHECK_REASONS
 from d33d.unchanged_mesh_check import MESH_UNCHANGED_REASON
 
 #: The closed enum of failure classes a failures.jsonl line may carry.
@@ -168,14 +164,9 @@ LOOP_LEVEL_FAILURE_REASONS: frozenset[str] = frozenset(
         # unchanged-mesh turn would raise ``ValueError`` in the
         # failures.jsonl hook and silently lose its archive line.
         MESH_UNCHANGED_REASON,
-        # Issue #432: the through-hole, screw-clearance and stack-height
-        # post-checks exhaust with their own loop-level reason (the same
-        # geometrically_wrong class, the same archive admission rule).
-        THROUGH_HOLE_REASON,
-        SCREW_CLEARANCE_REASON,
-        STACK_HEIGHT_REASON,
     }
-)
+) | POST_CHECK_REASONS  # Issue #432: post-check reasons share one source
+
 
 #: Hard cap on ``output_scad`` line length (chars) — an unbounded LLM
 #: runaway source would otherwise dominate the file. Mirrors the design
