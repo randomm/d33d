@@ -244,6 +244,22 @@ class FailureEvent(BaseModel):
     failure_class: str = Field(min_length=1)
     exit_code: int | None = None
     stderr_tail: str = ""
+    #: The number of design-loop attempts the run made before the
+    #: deadline fired (issue #417). Optional — pre-#417 rows (and
+    #: non-deadline rows) carry no attempt count (the model must
+    #: validate existing rows without these fields).
+    attempt_count: int | None = Field(default=None, ge=1)
+    #: Measured wall-clock seconds per completed attempt (issue #417),
+    #: one entry per timed attempt in attempt order. Optional — ``None``
+    #: (absent) when no attempt was timed (a stall that never rendered);
+    #: an empty list is never written (omit-not-null: honest absence —
+    #: the normalisers in ``record_production_failure`` /
+    #: ``make_failure_event`` turn an empty list into ``None`` before
+    #: construction, so ``min_length`` guards against a direct
+    #: constructor call with a malformed empty list).
+    per_attempt_latencies: list[float] | None = Field(
+        default=None, min_length=1
+    )
     ts: str = Field(min_length=1)
     event_id: str = Field(min_length=1)
 
@@ -325,6 +341,8 @@ def make_failure_event(
     now: datetime | None = None,
     event_id: str | None = None,
     allow_gate_reasons: bool = False,
+    attempt_count: int | None = None,
+    per_attempt_latencies: list[float] | None = None,
 ) -> FailureEvent:
     """Build a validated :class:`FailureEvent`.
 
@@ -338,8 +356,14 @@ def make_failure_event(
     ``True`` while a direct ``make_failure_event`` call (the eval
     harness, the fold script) does not.
 
+    ``attempt_count`` / ``per_attempt_latencies`` (issue #417) are
+    constructor arguments: the model's ``ge=1`` / ``min_length=1``
+    constraints are enforced at construction (never assigned after the
+    fact, which would bypass Pydantic validation).
+
     Raises ``ValidationError`` (via the model) on a missing/empty
-    required field, or a ``failure_class`` outside the closed enum.
+    required field, a ``failure_class`` outside the closed enum, or an
+    invalid ``attempt_count`` / ``per_attempt_latencies`` value.
     """
     _validate_failure_class(failure_class, allow_gate_reasons=allow_gate_reasons)
     ts = (
@@ -358,6 +382,10 @@ def make_failure_event(
         stderr_tail=(stderr_tail or "")[:MAX_STDERR_TAIL_CHARS],
         ts=ts,
         event_id=eid,
+        attempt_count=attempt_count,
+        per_attempt_latencies=list(per_attempt_latencies)
+        if per_attempt_latencies
+        else None,
     )
 
 
@@ -465,6 +493,8 @@ def _exhausted_loop_event(
     model: Any,
     prompt_version: str,
     output_scad: str,
+    attempt_count: int | None = None,
+    per_attempt_latencies: list[float] | None = None,
 ) -> FailureEvent:
     """Build the :class:`FailureEvent` for an exhausted design loop.
 
@@ -472,6 +502,10 @@ def _exhausted_loop_event(
     render-worker class, a gate-reason bit, a loop-level pre-flight
     reason — issue #277 — or a named LLM class) — the structured class
     the loop already computed, never a re-derivation from raw stderr.
+
+    ``attempt_count`` / ``per_attempt_latencies`` (issue #417) are passed
+    straight through to ``make_failure_event`` so the model's ``ge=1`` /
+    ``min_length=1`` constraints validate at construction.
     """
     failure_reason = getattr(design_result, "failure_reason", None)
     if not isinstance(failure_reason, str) or not failure_reason:
@@ -514,6 +548,10 @@ def _exhausted_loop_event(
         exit_code=exit_code,
         stderr_tail=stderr_tail,
         allow_gate_reasons=True,
+        attempt_count=attempt_count,
+        per_attempt_latencies=list(per_attempt_latencies)
+        if per_attempt_latencies
+        else None,
     )
 
 
@@ -536,6 +574,8 @@ def record_production_failure(
     output_scad: str,
     path: str | Path | None = None,
     now: datetime | None = None,
+    attempt_count: int | None = None,
+    per_attempt_latencies: list[float] | None = None,
 ) -> FailureEvent | None:
     """The production hook: archive an exhausted design loop to
     ``failures.jsonl``.
@@ -544,6 +584,17 @@ def record_production_failure(
     loop produces no failure line (there is nothing to archive). The
     eval harness's assert path never calls this function (structural
     exclusion), so eval-run failures never reach the file.
+
+    ``attempt_count`` / ``per_attempt_latencies`` (issue #417) ride the
+    deadline-kill row: the adapter's measured attempt count and the
+    per-attempt wall-clock seconds (one per timed attempt, in order).
+    Both are optional (``None`` = absent — pre-#417 rows validate
+    unchanged); an empty latencies list is normalised to ``None``
+    (omit-not-null — honest absence over an empty array). Both are
+    handed through ``_exhausted_loop_event`` → ``make_failure_event``
+    (issue #417 lens round 4) so the model's ``ge=1`` / ``min_length=1``
+    constraints validate at construction, never via post-construction
+    attribute assignment.
 
     Returns the :class:`FailureEvent` written, or ``None`` for a
     passing result. An untagged/exhausted result (no ``failure_reason``)
@@ -565,6 +616,10 @@ def record_production_failure(
         model=model,
         prompt_version=prompt_version,
         output_scad=output_scad,
+        attempt_count=attempt_count,
+        per_attempt_latencies=list(per_attempt_latencies)
+        if per_attempt_latencies
+        else None,
     )
     append_failure_line(event, path)
     return event
@@ -617,6 +672,26 @@ def default_run_design_loop_hook(
         result = await real_run(request=request, **kwargs)
         try:
             if result is not None:
+                # The loop's OWN per-attempt measurements (issue #417):
+                # when the loop's per-attempt deadline cut the run off,
+                # the result carries the loop-sourced attempt count
+                # (``attempts_started`` — the number of attempts STARTED,
+                # including the one killed mid-LLM-call) and the
+                # per-attempt latencies (``None`` for every non-deadline
+                # outcome) — the same numbers the adapter puts on the
+                # terminal frame. A synthetic/stand-in result without the
+                # attributes keeps the explicit-argument behaviour (no
+                # numbers on the row — honest absence).
+                _loop_attempt_count = getattr(result, "attempts_started", None)
+                _loop_latencies = getattr(result, "attempt_latencies", None)
+                # A non-deadline result has ``attempts_started`` defaulting
+                # to 0 (not a deadline cut — no measurement to report).
+                # The hook must NOT write ``attempt_count=0`` (the schema
+                # requires ``ge=1``): 0 means "no deadline cut happened",
+                # so the field is omitted entirely (``None`` — honest
+                # absence, pre-#417 row shape).
+                if _loop_attempt_count is not None and _loop_attempt_count < 1:
+                    _loop_attempt_count = None
                 record_production_failure(
                     design_result=result,
                     photo=hook_photo,
@@ -628,6 +703,10 @@ def default_run_design_loop_hook(
                         getattr(getattr(result, "best", None), "scad_source", "") or ""
                     ),
                     path=path,
+                    attempt_count=_loop_attempt_count,
+                    per_attempt_latencies=list(_loop_latencies)
+                    if _loop_latencies
+                    else None,
                 )
         except Exception:
             # The hook MUST NOT mask the loop result — a hook failure

@@ -1830,6 +1830,13 @@ def _build_production_design_loop():
         return dataclasses.replace(result, env_var=env_var)
 
     async def _loop(app_state: Any, **kwargs: Any) -> Any:
+        # Issue #417: the loop's per-attempt LLM-call deadline (full
+        # design in d33d.design_loop._await_with_per_attempt_deadline).
+        # The adapter passes it in the kwargs (this closure pops ``model``
+        # / ``prompt_version`` / ``request`` for the hook, then forwards
+        # ``attempt_timeout`` through ``**kwargs`` to the real loop); a
+        # test stub that doesn't consume it ignores it.
+        attempt_timeout = kwargs.get("attempt_timeout")
         catalogue_path: Path = app_state.catalogue_path
         # Project-scoped persistence (issue #72): bind the data-dir
         # renders path so the worker's post-harvest step actually fires in
@@ -1969,6 +1976,7 @@ def _build_production_design_loop():
             model=res.entry.model,
             prompt_version=prompt_version,
             on_progress=on_progress,
+            attempt_timeout=attempt_timeout,
         )
 
     def _wrapper(app: Any, **kwargs: Any) -> Any:

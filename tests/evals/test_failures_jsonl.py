@@ -42,6 +42,25 @@ from d33d.evals.failure_capture import (
     read_failure_events,
     record_production_failure,
 )
+from d33d.render_worker import RenderResult
+
+
+def _stub_render():
+    """A stub render (issue #417 test): an ``ok`` render with the
+    view/bbox the loop's bbox gate needs (the test passes ``stated_dims``
+    of ``(0.0, 0.0, 0.0)`` — the bbox gate abstains on the zero axes —
+    so the render is version-grade: ``render is not None``)."""
+    return RenderResult(
+        ok=True,
+        exit_code=0,
+        duration_ms=1,
+        error_class="ok",
+        stderr="",
+        stl="model.stl",
+        csg="model.csg",
+        views=("view_01",),
+        render_log="",
+    )
 
 
 @pytest.fixture
@@ -458,6 +477,179 @@ def test_failure_event_accepts_valid_class():
     """A ``FailureEvent`` with a valid ``failure_class`` passes."""
     for fc in sorted(EVAL_FAILURE_CLASSES):
         FailureEvent.validate_failure_class(fc)
+
+
+def test_failure_event_accepts_pre_417_shape_without_attempt_fields():
+    """A ``FailureEvent`` with ``attempt_count=None`` and
+    ``per_attempt_latencies=None`` (the pre-#417 row shape) validates —
+    the two fields are optional (default ``None``) so existing rows
+    written before the deadline-kill archive gained them still read.
+    A future change that accidentally makes the fields required would
+    break this test."""
+    ev = FailureEvent(
+        photo=None,
+        region_mark=None,
+        request="make it a cube",
+        model="model-x",
+        prompt_version="",
+        output_scad="",
+        failure_class="design_loop_timed_out",
+        ts="2026-01-01T00:00:00+00:00",
+        event_id="abc123",
+    )
+    assert ev.attempt_count is None
+    assert ev.per_attempt_latencies is None
+
+
+def test_failure_event_attempt_fields_constraints_apply_when_present():
+    """The ``attempt_count`` / ``per_attempt_latencies`` constraints
+    (``ge=1`` / ``min_length=1``) apply only when the value IS present
+    (the ``None`` default is always accepted — see the pre-#417 shape
+    test above). A present value that violates the constraint raises:
+    ``attempt_count=0`` (the honest-absence path writes ``None``, never
+    ``0``) and an empty ``per_attempt_latencies`` list are both
+    rejected."""
+    with pytest.raises(ValidationError):
+        FailureEvent(
+            request="make it a cube",
+            model="model-x",
+            failure_class="design_loop_timed_out",
+            ts="2026-01-01T00:00:00+00:00",
+            event_id="abc123",
+            attempt_count=0,
+        )
+    with pytest.raises(ValidationError):
+        FailureEvent(
+            request="make it a cube",
+            model="model-x",
+            failure_class="design_loop_timed_out",
+            ts="2026-01-01T00:00:00+00:00",
+            event_id="abc123",
+            per_attempt_latencies=[],
+        )
+
+
+def _exhausted_stub_result():
+    """A minimal exhausted loop result for the record_production_failure
+    validation tests (a structured ``failure_reason`` the hook admits)."""
+    from d33d.design_loop import IterationRecord, Score
+    from d33d.render_worker import RenderResult
+
+    class _StubResult:
+        status = "exhausted"
+        failure_reason = "timeout"
+        best = IterationRecord(
+            iteration=1,
+            scad_source="cube();",
+            render=RenderResult(
+                ok=True,
+                exit_code=0,
+                duration_ms=0,
+                error_class="ok",
+                stderr="",
+                stl=None,
+                csg=None,
+                views=("v",) * 6,
+            ),
+            score=Score(bits=(True,) * 5, rank=5, tiebreak=(True,) * 5),
+            params={},
+        )
+
+    return _StubResult()
+
+
+def test_make_failure_event_validates_attempt_fields_at_construction():
+    """Issue #417 lens round 4 (item 3): ``make_failure_event`` accepts
+    ``attempt_count`` / ``per_attempt_latencies`` and enforces the model's
+    ``ge=1`` / ``min_length=1`` constraints at CONSTRUCTION — invalid
+    values raise ``ValidationError`` (not silently after, via attribute
+    assignment that bypasses Pydantic validation)."""
+    with pytest.raises(ValidationError):
+        make_failure_event(
+            photo=None,
+            region_mark=None,
+            request="make it a cube",
+            model="model-x",
+            prompt_version="",
+            output_scad="",
+            failure_class="design_loop_timed_out",
+            allow_gate_reasons=True,
+            attempt_count=0,
+        )
+    # An empty ``per_attempt_latencies`` list is normalised to ``None``
+    # (omit-not-null) at the ``make_failure_event`` / ``record_production_
+    # failure`` entry points — the ``min_length`` guard fires for a direct
+    # ``FailureEvent`` constructor call with a malformed empty list (the
+    # model-level test above), not here (normalisation is the honest
+    # absence, never an error).
+    ev_none = make_failure_event(
+        photo=None,
+        region_mark=None,
+        request="make it a cube",
+        model="model-x",
+        prompt_version="",
+        output_scad="",
+        failure_class="design_loop_timed_out",
+        allow_gate_reasons=True,
+        per_attempt_latencies=[],
+    )
+    assert ev_none.per_attempt_latencies is None
+    ev = make_failure_event(
+        photo=None,
+        region_mark=None,
+        request="make it a cube",
+        model="model-x",
+        prompt_version="",
+        output_scad="",
+        failure_class="design_loop_timed_out",
+        allow_gate_reasons=True,
+        attempt_count=2,
+        per_attempt_latencies=[1.5, 2.0],
+    )
+    assert ev.attempt_count == 2
+    assert ev.per_attempt_latencies == [1.5, 2.0]
+
+
+def test_record_production_failure_validates_attempt_fields():
+    """Issue #417 lens round 4 (item 3): ``record_production_failure``
+    hands ``attempt_count`` / ``per_attempt_latencies`` through the
+    validated constructor — invalid values raise ``ValidationError`` at
+    construction (before anything is appended), and the sink file is
+    never created."""
+    sink = Path("no_sink_file_417.txt")
+    if sink.exists():
+        sink.unlink()
+    with pytest.raises(ValidationError):
+        record_production_failure(
+            design_result=_exhausted_stub_result(),
+            photo=None,
+            region_mark=None,
+            request="make it a cube",
+            model="model-x",
+            prompt_version="",
+            output_scad="",
+            path=sink,
+            attempt_count=0,
+        )
+    # An empty ``per_attempt_latencies`` list is NORMALISED to ``None``
+    # (omit-not-null — honest absence over an empty array), so the
+    # constructor path accepts it; the ``min_length`` guard fires for a
+    # direct ``FailureEvent`` / ``make_failure_event`` call with a
+    # malformed empty list (the model-level test above), not here.
+    ev = record_production_failure(
+        design_result=_exhausted_stub_result(),
+        photo=None,
+        region_mark=None,
+        request="make it a cube",
+        model="model-x",
+        prompt_version="",
+        output_scad="",
+        path=sink,
+        per_attempt_latencies=[],
+    )
+    assert ev.per_attempt_latencies is None
+    assert sink.exists()  # the valid row (latencies normalised to None)
+    sink.unlink()  # clean up the scratch sink
 
 
 def test_make_failure_event_rejects_empty_request():
@@ -1232,7 +1424,13 @@ def test_design_loop_deadline_archives_timeout_row(
     )
 
     monkeypatch.setattr(
-        "d33d.design_loop_events.DESIGN_LOOP_TIMEOUT_SECONDS", 0.5
+        "d33d.design_loop_events.DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS", 0.5 / 3
+    )
+    monkeypatch.setattr(
+        "d33d.design_loop_events.ADAPTER_DEADLINE_MARGIN_SECONDS", 0.1
+    )
+    monkeypatch.setattr(
+        "d33d.design_loop_events.ADAPTER_RENDER_ALLOWANCE_SECONDS", 0.1
     )
 
     class _StallLoop:
@@ -1297,6 +1495,12 @@ def test_design_loop_deadline_archives_timeout_row(
     # receives it via ``**kwargs`` and the archive reads it back.
     assert ev.model  # non-empty, the resolved model id
     assert ev.prompt_version == ""  # honest absence — the loop never ran to a result
+    # Issue #417: the archive row carries the attempt count and per-attempt
+    # latencies (omit-not-null: a zero-render stall has no attempt count and
+    # no latencies — the adapter's "no version" path handles the honest
+    # absence). This stall never rendered, so both are None.
+    assert ev.attempt_count is None, f"expected no attempt count, got {ev.attempt_count}"
+    assert ev.per_attempt_latencies is None, f"expected no latencies, got {ev.per_attempt_latencies}"
 
 
 def test_design_loop_deadline_row_carries_last_scad_from_frames(
@@ -1315,7 +1519,13 @@ def test_design_loop_deadline_row_carries_last_scad_from_frames(
     )
 
     monkeypatch.setattr(
-        "d33d.design_loop_events.DESIGN_LOOP_TIMEOUT_SECONDS", 0.5
+        "d33d.design_loop_events.DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS", 0.5 / 3
+    )
+    monkeypatch.setattr(
+        "d33d.design_loop_events.ADAPTER_DEADLINE_MARGIN_SECONDS", 0.1
+    )
+    monkeypatch.setattr(
+        "d33d.design_loop_events.ADAPTER_RENDER_ALLOWANCE_SECONDS", 0.1
     )
 
     class _StallLoopWithScad:
@@ -1402,7 +1612,13 @@ def test_design_loop_deadline_archive_sees_asyncio_wait_frames(
     )
 
     monkeypatch.setattr(
-        "d33d.design_loop_events.DESIGN_LOOP_TIMEOUT_SECONDS", 1.0
+        "d33d.design_loop_events.DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS", 1.0 / 3
+    )
+    monkeypatch.setattr(
+        "d33d.design_loop_events.ADAPTER_DEADLINE_MARGIN_SECONDS", 0.1
+    )
+    monkeypatch.setattr(
+        "d33d.design_loop_events.ADAPTER_RENDER_ALLOWANCE_SECONDS", 0.1
     )
 
     SCAD = "W = 40; cube([W, 40, 20]);\n"
@@ -1488,3 +1704,336 @@ def test_design_loop_deadline_archive_sees_asyncio_wait_frames(
         f"expected the asyncio.wait-path scad_source in the archive row, "
         f"got {ev.output_scad!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# (issue #417) — slow-model timeout: keep the best candidate, version it,
+# archive with attempt count + latencies, emit the slow-model copy
+# ---------------------------------------------------------------------------
+
+
+def test_design_loop_slow_model_timeout_keeps_candidate_and_versions(
+    _eval_app_with_versions, tmp_path: Path, monkeypatch
+):
+    """Issue #417 (the PRIMARY slow-model path — the loop's own
+    per-attempt deadline, not the adapter's safety net): a scripted
+    slow ``llm_fn`` (via the REAL ``run_design_loop_async``) is fast on
+    attempt 1 (renders a real candidate) and slow on attempt 2 (the
+    per-attempt deadline fires — a 0.2 s budget vs a 10 s call). The
+    run ends with the loop's own best-so-far exhausted result, and the
+    adapter versions the kept candidate BEFORE the terminal error:
+
+    (a) the attempt-1 candidate (a REAL, rendered, scored
+        ``IterationRecord`` — not unvalidated text) is stored as a
+        version via the timeout-version path;
+    (b) a ``version-created`` progress frame BEFORE the terminal error;
+    (c) the terminal error frame with ``reason``
+        ``design_loop_timed_out`` + ``attempt_latency_seconds`` /
+        ``attempt_count`` (the SPA renders the slow-model copy from
+        these measured values);
+    (d) a failures.jsonl row with the attempt count and per-attempt
+        latencies (the production hook at the loop seam fires on the
+        exhausted result the loop itself returns — the archive row's
+        ``output_scad`` is the loop's own ``best.scad_source``).
+
+    This test pins WHICH layer fires in the slow-model scenario: the
+    loop's per-attempt deadline (its own ``wait_for``), which returns
+    the best-so-far result through the ordinary exhaustion path —
+    NOT the adapter's derived-total deadline (that one fires only for
+    a run that stops yielding frames before the loop can cut itself
+    off, see the adapter-safety-net tests below).
+    """
+    import asyncio as _asyncio
+
+    from d33d.design_llm import LLMResult
+    from d33d.design_loop import run_design_loop_async
+    from d33d.design_loop_events import (
+        DESIGN_LOOP_TIMED_OUT_REASON,
+        run_design_loop_with_events,
+    )
+
+    SCAD = "W = 40; cube([W, 40, 20]);\n"
+
+    def _llm_result(scad_text: str) -> LLMResult:
+        return LLMResult(
+            content=f"```openscad\n{scad_text}```",
+            tool_calls=(),
+            prompt_hash="h" * 64,
+            tier="T1",
+            status="ok",
+            request_body={},
+        )
+
+    class _SlowModelLoop:
+        """The REAL ``run_design_loop_async`` wired with a scripted
+        slow ``llm_fn``: attempt 1 is FAST (returns immediately — the
+        loop renders a real candidate), attempt 2 is SLOW (sleeps 10 s
+        — well past the per-attempt deadline, which the adapter passes
+        through the ``attempt_timeout`` kwarg). The adapter's derived
+        total (3 × 0.2 s + 60 s margin ≈ 60.6 s) is far above the
+        point at which the loop's own per-attempt deadline fires
+        (≈0.2 s after attempt 2 starts), so the loop cuts itself off
+        first — the slow-model path under test."""
+
+        def __call__(self, app=None, **kwargs):
+            # The production archive seam: in production the hook at the
+            # loop seam (``default_run_design_loop_hook``) fires on the
+            # loop's result and writes to the adapter's
+            # ``failures_jsonl_path`` sink. This test drives the loop
+            # directly (the stub IS the loop's production closure), so it
+            # replicates the hook's archiving on the same sink. The loop
+            # runs on the adapter's event loop (the stub returns a
+            # coroutine — the adapter's ``to_thread(_run_in_loop, raw)``
+            # drives it on a fresh loop on a worker thread, where
+            # ``asyncio.run`` is legal); the scripted slow ``llm_fn``
+            # (attempt 2 sleeps 10 s) is cut off by the 0.2 s per-attempt
+            # deadline, and the adapter's ``_last_scad_source`` tracker
+            # sees the loop's own ``scad-ready`` frame (attempt 1
+            # renders fast) BEFORE the deadline fires.
+            sink = getattr(app.state, "failures_jsonl_path", None) if app else None
+
+            async def _slow():
+                calls = {"n": 0}
+
+                async def _llm_fn(role, messages, system):
+                    calls["n"] += 1
+                    if calls["n"] == 1:
+                        return _llm_result(SCAD)
+                    await _asyncio.sleep(10)  # attempt 2: the slow model
+                    return _llm_result(SCAD)
+
+                kwargs["model"] = "model-x"  # the production closure's contract
+                result = await run_design_loop_async(
+                    photo=kwargs["photo"],
+                    chat_history=kwargs.get("chat_history") or (),
+                    stated_dims=kwargs.get("stated_dims") or (0.0, 0.0, 0.0),
+                    render_fn=lambda scad, defines: _stub_render(),
+                    llm_fn=_llm_fn,
+                    bbox_fn=kwargs.get("bbox_fn"),
+                    max_iterations=3,
+                    request=str(kwargs.get("request") or ""),
+                    state_params=kwargs.get("state_params"),
+                    state_bbox=kwargs.get("state_bbox"),
+                    state_stated=kwargs.get("state_stated"),
+                    state_meta=kwargs.get("state_meta"),
+                    state_confirmed=kwargs.get("state_confirmed"),
+                    design_source=kwargs.get("design_source"),
+                    part_scale=kwargs.get("part_scale"),
+                    part_bbox_mm=kwargs.get("part_bbox_mm"),
+                    renderer_check=lambda: True,
+                    image_check=lambda: None,
+                    on_progress=kwargs.get("on_progress"),
+                    attempt_timeout=0.2,  # per-attempt budget: small
+                )
+                try:
+                    record_production_failure(
+                        design_result=result,
+                        photo=kwargs.get("photo"),
+                        region_mark=kwargs.get("region_mark"),
+                        request=str(kwargs.get("request") or ""),
+                        model=kwargs.get("model"),
+                        prompt_version="",
+                        output_scad=str(
+                            getattr(getattr(result, "best", None), "scad_source", "")
+                            or ""
+                        ),
+                        path=sink,
+                        # The loop's OWN measurements (issue #417): the
+                        # loop-sourced attempt count (attempts STARTED,
+                        # including the one killed mid-LLM-call) and the
+                        # per-attempt latencies — the same numbers the
+                        # adapter puts on the terminal frame. ``None``
+                        # for a non-deadline result (honest absence).
+                        attempt_count=getattr(result, "attempts_started", None),
+                        per_attempt_latencies=list(result.attempt_latencies)
+                        if getattr(result, "attempt_latencies", None)
+                        else None,
+                    )
+                except Exception:  # noqa: S110, BLE001 — the hook's contract
+                    pass  # (never mask the loop result on an archive failure)
+                return result
+
+            return _slow()
+
+    app = _eval_app_with_versions
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "test project"})
+        assert r.status_code == 201, r.text
+        pid = r.json()["id"]
+        app.state.run_design_loop = _SlowModelLoop()
+        app.state.failures_jsonl_path = tmp_path / "failures.jsonl"
+        app.state.model_id = "model-x"
+        source = run_design_loop_with_events(
+            app,
+            pid,
+            user_message="make it a cube",
+            stated_dims=None,
+            chat_history=(),
+            photo="data:image/png;base64,x",
+            request_text="make it a cube",
+        )
+        frames = []
+        async for event, data in source:
+            frames.append((event, data))
+            if event in ("done", "error"):
+                break
+        return frames, pid
+
+    frames, _ = _drive_stream(app, _call)
+    assert frames and frames[-1][0] == "error", f"no terminal error frame: {frames}"
+    error_data = frames[-1][1]
+    assert error_data.get("reason") == DESIGN_LOOP_TIMED_OUT_REASON
+
+    # (b) A ``version-created`` progress frame appears BEFORE the
+    # terminal error frame (the kept candidate was stored as a version).
+    vc_frames = [
+        (i, d)
+        for i, (e, d) in enumerate(frames)
+        if e == "progress" and d.get("step") == "version-created"
+    ]
+    assert vc_frames, (
+        f"no version-created frame before the terminal error: {frames}"
+    )
+    _vc_idx, vc_data = vc_frames[0]
+    assert isinstance(vc_data.get("version_id"), int), (
+        f"version-created frame missing version_id: {vc_data}"
+    )
+    # The version-created frame must come BEFORE the terminal error
+    # (the last frame).
+    assert _vc_idx < len(frames) - 1, (
+        f"version-created frame at index {_vc_idx} is not before the "
+        f"terminal error (total frames: {len(frames)})"
+    )
+
+    # (c) The terminal error frame carries the slow-model copy data.
+    # The loop's OWN per-attempt deadline fired on attempt 2 (the
+    # structured reason ``design_loop_timed_out`` confirms the loop
+    # layer did the cutting off, not the adapter's safety net), so the
+    # LOOP owns the numbers: attempt 1 (fast, rendered) + attempt 2
+    # (killed mid-LLM-call — no view frames ever arrive for it) =
+    # two STARTED attempts. The frame carries ``attempt_count == 2``
+    # and a POSITIVE ``attempt_latency_seconds`` (the loop's wall clock
+    # averaged over the measured attempts; with attempt 1 ≈ fast and
+    # attempt 2 cut at the 0.2 s budget the mean is ≈ 0.1 s, which
+    # rounds to a whole second and — like a real slow model's 60 s
+    # round-up — rounds UP, never to a 0 that would read as "about 0s
+    # an attempt"). The SPA renders the templated slow-model copy
+    # from these two fields (web/src/lib/errorMapping.ts).
+    assert error_data.get("attempt_count") == 2, (
+        f"expected the loop-sourced attempt count (2) on the terminal "
+        f"frame, got {error_data.get('attempt_count')!r}"
+    )
+    _lat = error_data.get("attempt_latency_seconds")
+    assert isinstance(_lat, (int, float)) and _lat > 0, (
+        f"expected a positive loop-sourced attempt_latency_seconds on "
+        f"the terminal frame, got {_lat!r}"
+    )
+
+    # (d) The archive row (written by the production hook at the loop
+    # seam — the loop returned a real exhausted result) carries the
+    # SAME loop-sourced numbers: the attempt count (2 started) and the
+    # per-attempt latencies the loop's wall clock measured, one entry
+    # per measured attempt (attempts killed mid-LLM-call are omitted —
+    # honest absence, never fabricated). Output_scad is the loop's own
+    # best.scad_source.
+    out = tmp_path / "failures.jsonl"
+    assert out.exists(), "deadline did not archive a failures.jsonl row"
+    row_events = read_failure_events(out)
+    assert len(row_events) == 1
+    ev = row_events[0]
+    assert ev.failure_class == DESIGN_LOOP_TIMED_OUT_REASON
+    assert ev.attempt_count == 2, (
+        f"expected the loop-sourced attempt count (2) in the archive "
+        f"row, got {ev.attempt_count!r}"
+    )
+    assert ev.per_attempt_latencies is not None and ev.per_attempt_latencies
+    assert all(isinstance(x, float) and x >= 0 for x in ev.per_attempt_latencies), (
+        f"archive latencies are not measured seconds: {ev.per_attempt_latencies!r}"
+    )
+    assert ev.output_scad == SCAD, (
+        f"expected the kept candidate's SCAD in the archive row, "
+        f"got {ev.output_scad!r}"
+    )
+
+
+def test_design_loop_slow_model_timeout_no_version_on_zero_render(
+    _eval_app_with_versions, tmp_path: Path, monkeypatch
+):
+    """Issue #417 negative case: a timeout with ZERO rendered candidates
+    (the stall never surfaced a SCAD) ends WITHOUT a version — the
+    honest-absence path (no ``version-created`` frame, no version row).
+    The terminal error frame still fires with the structured reason.
+    """
+    import asyncio as _asyncio
+
+    from d33d.design_loop_events import (
+        DESIGN_LOOP_TIMED_OUT_REASON,
+        run_design_loop_with_events,
+    )
+
+    monkeypatch.setattr(
+        "d33d.design_loop_events.DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS", 0.5 / 3
+    )
+    monkeypatch.setattr(
+        "d33d.design_loop_events.ADAPTER_DEADLINE_MARGIN_SECONDS", 0.1
+    )
+    monkeypatch.setattr(
+        "d33d.design_loop_events.ADAPTER_RENDER_ALLOWANCE_SECONDS", 0.1
+    )
+
+    class _StallLoop:
+        """A zero-render stall: the loop never surfaces a SCAD."""
+
+        def __call__(self, app=None, **kwargs):
+            async def _stall():
+                kwargs["model"] = "model-x"
+                await _asyncio.sleep(10)
+
+            return _stall()
+
+    app = _eval_app_with_versions
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "test project"})
+        assert r.status_code == 201, r.text
+        pid = r.json()["id"]
+        app.state.run_design_loop = _StallLoop()
+        app.state.failures_jsonl_path = tmp_path / "failures.jsonl"
+        app.state.model_id = "model-x"
+        source = run_design_loop_with_events(
+            app,
+            pid,
+            user_message="make it a cube",
+            stated_dims=None,
+            chat_history=(),
+            photo="data:image/png;base64,x",
+            request_text="make it a cube",
+        )
+        frames = []
+        async for event, data in source:
+            frames.append((event, data))
+            if event in ("done", "error"):
+                break
+        return frames, pid
+
+    frames, _ = _drive_stream(app, _call)
+    assert frames and frames[-1][0] == "error", f"no terminal error frame: {frames}"
+    error_data = frames[-1][1]
+    assert error_data.get("reason") == DESIGN_LOOP_TIMED_OUT_REASON
+    # NO version-created frame (zero rendered candidates → no version).
+    vc_frames = [
+        d for e, d in frames if e == "progress" and d.get("step") == "version-created"
+    ]
+    assert not vc_frames, (
+        f"unexpected version-created frame on zero-render timeout: {vc_frames}"
+    )
+    # The archive row exists but carries no SCAD (honest absence).
+    out = tmp_path / "failures.jsonl"
+    assert out.exists(), "deadline did not archive a failures.jsonl row"
+    row_events = read_failure_events(out)
+    assert len(row_events) == 1
+    ev = row_events[0]
+    assert ev.failure_class == DESIGN_LOOP_TIMED_OUT_REASON
+    assert ev.output_scad == ""
+

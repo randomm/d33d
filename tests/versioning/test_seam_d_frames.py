@@ -166,6 +166,35 @@ def test_seam_d_derived_field_set_includes_step_and_bbox():
     assert "views" in fields
 
 
+def test_seam_d_render_less_version_created_frame_is_valid():
+    """Issue #417: the timeout-kept path emits a ``version-created``
+    frame with ONLY ``step`` + ``version_id`` (no ``stl_data_uri``,
+    no ``views``, no ``bbox_abstained``) because the kept candidate
+    has no render (the deadline killed the run before any render
+    completed). The SEAM D omit-not-null policy makes this valid:
+    absence of the omit-conditional fields is the honest state of a
+    render-less kept version. The SPA handles the absence gracefully
+    (``handleStreamViewerData`` returns early when ``stl_data_uri`` is
+    not a string; the ``views`` attachment is skipped when absent).
+    This test pins the render-less shape as a valid SEAM D frame.
+    """
+    frame = (
+        "progress",
+        {"step": "version-created", "version_id": 42},
+    )
+    # Must validate without error (the omit-not-null policy: absence
+    # of stl_data_uri / views / bbox_abstained is valid).
+    validated = validate_frame(frame)
+    assert validated == frame
+    # And a full stream with this frame + a terminal error is valid.
+    stream = [
+        ("progress", {"step": "design-loop-start"}),
+        frame,
+        ("error", {"message": "timed out", "reason": "design_loop_timed_out"}),
+    ]
+    validate_frames_stream(stream)
+
+
 # ---------------------------------------------------------------------------
 # SEAM D replay: the answer-path fixture (E.json, issue #249)
 #

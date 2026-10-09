@@ -457,6 +457,19 @@ export const failure = {
    *  the alias/role is missing). Distinct from the env-var helper: the fix
    *  is the settings file, not a shell variable. Also a sibling of `reasons`. */
   modelUnresolved: "Check the model settings.",
+  /** The slow-model timeout copy (issue #417): the per-attempt latency
+   *  and attempt count are filled in from the server's measured values
+   *  (``attempt_seconds`` is the measured per-attempt wall-clock time,
+   *  rounded to a whole second; ``attempt_count`` is the number of
+   *  attempts made before the deadline fired). A sibling of `reasons`, not
+   *  a reason-code entry: the wire frame's `reason` is always the string
+   *  reason code `design_loop_timed_out` (whose sentence is in `reasons`);
+   *  errorMapping.ts selects this template when the frame ALSO carries the
+   *  measured fields (both finite and count > 0) — never when either is
+   *  absent (the generic reason sentence stands, no number the SPA has not
+   *  established). */
+  slowModelTimeout: (attemptSeconds: number, attemptCount: number): string =>
+    `The model is slow right now (about ${attemptSeconds}s an attempt), so I stopped after ${attemptCount} tries.`,
   /** The renderer image pre-flight disclosure (issue #346): the fault
    *  line naming the verified reason (image missing vs label mismatch).
    *  A sibling of `reasons`, not a reason-code entry: the failure turn
@@ -477,7 +490,10 @@ export const failure = {
    *  `renderer_image_stale`, issue #346)
    *  have an entry (the `model_unconfigured` entry is the headline; the
    *  sibling helpers `modelUnconfiguredHelper` / `modelUnresolved` render
-   *  after it). */
+   *  after it). The map is a closed `Record<string, string>`: the templated
+   *  slow-model copy (issue #417) is the sibling key `slowModelTimeout`, not
+   *  an entry — a function-valued entry would break the string-only lookup
+   *  invariant. */
   reasons: {
     /** Loop-level pre-flight (issue #303): the configured LLM model could
      *  not be used, so nothing was designed. Terminal — retrying changes

@@ -289,6 +289,22 @@ export function displayDesignLoopError(
      *  (the disclosure falls back to the plain reason, never a half-
      *  established detail). */
     renderer_detail?: unknown;
+    /** The server's measured per-attempt wall-clock seconds (issue #417,
+     *  `design_loop_timed_out` frame field, omit-not-null): the average
+     *  measured latency across the attempts that completed before the
+     *  deadline fired. Used to fill in the slow-model copy's "about Ns
+     *  an attempt" clause. The wire sends a `round()`-produced integer or
+     *  omits the field entirely; a malformed (non-finite) value is
+     *  dropped at the use site (the generic reason sentence stands — no
+     *  number the SPA has not established). */
+    attempt_latency_seconds?: number;
+    /** The server's measured attempt count (issue #417, `design_loop_
+     *  timed_out` frame field, omit-not-null): the number of design-loop
+     *  iterations that started before the deadline fired. Used to fill
+     *  in the slow-model copy's "after N tries" clause. The wire sends an
+     *  `int` or omits the field entirely; a malformed value is dropped at
+     *  the use site (the generic reason sentence stands). */
+    attempt_count?: number;
   },
   envelopeLimits?: [number, number, number],
 ): DisplayError {
@@ -307,7 +323,31 @@ export function displayDesignLoopError(
   const rendererDetail = parseRendererDetail(data.renderer_detail);
   if (reason !== undefined) {
     const mapped = (copy.failure.reasons as Record<string, string>)[reason];
+    // The slow-model timeout copy (issue #417): the server's measured
+    // per-attempt latency and attempt count are on the frame (omit-not-
+    // null). When BOTH are present and valid (finite, count > 0), the
+    // headline is the templated "model is slow right now" copy (the
+    // `copy.failure.slowModelTimeout` sibling of `reasons` — the frame's
+    // `reason` is the string code `design_loop_timed_out`, whose sentence
+    // is the fallback in `reasons`). When the frame carries no measured
+    // values (a stall that never rendered), the headline falls back to the
+    // generic `design_loop_timed_out` reason sentence (which still says
+    // "ran past its time limit" — the cause is stated, just without a
+    // number the SPA has not established).
     let message = mapped ?? UNKNOWN_REASON_COPY;
+    if (reason === "design_loop_timed_out") {
+      const lat = data.attempt_latency_seconds;
+      const cnt = data.attempt_count;
+      if (
+        typeof lat === "number" &&
+        Number.isFinite(lat) &&
+        typeof cnt === "number" &&
+        Number.isFinite(cnt) &&
+        cnt > 0
+      ) {
+        message = copy.failure.slowModelTimeout(lat, cnt);
+      }
+    }
     // The carried-axis variant: the frame's `carried_axes` is the set the
     // gate enforced (the user's earlier statements, held by the carry-
     // forward merge). A bbox failure with at least one enforced axis says
