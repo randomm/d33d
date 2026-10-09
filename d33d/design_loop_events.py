@@ -35,7 +35,7 @@ import json
 import logging
 import math
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable
 from pathlib import Path
 from typing import Any
 
@@ -1594,31 +1594,20 @@ def _seam_parent_mesh_stats(
         # whole-mesh load (``trimesh.load(process=False, force="mesh")``
         # → ``mesh_fingerprint`` on all vertices) so the seam-forwarded
         # and path-fallback paths agree for multi-component parents.
-        import hashlib as _hl
+        # The round/sort/sha256 is the SHARED helper (issue #419 final:
+        # single fingerprint implementation — the seam and the check's
+        # own ``mesh_fingerprint`` hash identically by construction, so
+        # the two sides can never drift apart).
+        from d33d.unchanged_mesh_check import fingerprint_from_rounded_vertices
 
-        from d33d.unchanged_mesh_check import _ROUND_MM
+        def _all_watertight_vertices() -> Iterable[tuple[float, float, float]]:
+            for comp in components:
+                if comp.is_watertight:
+                    yield from comp.vertices
 
-        all_verts: set[tuple[int, int, int]] = set()
-        for comp in components:
-            if comp.is_watertight:
-                for (x, y, z) in comp.vertices:
-                    all_verts.add(
-                        (
-                            round(float(x) / _ROUND_MM),
-                            round(float(y) / _ROUND_MM),
-                            round(float(z) / _ROUND_MM),
-                        )
-                    )
-        if all_verts:
-            sorted_set = sorted(all_verts)
-            vbytes = bytearray()
-            for v in sorted_set:
-                for c in v:
-                    vbytes += int(c).to_bytes(8, "big", signed=True)
-            fingerprint = (
-                _hl.sha256(bytes(vbytes)).hexdigest(),
-                len(sorted_set),
-            )
+        fingerprint = fingerprint_from_rounded_vertices(
+            _all_watertight_vertices()
+        )
         return (genus, total_vol, total_faces, fingerprint)
     except (ValueError, TypeError, RuntimeError, IndexError):
         return (genus, None, None, None)
@@ -2717,15 +2706,75 @@ async def run_design_loop_with_events(
         # deadline did not cut — the adapter safety-net path is the
         # only other timeout path, and it builds its own frame).
         _timeout_kept_version_id: int | None = None
-        if (
-            reason == DESIGN_LOOP_TIMED_OUT_REASON
-            and getattr(result, "status", None) == "exhausted"
+        if reason == DESIGN_LOOP_TIMED_OUT_REASON and (
+            getattr(result, "status", None) == "exhausted"
         ):
             _kept_best = getattr(result, "best", None)
             _kept_render = getattr(_kept_best, "render", None)
             _kept_scad = getattr(_kept_best, "scad_source", None)
+            # Issue #419 (final): the timeout-version path must NOT
+            # version a kept candidate whose iteration carried the
+            # unchanged-mesh repair (``best.repair["reason"] ==
+            # "mesh_unchanged"``): that candidate is GEOMETRICALLY
+            # IDENTICAL to its parent, so versioning it creates a
+            # duplicate of the parent version (the exact defect #419's
+            # final gap names). When the check fired on the kept
+            # candidate, versioning is SKIPPED — but the terminal
+            # ``design_loop_timed_out`` error frame and the failures.
+            # jsonl archive row are still emitted (the archive rides the
+            # loop-result hook, which fires on the exhausted result
+            # regardless of the version decision — see the hook the app
+            # wires at the loop seam, ``record_production_failure``).
+            #
+            # The slow-model copy's measured per-attempt latency (the
+            # terminal frame's ``attempt_latency_seconds`` /
+            # ``attempt_count`` fields, both omit-not-null) is derived
+            # from the LOOP-SOURCED numbers (the loop owns the wall
+            # clock — the mean of its own per-attempt wall clock, rounded
+            # up to a whole second — a killed attempt's 0.2 s burns read
+            # as "about 1s an attempt", never "about 0s"), with the
+            # frame-derived ``_attempt_tracker`` as a FALLBACK for
+            # results that carry no loop-sourced numbers (non-deadline-
+            # shaped results, or a sync stub loop the loop's own
+            # deadline did not cut — the adapter safety-net path is the
+            # only other timeout path, and it builds its own frame).
+            # Omitted when no attempt was measured (an unmeasured number
+            # would violate the SPA's "never render a number the SPA has
+            # not established" invariant). The derivation runs for EVERY
+            # timed-out exhausted result (the latency is a property of
+            # the run, not of the versioning decision) — including the
+            # skipped-unchanged case below, which skips versioning but
+            # still emits the terminal frame.
+            _loop_latencies = getattr(result, "attempt_latencies", None)
+            _started = getattr(result, "attempts_started", None)
+            if not isinstance(_started, int) or _started <= 0:
+                _started = len(_loop_latencies) if _loop_latencies else 0
+            _latency, _count = _slow_model_fields(_loop_latencies, _started)
+            if _latency is None and _attempt_tracker is not None:
+                _fallback_latency, _fallback_count = _slow_model_fields(
+                    _attempt_tracker.latencies(),
+                    _attempt_tracker.attempt_count,
+                )
+                _latency = _fallback_latency
+                _count = _fallback_count
+            if _latency is not None:
+                error_data["attempt_latency_seconds"] = _latency
+            if _count > 0:
+                error_data["attempt_count"] = _count
+            # The versioning decision: skip the kept candidate when the
+            # unchanged-mesh check fired on it (a duplicate of the
+            # parent version would be created); otherwise version it
+            # BEFORE the terminal error frame (the same frame order the
+            # adapter-deadline path uses — version-created before the
+            # error: the ticket's gate resolution).
+            _kept_repair = getattr(_kept_best, "repair", None)
+            _kept_unchanged = (
+                isinstance(_kept_repair, dict)
+                and _kept_repair.get("reason") == "mesh_unchanged"
+            )
             if (
                 _kept_best is not None
+                and not _kept_unchanged
                 and _kept_render is not None
                 and isinstance(_kept_scad, str)
                 and _kept_scad.strip()
@@ -2747,41 +2796,6 @@ async def run_design_loop_with_events(
                         project_id,
                     )
                     _timeout_kept_version_id = None
-                # The slow-model copy's measured per-attempt latency
-                # ("about Ns an attempt" — the SPA renders it from the
-                # terminal frame's ``attempt_latency_seconds`` /
-                # ``attempt_count`` fields, both omit-not-null): the
-                # LOOP-SOURCED numbers above — the mean of the loop's
-                # own per-attempt wall clock, rounded up to a whole
-                # second (a killed attempt's 0.2 s burns read as
-                # "about 1s an attempt", never "about 0s"). Omitted
-                # when no attempt was measured (an unmeasured number
-                # would violate the SPA's "never render a number the
-                # SPA has not established" invariant).
-                _loop_latencies = getattr(result, "attempt_latencies", None)
-                _started = getattr(result, "attempts_started", None)
-                if not isinstance(_started, int) or _started <= 0:
-                    _started = len(_loop_latencies) if _loop_latencies else 0
-                _latency, _count = _slow_model_fields(
-                    _loop_latencies, _started
-                )
-                # Fallback: the frame-derived attempt tracker (the
-                # adapter safety-net path — see the comment above).
-                # Only exists on the awaitable path; a sync stub
-                # loop with no loop-sourced numbers falls through to
-                # omitting both fields (no fabricated numbers — the
-                # SPA never renders a number it has not established).
-                if _latency is None and _attempt_tracker is not None:
-                    _fallback_latency, _fallback_count = _slow_model_fields(
-                        _attempt_tracker.latencies(),
-                        _attempt_tracker.attempt_count,
-                    )
-                    _latency = _fallback_latency
-                    _count = _fallback_count
-                if _latency is not None:
-                    error_data["attempt_latency_seconds"] = _latency
-                if _count > 0:
-                    error_data["attempt_count"] = _count
         # Frame order (issue #417 gate resolution): [photo notice(s),
         # version-created (when the kept candidate was stored), terminal
         # error] — the SAME order the adapter-deadline path uses, and the

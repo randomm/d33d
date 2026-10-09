@@ -14,9 +14,9 @@ hole (Ø3, 7.07 mm3) moved 10 mm on a large plate (~57.5 k mm3) shifts the
 volume centroid by ~0.007 mm — far inside the old centroid tolerance —
 and the volume stays identical (delta < 1e-6 mm3); even the face count
 differs by only ~1% (the export triangulates the bore wall slightly
-differently at the two positions). A fingerprint (rounded exact vertex
-set + exact face-vertex triples) separates the two files even though
-every summary stat says "unchanged".
+differently at the two positions). A fingerprint (the rounded exact
+vertex set, sha256-hashed) separates the two files even though every
+summary stat says "unchanged".
 
 The pair is NOT a pair of identical vertex sets (a moved hole moves
 vertices), so it also doubles as the proof that a genuine geometric

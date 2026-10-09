@@ -1120,9 +1120,9 @@ def _finalize_loop_kwargs(
             )
         # Issue #419: the unchanged-mesh check's parent baseline — the
         # SAME mesh load that produced the genus (one file, one disk
-        # read, two baselines). The centroid and bbox diagonal ride the
-        # same load (issue #419 lens fix — the check then never re-loads
-        # the parent for the centroid).
+        # read, two baselines). The geometry fingerprint rides the same
+        # load (issue #419 lens fix — the check then never re-loads
+        # the parent for the fingerprint).
         _pm_vol = _pv
         _pm_faces = _pf
     elif row.get("part_filename"):

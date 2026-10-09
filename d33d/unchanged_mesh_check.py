@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -117,6 +118,44 @@ def _fingerprint_bytes(values: list[Any]) -> bytes:
     return bytes(out)
 
 
+def fingerprint_from_rounded_vertices(
+    vertices: Iterable[tuple[float, float, float]],
+) -> tuple[str, int] | None:
+    """The geometry fingerprint from an iterable of vertex triples:
+    ``(sha256(sorted rounded vertex set), vertex_set_size)``.
+
+    The single shared round/sort/hash helper — the ONE implementation
+    of the fingerprint's round-to-1e-3-mm, deduplicate, sort, and
+    sha256 logic, used by both the check's own ``mesh_fingerprint`` and
+    the seam's parent-mesh fingerprint (``design_loop_events``'s
+    ``_seam_parent_mesh_stats``) so the two sides hash identically by
+    construction (no re-implemented round/sort/sha256 that could drift
+    apart — the drift the multi-component seam test guards against).
+
+    ``vertices`` is any iterable of ``(x, y, z)`` coordinate triples
+    (``mesh.vertices`` or a union of per-component vertex iterables —
+    the caller supplies whichever load shape it used). ``None`` for an
+    empty vertex set (a load failure — the caller's empty_model gate
+    already handles that shape) or an unreadable vertex set.
+    """
+    try:
+        rounded = {
+            (
+                round(float(x) / _ROUND_MM),
+                round(float(y) / _ROUND_MM),
+                round(float(z) / _ROUND_MM),
+            )
+            for (x, y, z) in vertices
+        }
+    except (ValueError, TypeError, RuntimeError, IndexError, OverflowError):
+        return None
+    if not rounded:
+        return None
+    sorted_set = sorted(rounded)
+    vbytes = _fingerprint_bytes([c for v in sorted_set for c in v])
+    return (hashlib.sha256(vbytes).hexdigest(), len(sorted_set))
+
+
 def mesh_fingerprint(mesh: Any) -> tuple[str, int] | None:
     """The mesh's geometry fingerprint:
     ``(sha256(sorted rounded vertex set), vertex_set_size)``.
@@ -143,19 +182,9 @@ def mesh_fingerprint(mesh: Any) -> tuple[str, int] | None:
         verts = mesh.vertices
         if len(verts) <= 0:
             return None
-        rounded = {
-            (
-                round(float(x) / _ROUND_MM),
-                round(float(y) / _ROUND_MM),
-                round(float(z) / _ROUND_MM),
-            )
-            for (x, y, z) in verts
-        }
-        sorted_set = sorted(rounded)
-        vbytes = _fingerprint_bytes([c for v in sorted_set for c in v])
-        return (hashlib.sha256(vbytes).hexdigest(), len(sorted_set))
     except (ValueError, TypeError, RuntimeError, IndexError, OverflowError):
         return None
+    return fingerprint_from_rounded_vertices(verts)
 
 
 def _load_mesh(path: str) -> Any | None:
