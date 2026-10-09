@@ -69,12 +69,14 @@ from d33d.config.catalogue import Catalogue
 from d33d.config.probes import CapabilityResult
 from d33d.config.resolve import resolve_model
 from d33d.design_llm import LLMResult, send
-from d33d.failure_classes import (
+from d33d.evals.failure_capture import (
     POST_CHECK_REASONS,
-    REPAIRABLE_CLASSES,
     SCREW_CLEARANCE_REASON,
     STACK_HEIGHT_REASON,
     THROUGH_HOLE_REASON,
+)
+from d33d.failure_classes import (
+    REPAIRABLE_CLASSES,
     ClassifiedFailure,
     classify_failure,
     detect_magic_numbers,
@@ -2542,8 +2544,12 @@ async def run_design_loop_async(
             return _container_error_stop(iterations, best)
 
         if _repeat_post_check:
+            # Issue #432 operator decision: the repeated attempt N's mesh is
+            # identical to attempt N-1's, so N-1 is the reported best and
+            # the repeated post-check's reason is the terminal reason.
+            _prev = iterations[-2]
             return _exhausted(
-                iterations, best, best_score, failure_reason=_post_reason
+                iterations, _prev, _prev.score, failure_reason=_post_reason
             )
 
         repair = next_repair

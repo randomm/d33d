@@ -104,6 +104,10 @@ export const FAILURE_REASONS = [
 /** A loop-level reason code; `tsc` checks any `Record<FailureReason, …>` is total. */
 export type FailureReason = (typeof FAILURE_REASONS)[number];
 
+/** Compile-time totality (issue #432): a `FailureReason` with no sentence in
+ *  `copy.failure.reasons` is a `tsc` error here, not a silent fallback. */
+export const FAILURE_REASON_COPY: Record<FailureReason, string> = copy.failure.reasons;
+
 /** The generic fallback for a reason code outside the closed set. */
 const UNKNOWN_REASON_COPY =
   "The design could not be generated. You can retry, or describe the part in more detail.";

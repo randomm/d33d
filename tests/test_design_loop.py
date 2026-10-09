@@ -4271,6 +4271,49 @@ def test_unchanged_mesh_v100_repro_fires_geometrically_wrong(tmp_path):
     assert result.failure_reason == "mesh_unchanged"
 
 
+def test_identical_repair_stop_reports_attempt_n_minus_1_as_best(tmp_path):
+    """Issue #432 operator decision: when the identical-repair stop fires at
+    attempt N, the reported best and reason come from attempt N-1 — the
+    repeated post-check's reason (mesh_unchanged here)."""
+    fixture_dir = Path(__file__).parent / "fixtures" / "stl"
+    parent = str(fixture_dir / "v100-plate.stl")
+    result = _run_unchanged_loop(parent, parent_mesh_stl=parent)
+    assert result.status == "exhausted"
+    assert result.iterations_used == 2
+    assert result.failure_reason == "mesh_unchanged"
+    assert result.best is result.iterations[0]
+    assert result.best.iteration == 1
+
+
+def test_stack_height_identical_repeat_stops_at_attempt_2(tmp_path):
+    """Issue #432: the identical-repair stop applies to the stack-height
+    post-check too. A real STL whose mesh repeats across attempts stops the
+    loop after attempt 2, reporting attempt 1 as best and the stack reason,
+    with the declared-vs-measured fact in the repair instruction."""
+    from pathlib import Path as _Path
+
+    import trimesh
+
+    v65 = (_Path(__file__).parent / "fixtures" / "scad" / "v65-lid-difference-inversion.scad").read_text()
+    stl = str(tmp_path / "slab.stl")
+    trimesh.creation.box(extents=(20.0, 20.0, 4.0)).export(stl)
+    result = run_design_loop(
+        photo=PHOTO,
+        stated_dims=(20.0, 20.0, 0.0),
+        render_fn=lambda scad, defines: _render_with_stl_and_bbox(
+            stl, BboxInfo(20.0, 20.0, 4.0, 400.0)
+        ),
+        llm_fn=(lambda role, messages, system: _scad_llm(v65)),
+        bbox_fn=(lambda r: BboxInfo(20.0, 20.0, 4.0, 400.0)),
+    )
+    assert result.status == "exhausted"
+    assert result.iterations_used == 2
+    assert result.failure_reason == "stack_height_mismatch"
+    assert result.best is result.iterations[0]
+    assert "11 mm" in result.iterations[0].repair["instruction"]
+    assert "4 mm" in result.iterations[0].repair["instruction"]
+
+
 def test_unchanged_mesh_genuine_edit_passes(tmp_path):
     """Issue #419: a v2+ edit whose rendered mesh DIFFERS from the parent's
     (a genuine change — face count and volume both beyond epsilon) PASSES
