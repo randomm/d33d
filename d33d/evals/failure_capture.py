@@ -62,6 +62,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field, ValidationError
 
+from d33d.unchanged_mesh_check import MESH_UNCHANGED_REASON
+
 #: The closed enum of failure classes a failures.jsonl line may carry.
 #:
 #: 11 named LLM classes (the design-loop superset from
@@ -149,6 +151,18 @@ LOOP_LEVEL_FAILURE_REASONS: frozenset[str] = frozenset(
         # seam never sees it. The adapter archives the stall itself, with
         # this loop-level class, so the archive set must admit it.
         "design_loop_timed_out",
+        # Issue #419: a v2+ edit whose rendered mesh is unchanged from
+        # the parent's (the QA v100 repro — the "38 mm hole" edit that
+        # re-exported the parent identical) exhausts with every gate bit
+        # green, so the loop's terminal frame carries the structured
+        # ``mesh_unchanged`` reason. Like ``design_loop_timed_out`` it is
+        # a loop-level class (never a render-worker ErrorClass, never a
+        # gate bit — it rides the ``geometrically_wrong`` class on the
+        # iteration's repair) that also lands in ``failure_class``, so
+        # the hook must admit it: without this, an exhausted
+        # unchanged-mesh turn would raise ``ValueError`` in the
+        # failures.jsonl hook and silently lose its archive line.
+        MESH_UNCHANGED_REASON,
     }
 )
 

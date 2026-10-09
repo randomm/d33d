@@ -71,7 +71,7 @@ from d33d.part_mesh import (
 from d33d.part_mesh import (
     validate_part_path as _validate_part_path_impl,
 )
-from d33d.render_diagnostics import unknown_variables
+from d33d.render_diagnostics import unknown_parameters, unknown_variables
 
 logger = logging.getLogger(__name__)
 
@@ -1325,11 +1325,12 @@ def classify(
         return "oom"
     stl_present = isinstance(stl_path, str) and bool(stl_path)
     if not stl_present:
-        if exit_code != 0:
-            if STL_ABORT_RE.search(stderr or ""):
-                return "syntax_error"
-            if OPENSCAD_DIAGNOSTIC_RE.search(stderr or "") or OPENSCAD_DIAGNOSTIC_RE.search(render_log or ""):
-                return "syntax_error"
+        if exit_code != 0 and (
+            STL_ABORT_RE.search(stderr or "")
+            or OPENSCAD_DIAGNOSTIC_RE.search(stderr or "")
+            or OPENSCAD_DIAGNOSTIC_RE.search(render_log or "")
+        ):
+            return "syntax_error"
         return "container_error"
     if not _csg_and_views_valid(csg_path, views):
         return "artifact_error"
@@ -1342,6 +1343,14 @@ def classify(
     # geometry silently lost whatever the undefined variable sized. Last
     # in the table: every more-specific class above already won.
     if unknown_variables(stderr) or unknown_variables(render_log):
+        return "syntax_error"
+    # Issue #419 (the #383 sibling): an exit-0 render whose stderr or
+    # render.log tail carries an OpenSCAD unknown-named-argument warning
+    # (``cylinder(position=...);`` — OpenSCAD WARNS and silently drops the
+    # argument) is NOT ok either — the geometry built without the
+    # argument (the QA v100 repro: a difference() that removed nothing
+    # because ``position=`` was ignored). Same demotion, same buffer pair.
+    if unknown_parameters(stderr) or unknown_parameters(render_log):
         return "syntax_error"
     return "ok"
 

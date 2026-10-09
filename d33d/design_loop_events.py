@@ -35,7 +35,7 @@ import json
 import logging
 import math
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable
 from pathlib import Path
 from typing import Any
 
@@ -1537,34 +1537,80 @@ def _stored_part_mesh_path(row: dict[str, Any], conn: Any) -> Path | None:
     return path
 
 
-def _measured_genus_for_file(stl_path: str) -> int | None:
-    """Issue #386 (final): measure a stored part mesh's genus (the
-    ``model.stl``-twin of :func:`_measured_genus_for_dir` for a part
-    path).
+def _seam_parent_mesh_stats(
+    stl_path: str,
+) -> tuple[int | None, float | None, int | None, tuple[str, int] | None]:
+    """Issue #419: the SEAM parent-mesh measurement — genus, volume, face
+    count, and the GEOMETRY FINGERPRINT from ONE mesh load.
 
-    Returns ``None`` (the check abstains) when the file is missing,
-    the load/split fails, or there are zero watertight components — a
-    fabricated baseline would make the gate lie.
+    The single shared helper the chat and finalize seams call off the
+    event loop: the genus feeds the through-hole baseline, the volume
+    and face count feed the unchanged-mesh check (the volume as a sanity
+    check, the face count as the evidence), and the fingerprint (the
+    exact vertex set, rounded to 1e-3 mm, deduplicated, sorted,
+    sha256-hashed) is the check's primary signal — "unchanged" means the
+    GEOMETRY is identical, not just its summary stats (a small hole
+    moved 10 mm on a large plate shifts the centroid by ~0.007 mm and
+    the volume by < 1e-6 mm3, both inside any tolerance, but moves
+    vertices, so the fingerprint separates the two meshes). The
+    fingerprint is computed off the SAME load as the genus — the check
+    then never re-loads the parent mesh. ``None`` per metric when
+    unavailable (missing file, load failure, zero watertight components)
+    — a fabricated baseline would make the gate lie.
     """
-    from d33d.part_mesh_topology import genus_from_stl
+    from d33d.part_mesh_topology import load_and_split, mesh_topology
 
-    return genus_from_stl(stl_path)
+    if not Path(stl_path).is_file():
+        return (None, None, None, None)
+    try:
+        components = load_and_split(stl_path)
+    except (OSError, ValueError, RuntimeError):
+        return (None, None, None, None)
+    if not components:
+        return (None, None, None, None)
+    # Genus: the shared helper's measurement (zero-watertight abstain).
+    genus = None
+    try:
+        topo = mesh_topology(merged=components[0], components=components)
+        if topo["watertight_bodies"] > 0:
+            genus = topo["genus"]
+    except (ValueError, RuntimeError, IndexError, TypeError):
+        genus = None
+    # Volume + face count: sum across watertight components.
+    fingerprint: tuple[str, int] | None = None
+    try:
+        total_vol = 0.0
+        total_faces = 0
+        for comp in components:
+            if comp.is_watertight:
+                total_vol += float(comp.volume)
+                total_faces += len(comp.faces)
+        if total_faces <= 0:
+            return (genus, None, None, None)
+        # Fingerprint: the union of EVERY watertight component's vertex
+        # set (the vertex-set hash is multi-component-safe by
+        # construction — no per-component assumption). Computed off the
+        # SAME load as the genus. The union must match the candidate's
+        # whole-mesh load (``trimesh.load(process=False, force="mesh")``
+        # → ``mesh_fingerprint`` on all vertices) so the seam-forwarded
+        # and path-fallback paths agree for multi-component parents.
+        # The round/sort/sha256 is the SHARED helper (issue #419 final:
+        # single fingerprint implementation — the seam and the check's
+        # own ``mesh_fingerprint`` hash identically by construction, so
+        # the two sides can never drift apart).
+        from d33d.unchanged_mesh_check import fingerprint_from_rounded_vertices
 
+        def _all_watertight_vertices() -> Iterable[tuple[float, float, float]]:
+            for comp in components:
+                if comp.is_watertight:
+                    yield from comp.vertices
 
-def _measured_genus_for_dir(render_artifact_dir: str) -> int | None:
-    """Issue #386 (v2+ baseline): measure the parent version's rendered
-    genus from its ``render_artifact_dir`` (the ``model.stl`` inside).
-
-    Returns ``None`` (the check abstains) when the directory or the
-    ``model.stl`` is missing, the load/split fails, or there are zero
-    watertight components — a fabricated baseline would make the gate lie.
-    """
-    from d33d.part_mesh_topology import genus_from_stl
-
-    stl_path = Path(render_artifact_dir) / "model.stl"
-    if not stl_path.is_file():
-        return None
-    return genus_from_stl(str(stl_path))
+        fingerprint = fingerprint_from_rounded_vertices(
+            _all_watertight_vertices()
+        )
+        return (genus, total_vol, total_faces, fingerprint)
+    except (ValueError, TypeError, RuntimeError, IndexError):
+        return (genus, None, None, None)
 
 
 async def _resolve_version_create(
@@ -2012,6 +2058,12 @@ async def run_design_loop_with_events(
     # baseline used and its source (the ``through_baseline_genus_source``
     # kwarg — the check logs it with its decision), so QA can see why
     # the check passed or failed.
+    # Deferred import (issue #419 lens round 2): this module is imported
+    # by ``d33d.design_loop`` at module level, so the unchanged-mesh
+    # reason constant is pulled in here instead of at the top to keep
+    # the import graph acyclic.
+    from d33d.unchanged_mesh_check import MESH_UNCHANGED_REASON
+
     if row is not None:
         _latest_ver = (
             app.state.versions.latest_version(project_id)
@@ -2019,10 +2071,14 @@ async def run_design_loop_with_events(
             else None
         )
         if _latest_ver is not None and _latest_ver.get("render_artifact_dir"):
-            # V2+: measure the parent version's rendered genus.
+            # V2+: measure the parent version's rendered genus, volume,
+            # and face count from ONE mesh load (issue #419
+            # consolidation — the operator decision: parent stats live
+            # in #418's parent-version block, not a separate one).
             _render_dir = _latest_ver["render_artifact_dir"]
-            _parent_genus = await asyncio.to_thread(
-                _measured_genus_for_dir, _render_dir
+            _pm_stl_path = str(Path(_render_dir) / "model.stl")
+            _parent_genus, _parent_vol, _parent_faces, _parent_fp = (
+                await asyncio.to_thread(_seam_parent_mesh_stats, _pm_stl_path)
             )
             if _parent_genus is not None:
                 kwargs["through_baseline_genus"] = _parent_genus
@@ -2039,17 +2095,45 @@ async def run_design_loop_with_events(
                     f"parent version v{_latest_ver['id']} rendered mesh "
                     f"unavailable — abstain"
                 )
+            # Issue #419 — the unchanged-mesh check's parent baseline:
+            # the volume and face count measured from the SAME mesh load
+            # as the genus (one file, one disk read, two baselines).
+            # The path is also passed (the check falls back to loading
+            # it when the stats are None); the check itself abstains
+            # when both the stats and the file are missing — mirroring
+            # the genus path above. The parent stats come from the
+            # stored parent version/render already on disk; NO extra
+            # render is added.
+            kwargs["parent_mesh_stl"] = _pm_stl_path
+            if _parent_vol is not None:
+                kwargs["parent_volume_mm3"] = _parent_vol
+            if _parent_faces is not None:
+                kwargs["parent_face_count"] = _parent_faces
+            # Issue #419 (lens fix): the unchanged-mesh check's
+            # geometry fingerprint from the SAME seam load — the check
+            # uses it directly and does not re-load the parent mesh.
+            if _parent_fp is not None:
+                kwargs["parent_fingerprint"] = _parent_fp
         elif row.get("part_filename"):
-            # V1 on import: the stored part mesh's genus (the mesh the
-            # render imports). A 3MF import stores no STL (the render
-            # re-exports it — no baseline is available) → abstain;
-            # ``_stored_part_mesh_path`` filters the non-STL suffix,
-            # so no format string compare is needed here.
+            # V1 on import: the stored part mesh's genus, volume, and
+            # face count (the mesh the render imports). A 3MF import
+            # stores no STL (the render re-exports it — no baseline is
+            # available) → abstain; ``_stored_part_mesh_path`` filters
+            # the non-STL suffix, so no format string compare is needed
+            # here.
             _stored_genus: int | None = None
+            _stored_vol: float | None = None
+            _stored_faces: int | None = None
+            _stored_fp: Any = None
             _stored_path = _stored_part_mesh_path(row, app.state.conn)
             if _stored_path is not None:
-                _stored_genus = await asyncio.to_thread(
-                    _measured_genus_for_file, str(_stored_path)
+                (
+                    _stored_genus,
+                    _stored_vol,
+                    _stored_faces,
+                    _stored_fp,
+                ) = await asyncio.to_thread(
+                    _seam_parent_mesh_stats, str(_stored_path)
                 )
             if _stored_genus is not None:
                 kwargs["through_baseline_genus"] = _stored_genus
@@ -2066,6 +2150,24 @@ async def run_design_loop_with_events(
                 kwargs["through_baseline_genus_source"] = (
                     "stored part mesh unavailable — abstain"
                 )
+            # Issue #419: the first edit on an import (v1 has the stored
+            # repaired ``part.stl``, not a ``model.stl``) compares the
+            # unchanged-mesh check against that stored repaired part mesh
+            # — the exact mesh the render imports. A 3MF import stores no
+            # STL, and a missing/unreadable file abstains (the check
+            # itself never fires on a fabricated baseline — the path is
+            # only set for a file that exists on disk).
+            if _stored_path is not None:
+                kwargs["parent_mesh_stl"] = str(_stored_path)
+            if _stored_vol is not None:
+                kwargs["parent_volume_mm3"] = _stored_vol
+            if _stored_faces is not None:
+                kwargs["parent_face_count"] = _stored_faces
+            # Issue #419 (lens fix): the unchanged-mesh check's
+            # geometry fingerprint from the SAME seam load (no
+            # double parent load).
+            if _stored_fp is not None:
+                kwargs["parent_fingerprint"] = _stored_fp
         else:
             # Issue #418: a part-less project. No version yet → the
             # NEW-design default: the kwarg is omitted (the loop
@@ -2610,15 +2712,77 @@ async def run_design_loop_with_events(
         # deadline did not cut — the adapter safety-net path is the
         # only other timeout path, and it builds its own frame).
         _timeout_kept_version_id: int | None = None
-        if (
-            reason == DESIGN_LOOP_TIMED_OUT_REASON
-            and getattr(result, "status", None) == "exhausted"
+        if reason == DESIGN_LOOP_TIMED_OUT_REASON and (
+            getattr(result, "status", None) == "exhausted"
         ):
             _kept_best = getattr(result, "best", None)
             _kept_render = getattr(_kept_best, "render", None)
             _kept_scad = getattr(_kept_best, "scad_source", None)
+            # Issue #419 (final): the timeout-version path must NOT
+            # version a kept candidate whose iteration carried the
+            # unchanged-mesh repair (``best.repair["reason"] ==
+            # "mesh_unchanged"``): that candidate is GEOMETRICALLY
+            # IDENTICAL to its parent, so versioning it creates a
+            # duplicate of the parent version (the exact defect #419's
+            # final gap names). When the check fired on the kept
+            # candidate, versioning is SKIPPED — but the terminal
+            # ``design_loop_timed_out`` error frame and the failures.
+            # jsonl archive row are still emitted (the archive rides the
+            # loop-result hook, which fires on the exhausted result
+            # regardless of the version decision — see the hook the app
+            # wires at the loop seam, ``record_production_failure``).
+            #
+            # The slow-model copy's measured per-attempt latency (the
+            # terminal frame's ``attempt_latency_seconds`` /
+            # ``attempt_count`` fields, both omit-not-null) is derived
+            # from the LOOP-SOURCED numbers (the loop owns the wall
+            # clock — the mean of its own per-attempt wall clock, rounded
+            # up to a whole second — a killed attempt's 0.2 s burns read
+            # as "about 1s an attempt", never "about 0s"), with the
+            # frame-derived ``_attempt_tracker`` as a FALLBACK for
+            # results that carry no loop-sourced numbers (non-deadline-
+            # shaped results, or a sync stub loop the loop's own
+            # deadline did not cut — the adapter safety-net path is the
+            # only other timeout path, and it builds its own frame).
+            # Omitted when no attempt was measured (an unmeasured number
+            # would violate the SPA's "never render a number the SPA has
+            # not established" invariant). The derivation runs for EVERY
+            # timed-out exhausted result (the latency is a property of
+            # the run, not of the versioning decision) — including the
+            # skipped-unchanged case below, which skips versioning but
+            # still emits the terminal frame.
+            _loop_latencies = getattr(result, "attempt_latencies", None)
+            _started = getattr(result, "attempts_started", None)
+            if not isinstance(_started, int) or _started <= 0:
+                _started = len(_loop_latencies) if _loop_latencies else 0
+            _latency, _count = _slow_model_fields(_loop_latencies, _started)
+            if _latency is None and _attempt_tracker is not None:
+                _fallback_latency, _fallback_count = _slow_model_fields(
+                    _attempt_tracker.latencies(),
+                    _attempt_tracker.attempt_count,
+                )
+                _latency = _fallback_latency
+                _count = _fallback_count
+            if _latency is not None:
+                error_data["attempt_latency_seconds"] = _latency
+            if _count > 0:
+                error_data["attempt_count"] = _count
+            # The versioning decision: skip the kept candidate when the
+            # unchanged-mesh check fired on it (a duplicate of the
+            # parent version would be created); otherwise version it
+            # BEFORE the terminal error frame (the same frame order the
+            # adapter-deadline path uses — version-created before the
+            # error: the ticket's gate resolution).
+            _kept_repair = getattr(_kept_best, "repair", None)
+            from d33d.unchanged_mesh_check import MESH_UNCHANGED_REASON
+
+            _kept_unchanged = (
+                isinstance(_kept_repair, dict)
+                and _kept_repair.get("reason") == MESH_UNCHANGED_REASON
+            )
             if (
                 _kept_best is not None
+                and not _kept_unchanged
                 and _kept_render is not None
                 and isinstance(_kept_scad, str)
                 and _kept_scad.strip()
@@ -2640,41 +2804,6 @@ async def run_design_loop_with_events(
                         project_id,
                     )
                     _timeout_kept_version_id = None
-                # The slow-model copy's measured per-attempt latency
-                # ("about Ns an attempt" — the SPA renders it from the
-                # terminal frame's ``attempt_latency_seconds`` /
-                # ``attempt_count`` fields, both omit-not-null): the
-                # LOOP-SOURCED numbers above — the mean of the loop's
-                # own per-attempt wall clock, rounded up to a whole
-                # second (a killed attempt's 0.2 s burns read as
-                # "about 1s an attempt", never "about 0s"). Omitted
-                # when no attempt was measured (an unmeasured number
-                # would violate the SPA's "never render a number the
-                # SPA has not established" invariant).
-                _loop_latencies = getattr(result, "attempt_latencies", None)
-                _started = getattr(result, "attempts_started", None)
-                if not isinstance(_started, int) or _started <= 0:
-                    _started = len(_loop_latencies) if _loop_latencies else 0
-                _latency, _count = _slow_model_fields(
-                    _loop_latencies, _started
-                )
-                # Fallback: the frame-derived attempt tracker (the
-                # adapter safety-net path — see the comment above).
-                # Only exists on the awaitable path; a sync stub
-                # loop with no loop-sourced numbers falls through to
-                # omitting both fields (no fabricated numbers — the
-                # SPA never renders a number it has not established).
-                if _latency is None and _attempt_tracker is not None:
-                    _fallback_latency, _fallback_count = _slow_model_fields(
-                        _attempt_tracker.latencies(),
-                        _attempt_tracker.attempt_count,
-                    )
-                    _latency = _fallback_latency
-                    _count = _fallback_count
-                if _latency is not None:
-                    error_data["attempt_latency_seconds"] = _latency
-                if _count > 0:
-                    error_data["attempt_count"] = _count
         # Frame order (issue #417 gate resolution): [photo notice(s),
         # version-created (when the kept candidate was stored), terminal
         # error] — the SAME order the adapter-deadline path uses, and the

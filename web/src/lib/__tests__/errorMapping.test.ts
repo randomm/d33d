@@ -55,6 +55,11 @@ const LOOP_FAILURE_REASONS = [
   // renderer pre-flight verified the render-worker image is missing or its
   // build-hash label mismatches, before any work ran. Terminal (no retry).
   "renderer_image_stale",
+  // Loop-level unchanged-mesh post-check (d33d/unchanged_mesh_check.py,
+  // issue #419) — a v2+ edit whose rendered mesh equals the parent's
+  // (geometry fingerprint identical) exhausted without the change
+  // taking; the terminal frame carries `reason: "mesh_unchanged"`.
+  "mesh_unchanged",
 ];
 
 const CLOSED_SET = [...GATE_REASON_BITS, ...ERROR_CLASSES, ...LOOP_FAILURE_REASONS];

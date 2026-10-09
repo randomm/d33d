@@ -516,6 +516,20 @@ export const failure = {
     syntax_error: "The generated design had a syntax error, so nothing was built.",
     unknown_variable:
       "The generated design referenced a size that was never set, so nothing was built.",
+    /** Issue #419: a v2+ edit whose rendered mesh is unchanged from the
+     *  parent version (geometry fingerprint identical — the exact vertex
+     *  set is the same, meaning no vertex moved, was added, or removed)
+     *  — the QA v100 repro (a missing semicolon after `scale(1) import("
+     *  "part.stl")` made the following `difference()` a child of
+     *  `import()`, which ignores its children, so the "38 mm hole" edit
+     *  re-exported the parent identical, delta 0, and passed "Your design
+     *  is ready"). The loop routes a `geometrically_wrong` repair (not a
+     *  pass); this is the failure-reason sentence the SPA renders when the
+     *  loop exhausts without the change taking. The repair instruction
+     *  (the server-side `UNCHANGED_INSTRUCTION`) names the cause and the
+     *  fix — this sentence is the user-facing failure copy only. */
+    mesh_unchanged:
+      "The change didn't take — nothing in the part moved.",
     empty_model: "The design produced an empty model — there is nothing to print.",
     artifact_error: "The model file came out unreadable.",
     timeout: "The render ran out of time. A simpler shape will get through.",

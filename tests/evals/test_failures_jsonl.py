@@ -266,6 +266,34 @@ def test_loop_level_preflight_reason_is_accepted_failure_class(tmp_path: Path):
         assert events[0].failure_class == reason
 
 
+def test_hooked_loop_unchanged_mesh_exhaustion_archives_line(tmp_path: Path):
+    """Issue #419: an exhausted ``mesh_unchanged`` result (a v2+ edit whose
+    rendered mesh equals the parent's — the QA v100 repro) reaches the
+    production failures.jsonl hook WITHOUT raising: the loop-level
+    ``mesh_unchanged`` reason is in :data:`LOOP_LEVEL_FAILURE_REASONS`, so
+    ``make_failure_event`` / ``_validate_failure_class`` admit it and a
+    valid row is written. Before the fix the hook raised ``ValueError``
+    on every such turn (the hook logs-and-swallows, but the archive line
+    was silently lost)."""
+    out = tmp_path / "failures.jsonl"
+    event = record_production_failure(
+        design_result=_exhausted_result("mesh_unchanged"),
+        request="make the center hole 38 mm",
+        model="model-x",
+        prompt_version="deadbeef",
+        output_scad="cube();",
+        path=out,
+    )
+    assert event is not None
+    assert event.failure_class == "mesh_unchanged"
+    events = read_failure_events(out)
+    assert len(events) == 1
+    assert events[0].failure_class == "mesh_unchanged"
+    # The loop-level reason set admits it directly (not only via the
+    # allow_gate_reasons path).
+    assert "mesh_unchanged" in LOOP_LEVEL_FAILURE_REASONS
+
+
 def test_hook_rejects_unknown_failure_class(tmp_path: Path):
     """A ``failure_reason`` outside the closed enum is a hard error —
     the hook raises ``ValueError`` and appends NOTHING (no silent

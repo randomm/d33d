@@ -139,6 +139,63 @@ def test_unknown_variables_deduplicates() -> None:
     assert rw.unknown_variables(text) == ["H"]
 
 
+#: OpenSCAD's unknown-NAMED-ARGUMENT warning (issue #419, the #383 sibling,
+#: captured from the QA v100 repro — `cylinder(d=38, position=[...]);`
+#: emits this in /work/render.log with exit code 0 and a valid STL — the
+#: argument is silently dropped, the cylinder placed at the origin).
+#: The wording differs from the undefined-variable warning ("Unknown
+#: parameter" vs "Ignoring unknown variable"), so the #383 regex does NOT
+#: match it — the sibling pattern (``UNKNOWN_PARAMETER_RE``) does.
+UNKNOWN_PARAMETER_WARNING = (
+    'WARNING: Unknown parameter "position" for object "cylinder" '
+    "in file model.scad, line 5"
+)
+
+
+def test_exit0_valid_artifacts_with_unknown_parameter_in_render_log_is_syntax_error() -> None:
+    """Issue #419: exit 0 + all valid artifacts + an OpenSCAD
+    unknown-named-argument warning in the harvested render.log tail →
+    syntax_error (NOT ok — the geometry built without the argument,
+    the QA v100 repro). The render.log half of the check (the container's
+    stderr carries only [entrypoint] markers on the pinned image)."""
+    assert _all_valid(stderr="", render_log=UNKNOWN_PARAMETER_WARNING) == "syntax_error"
+
+
+def test_exit0_valid_artifacts_with_unknown_parameter_in_stderr_is_syntax_error() -> None:
+    """Issue #419: the unknown-named-argument warning in the container's
+    stderr (the other buffer the check inspects — a future image change
+    that stops redirecting to the log cannot silently un-detect it).
+    Mirrors the #383 unknown-variable stderr half."""
+    assert _all_valid(stderr=UNKNOWN_PARAMETER_WARNING) == "syntax_error"
+
+
+def test_unknown_parameter_warning_in_render_log_names_the_parameter() -> None:
+    """Issue #419: the classifier surfaces the PARAMETER name for the
+    repair evidence — the caller (the design loop) names the offending
+    named argument in the feedback."""
+    assert rw.unknown_parameters(UNKNOWN_PARAMETER_WARNING) == ["position"]
+    assert rw.unknown_parameters("") == []
+    assert rw.unknown_parameters("no warning here") == []
+
+
+def test_unknown_parameters_deduplicates() -> None:
+    """Issue #419: multiple warnings for the same parameter (e.g. across
+    the 8 openscad invocations) → the deduped list names it once."""
+    text = "\n".join([UNKNOWN_PARAMETER_WARNING] * 8)
+    assert rw.unknown_parameters(text) == ["position"]
+
+
+def test_unknown_parameter_does_not_match_unknown_variable_and_vice_versa() -> None:
+    """Issue #419: the two patterns are siblings, not the same — the
+    #383 regex does NOT match the unknown-parameter warning, and the
+    #419 pattern does NOT match the unknown-variable warning."""
+    assert rw.unknown_variables(UNKNOWN_PARAMETER_WARNING) == []
+    assert rw.unknown_parameters(UNKNOWN_VARIABLE_WARNING) == []
+    # And each still matches its own warning.
+    assert rw.unknown_variables(UNKNOWN_VARIABLE_WARNING) == ["H"]
+    assert rw.unknown_parameters(UNKNOWN_PARAMETER_WARNING) == ["position"]
+
+
 def test_timeout_has_highest_precedence() -> None:
     # Even with a valid STL, a timeout is timeout.
     assert _all_valid(timed_out=True) == "timeout"
