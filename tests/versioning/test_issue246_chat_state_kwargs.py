@@ -464,6 +464,15 @@ def test_chat_adapter_v2_edit_gets_parent_stats(app_with_versions, tmp_path):
     assert captured.get("parent_face_count") is not None, (
         f"v2+ edit should carry parent_face_count, got {captured.get('parent_face_count')!r}"
     )
+    # Issue #419 (lens fix): the position-sensitive legs (centroid + bbox
+    # diagonal) from the SAME seam load — the check uses these and does
+    # not re-load the parent for the centroid.
+    assert captured.get("parent_centroid") is not None, (
+        f"v2+ edit should carry parent_centroid, got {captured.get('parent_centroid')!r}"
+    )
+    assert captured.get("parent_bbox_diagonal_mm") is not None, (
+        f"v2+ edit should carry parent_bbox_diagonal_mm, got {captured.get('parent_bbox_diagonal_mm')!r}"
+    )
 
 
 def test_chat_adapter_import_first_edit_gets_parent_stats(app_with_versions, tmp_path):
@@ -510,6 +519,13 @@ def test_chat_adapter_import_first_edit_gets_parent_stats(app_with_versions, tmp
     )
     assert captured.get("parent_face_count") is not None, (
         f"import first edit should carry parent_face_count, got {captured.get('parent_face_count')!r}"
+    )
+    # Issue #419 (lens fix): the position-sensitive legs from the SAME seam load.
+    assert captured.get("parent_centroid") is not None, (
+        f"import first edit should carry parent_centroid, got {captured.get('parent_centroid')!r}"
+    )
+    assert captured.get("parent_bbox_diagonal_mm") is not None, (
+        f"import first edit should carry parent_bbox_diagonal_mm, got {captured.get('parent_bbox_diagonal_mm')!r}"
     )
 
 
@@ -582,6 +598,13 @@ def test_finalize_seam_gets_parent_stats(app_with_versions, tmp_path):
     )
     assert captured.get("parent_face_count") is not None, (
         f"finalize v2+ edit should carry parent_face_count, got {captured.get('parent_face_count')!r}"
+    )
+    # Issue #419 (lens fix): the position-sensitive legs from the SAME seam load.
+    assert captured.get("parent_centroid") is not None, (
+        f"finalize v2+ edit should carry parent_centroid, got {captured.get('parent_centroid')!r}"
+    )
+    assert captured.get("parent_bbox_diagonal_mm") is not None, (
+        f"finalize v2+ edit should carry parent_bbox_diagonal_mm, got {captured.get('parent_bbox_diagonal_mm')!r}"
     )
 
 

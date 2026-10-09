@@ -1535,22 +1535,61 @@ def _seam_parent_mesh_stats(
     try:
         total_vol = 0.0
         total_faces = 0
+        # Volume-weighted centroid across all watertight components (issue
+        # #419 lens fix): the path-based unchanged-mesh check loads the
+        # parent with ``trimesh.load(process=False, force="mesh")`` and
+        # reads the whole mesh's ``center_mass`` (volume-weighted across
+        # all faces). For a single-component STL (the OpenSCAD output
+        # case) this equals ``components[0].center_mass``; for a
+        # multi-component STL it is the volume-weighted sum across all
+        # components. Using the whole-mesh centroid here keeps the seam
+        # and the check's path-based fallback measuring the SAME metric.
+        vol_weighted_cm = [0.0, 0.0, 0.0]
         for comp in components:
             if comp.is_watertight:
-                total_vol += float(comp.volume)
+                v = float(comp.volume)
+                total_vol += v
                 total_faces += len(comp.faces)
+                try:
+                    cm = comp.center_mass
+                    if v != 0.0:
+                        for i in range(3):
+                            vol_weighted_cm[i] += float(cm[i]) * v
+                except (ValueError, TypeError, RuntimeError, IndexError):
+                    pass
         if total_faces <= 0:
             return (genus, None, None, None, None)
-        # Centroid + bbox diagonal of the merged parent mesh (issue #419
-        # lens fix: the unchanged-mesh check's position-sensitive legs
-        # come from THIS SAME load — the check then never re-loads the
-        # parent for the centroid).
-        centroid = components[0].center_mass
-        b = components[0].bounds
-        lo, hi = b[0], b[1]
-        diag = float(
-            ((hi[0] - lo[0]) ** 2 + (hi[1] - lo[1]) ** 2 + (hi[2] - lo[2]) ** 2) ** 0.5
-        )
+        # Centroid: volume-weighted across watertight components (the
+        # whole-mesh centroid the path-based check computes). When the
+        # total volume is zero (all components degenerate) the centroid
+        # is undefined — abstain.
+        if abs(total_vol) > 0.0:
+            centroid = [
+                vol_weighted_cm[i] / total_vol for i in range(3)
+            ]
+        else:
+            centroid = None
+        # Bbox diagonal of the merged parent mesh (all components).
+        # Use the full bounding box (all components) to match the
+        # path-based check's ``mesh.bounds`` (the whole-mesh bounds).
+        all_bounds_lo = [float("inf")] * 3
+        all_bounds_hi = [float("-inf")] * 3
+        for comp in components:
+            try:
+                b = comp.bounds
+                for i in range(3):
+                    all_bounds_lo[i] = min(all_bounds_lo[i], float(b[0][i]))
+                    all_bounds_hi[i] = max(all_bounds_hi[i], float(b[1][i]))
+            except (ValueError, TypeError, RuntimeError, IndexError):
+                continue
+        if all_bounds_lo[0] < float("inf"):
+            diag = float(
+                ((all_bounds_hi[0] - all_bounds_lo[0]) ** 2
+                 + (all_bounds_hi[1] - all_bounds_lo[1]) ** 2
+                 + (all_bounds_hi[2] - all_bounds_lo[2]) ** 2) ** 0.5
+            )
+        else:
+            diag = None
         return (genus, total_vol, total_faces, centroid, diag)
     except (ValueError, TypeError, RuntimeError, IndexError):
         return (genus, None, None, None, None)
