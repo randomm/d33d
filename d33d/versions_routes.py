@@ -1084,8 +1084,7 @@ def _finalize_loop_kwargs(
     import concurrent.futures as _cf
 
     from d33d.design_loop_events import (
-        _measured_genus_for_dir,
-        _measured_genus_for_file,
+        _seam_parent_mesh_stats,
         _stored_part_mesh_path,
     )
 
@@ -1096,17 +1095,22 @@ def _finalize_loop_kwargs(
     )
     _tb_genus: int | None = None
     _tb_source: str | None = None
+    _pm_stl: str | None = None
+    _pm_vol: float | None = None
+    _pm_faces: int | None = None
+    _pm_fp: Any = None
     if _latest_ver is not None and _latest_ver.get("render_artifact_dir"):
         _render_dir = _latest_ver["render_artifact_dir"]
+        _pm_stl = str(Path(_render_dir) / "model.stl")
         with _cf.ThreadPoolExecutor(max_workers=1) as _ex:
-            _parent_genus = _ex.submit(
-                _measured_genus_for_dir, _render_dir
+            _pg, _pv, _pf, _pm_fp = _ex.submit(
+                _seam_parent_mesh_stats, _pm_stl
             ).result()
-        if _parent_genus is not None:
-            _tb_genus = _parent_genus
+        if _pg is not None:
+            _tb_genus = _pg
             _tb_source = (
                 f"parent version v{_latest_ver['id']} rendered genus: "
-                f"{_parent_genus}"
+                f"{_pg}"
             )
         else:
             _tb_genus = -1
@@ -1114,20 +1118,35 @@ def _finalize_loop_kwargs(
                 f"parent version v{_latest_ver['id']} rendered mesh "
                 f"unavailable — abstain"
             )
+        # Issue #419: the unchanged-mesh check's parent baseline — the
+        # SAME mesh load that produced the genus (one file, one disk
+        # read, two baselines). The geometry fingerprint rides the same
+        # load (issue #419 lens fix — the check then never re-loads
+        # the parent for the fingerprint).
+        _pm_vol = _pv
+        _pm_faces = _pf
     elif row.get("part_filename"):
         _stored_path = _stored_part_mesh_path(row, app.state.conn)
-        _stored_genus: int | None = None
+        _pg: int | None = None
+        _pv: float | None = None
+        _pf: int | None = None
         if _stored_path is not None:
             with _cf.ThreadPoolExecutor(max_workers=1) as _ex:
-                _stored_genus = _ex.submit(
-                    _measured_genus_for_file, str(_stored_path)
+                _pg, _pv, _pf, _pm_fp = _ex.submit(
+                    _seam_parent_mesh_stats, str(_stored_path)
                 ).result()
-        if _stored_genus is not None:
-            _tb_genus = _stored_genus
-            _tb_source = f"stored repaired part genus: {_stored_genus}"
+        if _pg is not None:
+            _tb_genus = _pg
+            _tb_source = f"stored repaired part genus: {_pg}"
         else:
             _tb_genus = -1
             _tb_source = "stored part mesh unavailable — abstain"
+        # Issue #419: the first edit on an import compares against the
+        # stored repaired part.stl (the exact mesh the render imports).
+        if _stored_path is not None:
+            _pm_stl = str(_stored_path)
+        _pm_vol = _pv
+        _pm_faces = _pf
     elif _latest_ver is not None:
         _tb_genus = -1
         _tb_source = (
@@ -1177,6 +1196,22 @@ def _finalize_loop_kwargs(
         out["through_baseline_genus"] = _tb_genus
     if _tb_source is not None:
         out["through_baseline_genus_source"] = _tb_source
+    # Issue #419: the unchanged-mesh check's parent baseline (the SAME
+    # parent-version block as the through-hole baseline — the operator
+    # decision: parent stats live in #418's block, not a separate one).
+    # ``None`` values are omitted (the loop's check abstains — a
+    # fabricated baseline would make the gate lie).
+    if _pm_stl is not None:
+        out["parent_mesh_stl"] = _pm_stl
+    if _pm_vol is not None:
+        out["parent_volume_mm3"] = _pm_vol
+    if _pm_faces is not None:
+        out["parent_face_count"] = _pm_faces
+    # Issue #419 (lens fix): the unchanged-mesh check's geometry
+    # fingerprint from the SAME seam load (the check uses it directly
+    # and does not re-load the parent mesh).
+    if _pm_fp is not None:
+        out["parent_fingerprint"] = _pm_fp
     # The import section's kwargs (issue #332, sub-issue 3) — additive:
     # the no-part case adds nothing (byte-identical loop call to today).
     if part_env is not None:

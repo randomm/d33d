@@ -42,6 +42,31 @@ def _exhausted_stub_result(params: dict[str, Any]):
     return _ExhaustedResult(params, _default_render(), IterationRecord, Score)
 
 
+def _stub_result(params: dict[str, Any]):
+    """A pass-style duck-type result (the adapter's pass path — version
+    creation, artifact reads)."""
+    from d33d.design_loop import IterationRecord, Score
+    from tests.versioning.test_design_loop_finalize import _default_render
+
+    return _StubResult(params, _default_render(), IterationRecord, Score)
+
+
+class _StubResult:
+    """A pass-style duck-type result (the route/adapter only read the
+    declared fields off it)."""
+
+    def __init__(self, params: dict[str, Any], render, IterationRecord, Score) -> None:
+        self.status = "pass"
+        self.best = IterationRecord(
+            iteration=0,
+            scad_source="W = 30;\ncube([W, W, W]);",
+            render=render,
+            score=Score(bits=(False,)*5, rank=0, tiebreak=(False,)*5),
+            params=dict(params),
+        )
+        self.failure_reason = None
+
+
 class _ExhaustedResult:
     def __init__(self, params: dict[str, Any], render, IterationRecord, Score) -> None:
         self.status = "exhausted"
@@ -396,6 +421,183 @@ def test_chat_adapter_no_part_v2_baseline_abstains_when_parent_never_rendered(
     source = captured.get("through_baseline_genus_source")
     assert source is not None and "abstain" in source, (
         f"baseline source must name the abstain, got {source!r}"
+    )
+
+
+def test_chat_adapter_v2_edit_gets_parent_stats(app_with_versions, tmp_path):
+    """Issue #419 (seam): a v2+ edit whose parent version has a rendered
+    ``model.stl`` — the loop kwargs the CHAT adapter builds carry
+    ``parent_mesh_stl``, ``parent_volume_mm3``, and ``parent_face_count``
+    (measured from the SAME mesh load as the genus — one disk read, two
+    baselines)."""
+    captured: dict[str, Any] = {}
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        conn = app_with_versions.state.conn
+        svc = app_with_versions.state.versions
+        await svc.create_version(pid, {"W": 20.0}, name="v1")
+        # Set up a render artifact dir with the v100 plate fixture.
+        from pathlib import Path as _Path
+        fixture_dir = _Path(__file__).parent.parent / "fixtures" / "stl"
+        render_dir = tmp_path / "render_v1"
+        render_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(fixture_dir / "v100-plate.stl", render_dir / "model.stl")
+        latest = svc.latest_version(pid)
+        assert latest is not None
+        conn.execute(
+            "UPDATE versions SET render_artifact_dir=? WHERE id=?",
+            (str(render_dir), latest["id"]),
+        )
+        conn.commit()
+        await _drive_adapter(app_with_versions, pid, _capturing_loop(captured))
+
+    run_async(app_with_versions, _call)
+    # The parent stats are present (the v100 plate fixture).
+    assert captured.get("parent_mesh_stl") is not None, (
+        f"v2+ edit should carry parent_mesh_stl, got {captured.get('parent_mesh_stl')!r}"
+    )
+    assert captured.get("parent_volume_mm3") is not None, (
+        f"v2+ edit should carry parent_volume_mm3, got {captured.get('parent_volume_mm3')!r}"
+    )
+    assert captured.get("parent_face_count") is not None, (
+        f"v2+ edit should carry parent_face_count, got {captured.get('parent_face_count')!r}"
+    )
+    # Issue #419 (lens fix): the unchanged-mesh check's geometry
+    # fingerprint from the SAME seam load — the check uses it directly
+    # and does not re-load the parent mesh.
+    assert captured.get("parent_fingerprint") is not None, (
+        f"v2+ edit should carry parent_fingerprint, got {captured.get('parent_fingerprint')!r}"
+    )
+
+
+def test_chat_adapter_import_first_edit_gets_parent_stats(app_with_versions, tmp_path):
+    """Issue #419 (seam): the first edit on an import (v1 has the stored
+    repaired ``part.stl``, not a ``model.stl``) — the loop kwargs carry
+    ``parent_mesh_stl`` pointing at the stored part mesh, with volume and
+    face count measured from it."""
+    captured: dict[str, Any] = {}
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        conn = app_with_versions.state.conn
+        conn.execute(
+            "UPDATE projects SET part_filename=?, part_format=?, "
+            "part_unit_status=?, part_scale=?, part_report=? WHERE id=?",
+            ("part.stl", "stl", "settled", 1.0, '{"hole_count": 0}', pid),
+        )
+        conn.commit()
+        # Create the v1 row (NO render_artifact_dir — never rendered).
+        await create_version(client, pid, {"W": 20.0})
+        # Write the stored part mesh (the v100 plate fixture).
+        from tests.versioning.helpers import repo_path_for
+
+        repo = repo_path_for(app_with_versions, pid)
+        v1 = conn.raw.execute(
+            "SELECT id FROM versions WHERE project_id = ? ORDER BY id ASC LIMIT 1",
+            (pid,),
+        ).fetchone()
+        assert v1 is not None
+        part_dir = repo / "versions" / str(v1[0])
+        part_dir.mkdir(parents=True, exist_ok=True)
+        fixture_dir = Path(__file__).parent.parent / "fixtures" / "stl"
+        shutil.copy2(fixture_dir / "v100-plate.stl", part_dir / "part.stl")
+        await _drive_adapter(app_with_versions, pid, _capturing_loop(captured))
+
+    run_async(app_with_versions, _call)
+    # The parent stats are present (the stored part.stl).
+    assert captured.get("parent_mesh_stl") is not None, (
+        f"import first edit should carry parent_mesh_stl, got {captured.get('parent_mesh_stl')!r}"
+    )
+    assert captured.get("parent_volume_mm3") is not None, (
+        f"import first edit should carry parent_volume_mm3, got {captured.get('parent_volume_mm3')!r}"
+    )
+    assert captured.get("parent_face_count") is not None, (
+        f"import first edit should carry parent_face_count, got {captured.get('parent_face_count')!r}"
+    )
+    # Issue #419 (lens fix): the geometry fingerprint from the SAME seam
+    # load (the check uses it directly and does not re-load the parent).
+    assert captured.get("parent_fingerprint") is not None, (
+        f"import first edit should carry parent_fingerprint, got {captured.get('parent_fingerprint')!r}"
+    )
+
+
+def test_chat_adapter_v1_no_parent_stats_for_fresh_project(app_with_versions):
+    """Issue #419 (seam): a v1 design (no parent — ``latest_version`` is
+    None or has no ``render_artifact_dir``) → the loop kwargs do NOT carry
+    ``parent_mesh_stl`` / ``parent_volume_mm3`` / ``parent_face_count``
+    (the check abstains — a fabricated baseline would make the gate lie)."""
+    captured: dict[str, Any] = {}
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        # No version yet (v1 — no parent).
+        await _drive_adapter(app_with_versions, pid, _capturing_loop(captured))
+
+    run_async(app_with_versions, _call)
+    # No parent stats for a fresh project.
+    assert captured.get("parent_mesh_stl") is None
+    assert captured.get("parent_volume_mm3") is None
+    assert captured.get("parent_face_count") is None
+
+
+def test_finalize_seam_gets_parent_stats(app_with_versions, tmp_path):
+    """Issue #419 (seam): the FINALIZE route's ``_finalize_loop_kwargs``
+    carries ``parent_mesh_stl``, ``parent_volume_mm3``, and
+    ``parent_face_count`` when the project has a v2+ parent version with a
+    rendered ``model.stl`` — the SAME parent-version block as the
+    through-hole baseline (the operator decision: parent stats live in
+    #418's block, not a separate one)."""
+    captured: dict = {}
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        conn = app_with_versions.state.conn
+        svc = app_with_versions.state.versions
+        await svc.create_version(pid, {"W": 20.0}, name="v1")
+        # Set up a render artifact dir with the v100 plate fixture.
+        fixture_dir = Path(__file__).parent.parent / "fixtures" / "stl"
+        render_dir = tmp_path / "render_v1"
+        render_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(fixture_dir / "v100-plate.stl", render_dir / "model.stl")
+        latest = svc.latest_version(pid)
+        assert latest is not None
+        conn.execute(
+            "UPDATE versions SET render_artifact_dir=? WHERE id=?",
+            (str(render_dir), latest["id"]),
+        )
+        conn.commit()
+
+        async def _loop(app, **kwargs):
+            captured.update(kwargs)
+            return _stub_result({"W": 10})
+
+        app_with_versions.state.run_design_loop = _loop
+        return await client.post(
+            f"/api/projects/{pid}/finalize",
+            json={"request": "edit the part"},
+        )
+
+    r = run_async(app_with_versions, _call)
+    assert r.status_code == 201, r.text
+    # The parent stats are present (the v100 plate fixture).
+    assert captured.get("parent_mesh_stl") is not None, (
+        f"finalize v2+ edit should carry parent_mesh_stl, got {captured.get('parent_mesh_stl')!r}"
+    )
+    assert captured.get("parent_volume_mm3") is not None, (
+        f"finalize v2+ edit should carry parent_volume_mm3, got {captured.get('parent_volume_mm3')!r}"
+    )
+    assert captured.get("parent_face_count") is not None, (
+        f"finalize v2+ edit should carry parent_face_count, got {captured.get('parent_face_count')!r}"
+    )
+    # Issue #419 (lens fix): the geometry fingerprint from the SAME seam
+    # load (the check uses it directly and does not re-load the parent).
+    assert captured.get("parent_fingerprint") is not None, (
+        f"finalize v2+ edit should carry parent_fingerprint, got {captured.get('parent_fingerprint')!r}"
     )
 
 

@@ -4174,6 +4174,530 @@ def test_loop_unknown_variable_render_is_repair_naming_variable():
     assert result.iterations[0].repair["failure_class"] == "unknown_variable"
     assert "H" in result.iterations[0].repair["evidence"]
 
+# ---------------------------------------------------------------------------
+# Issue #419: unchanged-mesh post-check — a v2+ edit whose rendered mesh
+# equals the parent's (volume + face count within epsilon) does NOT pass;
+# it routes a `geometrically_wrong` repair (no new error_class) with
+# evidence naming the unchanged volume/face count. A genuine edit that
+# changes the mesh passes. The v100 repro (import with missing semicolon
+# + `position=`) is the regression fixture.
+# ---------------------------------------------------------------------------
+
+
+def _render_with_stl_and_bbox(stl_path: str, bbox: BboxInfo) -> RenderResult:
+    """An ok render whose ``stl`` points at a REAL file on disk (the
+    unchanged-mesh check's trimesh.load seam) with a fixed bbox (all
+    five gate bits green — the check is the only gate under test)."""
+    return RenderResult(
+        ok=True,
+        exit_code=0,
+        duration_ms=10,
+        error_class="ok",
+        stderr="",
+        stl=stl_path,
+        csg="model.csg",
+        views=VIEWS_OK,
+        render_log="",
+    )
+
+
+def _run_unchanged_loop(
+    stl_path: str | None,
+    *,
+    parent_mesh_stl: str | None = None,
+    stated: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    bbox: BboxInfo | None = None,
+    max_iterations: int = MAX_ITERATIONS,
+) -> DesignResult:
+    """Run the loop over an ok render carrying the given real STL path,
+    with the given parent mesh (``None`` → the check abstains)."""
+    render = _render_with_stl_and_bbox(stl_path, bbox or BboxInfo(20, 20, 20, 8000.0))
+    llm = _through_box_llm(_through_box_scad_source())
+
+    def render_fn(scad, defines):
+        return render
+
+    return run_design_loop(
+        photo=PHOTO,
+        stated_dims=stated,
+        render_fn=render_fn,
+        llm_fn=(lambda role, messages, system: llm),
+        bbox_fn=(lambda r: bbox or BboxInfo(20, 20, 20, 8000.0)),
+        parent_mesh_stl=parent_mesh_stl,
+        max_iterations=max_iterations,
+    )
+
+
+def test_unchanged_mesh_v100_repro_fires_geometrically_wrong(tmp_path):
+    """Issue #419 (the v100 repro): a v2+ edit whose rendered mesh EQUALS
+    the parent's (the parent's own model.stl as the candidate's rendered
+    mesh — delta 0, the most unchanged case) does NOT pass — iteration 1
+    is ``geometrically_wrong`` (NOT a pass), with evidence naming the
+    unchanged volume and face count. The scripted model repeats the
+    unchanged candidate to the cap (the loop exhausts — the change never
+    takes)."""
+    fixture_dir = Path(__file__).parent / "fixtures" / "stl"
+    parent = str(fixture_dir / "v100-plate.stl")
+    # The candidate's rendered mesh IS the parent's (the v100 repro:
+    # the missing semicolon made the difference() a child of import(),
+    # which re-exports the parent identical).
+    result = _run_unchanged_loop(parent, parent_mesh_stl=parent)
+    # The all-green candidate does NOT pass: the post-check routes the
+    # repair and the loop exhausts (the scripted model repeats the
+    # unchanged mesh to the cap).
+    assert result.status == "exhausted"
+    assert result.iterations_used == MAX_ITERATIONS == 3
+    first = result.iterations[0]
+    # All five gate bits green (the mesh IS the parent — a valid render)
+    # yet the structured repair fired.
+    assert first.score.perfect is True
+    assert first.failure_class == "geometrically_wrong"
+    assert first.repair is not None
+    assert first.repair["failure_class"] == "geometrically_wrong"
+    # The evidence names the unchanged volume and face count.
+    assert "unchanged from the parent" in first.repair["evidence"]
+    assert "faces" in first.repair["evidence"]
+    # The terminal reason is the structured mesh_unchanged (the SPA maps
+    # it to "The change didn't take — nothing in the part moved.").
+    assert result.failure_reason == "mesh_unchanged"
+
+
+def test_unchanged_mesh_genuine_edit_passes(tmp_path):
+    """Issue #419: a v2+ edit whose rendered mesh DIFFERS from the parent's
+    (a genuine change — face count and volume both beyond epsilon) PASSES
+    on iteration 1 (no repair routed). The recut fixture (824 faces,
+    50799.79 mm3 — a 38 mm bore at the centre of the plate) differs from
+    the plate (12 faces, 57600 mm3) by well over 1% on both metrics —
+    the check must not false-fire on a real change."""
+    fixture_dir = Path(__file__).parent / "fixtures" / "stl"
+    parent = str(fixture_dir / "v100-plate.stl")
+    recut = str(fixture_dir / "v100-plate-recut.stl")
+    result = _run_unchanged_loop(recut, parent_mesh_stl=parent)
+    assert result.status == "pass"
+    assert result.iterations_used == 1
+    assert result.iterations[0].repair is None
+    assert result.iterations[0].failure_class is None
+
+
+def test_unchanged_mesh_no_parent_abstains(tmp_path):
+    """Issue #419: a v1 design (no parent — ``parent_mesh_stl`` is
+    ``None``) → the check abstains and the loop PASSES (a fabricated
+    baseline would make the gate lie)."""
+    fixture_dir = Path(__file__).parent / "fixtures" / "stl"
+    candidate = str(fixture_dir / "v100-plate.stl")
+    result = _run_unchanged_loop(candidate, parent_mesh_stl=None)
+    assert result.status == "pass"
+    assert result.iterations_used == 1
+    assert result.iterations[0].repair is None
+
+
+def test_unchanged_mesh_missing_parent_file_abstains(tmp_path):
+    """Issue #419: a v2+ edit whose parent's ``model.stl`` is missing
+    (the file was deleted out-of-band, or the version was never rendered)
+    → the check abstains and the loop PASSES (a missing file is never a
+    fabricated baseline — the #386 abstain pattern)."""
+    fixture_dir = Path(__file__).parent / "fixtures" / "stl"
+    candidate = str(fixture_dir / "v100-plate.stl")
+    missing_parent = str(tmp_path / "does-not-exist.stl")
+    result = _run_unchanged_loop(candidate, parent_mesh_stl=missing_parent)
+    assert result.status == "pass"
+    assert result.iterations_used == 1
+    assert result.iterations[0].repair is None
+
+
+def test_unchanged_mesh_missing_candidate_stl_abstains(tmp_path):
+    """Issue #419: a v2+ edit whose candidate's ``render.stl`` is
+    non-existent (the render has no STL, or it was deleted) → the check
+    abstains and the loop PASSES (an unloadable candidate is never a
+    fabricated candidate — the check needs both sides)."""
+    fixture_dir = Path(__file__).parent / "fixtures" / "stl"
+    parent = str(fixture_dir / "v100-plate.stl")
+    missing_candidate = str(tmp_path / "candidate-does-not-exist.stl")
+    render = _render_with_stl_and_bbox(
+        missing_candidate, BboxInfo(20, 20, 20, 8000.0)
+    )
+    llm = _through_box_llm(_through_box_scad_source())
+    result = run_design_loop(
+        photo=PHOTO,
+        stated_dims=(0.0, 0.0, 0.0),
+        render_fn=(lambda scad, defines: render),
+        llm_fn=(lambda role, messages, system: llm),
+        bbox_fn=(lambda r: BboxInfo(20, 20, 20, 8000.0)),
+        parent_mesh_stl=parent,
+    )
+    assert result.status == "pass"
+    assert result.iterations[0].repair is None
+
+
+def test_unchanged_mesh_parent_stats_path_never_loaded(tmp_path):
+    """Issue #419 (lens fix — double parent load): when the seam supplies
+    the parent's geometry fingerprint (measured off the SAME load as the
+    genus, with volume + face count as the sanity/evidence), the check
+    uses it directly and the parent mesh is NEVER loaded — a deliberately
+    missing ``parent_stl`` (a path that does not exist) must not change
+    the outcome. The v100 identical-mesh case still fires (the
+    fingerprint is equal off the stats), and the moved-hole case still
+    passes (the fingerprint differs off the stats)."""
+    from d33d import unchanged_mesh_check as umc
+
+    fixture_dir = Path(__file__).parent / "fixtures" / "stl"
+    small_a = str(fixture_dir / "v100-plate-small-hole-A.stl")
+    small_b = str(fixture_dir / "v100-plate-small-hole-B.stl")
+    missing = str(tmp_path / "no-such-parent.stl")
+
+    def _stats(path: str) -> dict[str, Any]:
+        import trimesh
+
+        mesh = trimesh.load(path, process=False, force="mesh")
+        return {
+            "parent_fingerprint": umc.mesh_fingerprint(mesh),
+            "parent_volume_mm3": float(mesh.volume),
+            "parent_face_count": len(mesh.faces),
+        }
+
+    # Identical mesh (small-A candidate vs small-A parent stats): fires
+    # with a MISSING parent path (no load needed).
+    fired = umc.unchanged_mesh_check(
+        parent_stl=missing,
+        candidate_stl=small_a,
+        **_stats(small_a),
+    )
+    assert fired is not None
+    assert "unchanged from the parent" in fired[0]
+    # Moved small hole (small-B candidate vs small-A parent stats): the
+    # fingerprint differs — the check does NOT fire (the old
+    # summary-stats check swallowed this as "unchanged" — the PM's
+    # false-fail case). The check does NOT load the missing parent path.
+    not_fired = umc.unchanged_mesh_check(
+        parent_stl=missing,
+        candidate_stl=small_b,
+        **_stats(small_a),
+    )
+    assert not_fired is None
+    # The path-based fallback still works (a real path, no stats).
+    assert umc.unchanged_mesh_check(
+        parent_stl=small_a, candidate_stl=small_a
+    ) is not None
+
+
+def test_unchanged_mesh_moved_hole_passes(tmp_path):
+    """Issue #419 (PM main concern — the position-sensitive fix): a v2+ edit
+    that MOVES a hole (the "move the hole 10 mm" case) leaves volume and
+    face count unchanged — only the centroid moves. The hole-A fixture
+    (bore at (0,0)) vs hole-B (bore at (10,10)) have identical face count
+    (824), identical volume within 0.0002 mm3, and identical bbox — the
+    ONLY metric that differs is the centroid (1.34 mm). Without the
+    position-sensitive leg this check would false-fire "nothing moved"
+    on a correct edit. With the centroid leg the check passes."""
+    fixture_dir = Path(__file__).parent / "fixtures" / "stl"
+    parent = str(fixture_dir / "v100-plate-hole-A.stl")
+    candidate = str(fixture_dir / "v100-plate-hole-B.stl")
+    result = _run_unchanged_loop(candidate, parent_mesh_stl=parent)
+    assert result.status == "pass"
+    assert result.iterations_used == 1
+    assert result.iterations[0].repair is None
+    assert result.iterations[0].failure_class is None
+
+
+def test_unchanged_mesh_identical_mesh_still_fires(tmp_path):
+    """Issue #419 (regression guard for the position-sensitive fix): a v2+
+    edit whose rendered mesh is BYTE-IDENTICAL to the parent's (the v100
+    repro — same file loaded as both parent and candidate) still fires the
+    unchanged repair: the geometry fingerprint (vertex set + face-vertex
+    triples) is identical on both sides.
+    """
+    fixture_dir = Path(__file__).parent / "fixtures" / "stl"
+    parent = str(fixture_dir / "v100-plate-hole-A.stl")
+    # Same file as parent and candidate: delta 0 on every metric.
+    result = _run_unchanged_loop(parent, parent_mesh_stl=parent)
+    assert result.status == "exhausted"
+    first = result.iterations[0]
+    assert first.failure_class == "geometrically_wrong"
+    assert first.repair is not None
+    assert "unchanged from the parent" in first.repair["evidence"]
+
+
+def test_unchanged_mesh_small_hole_moved_passes(tmp_path):
+    """Issue #419 (the PM's failure case — the fingerprint fix): a v2+ edit
+    that MOVES a small hole (Ø3 moved 10 mm on the 120×80×6 plate) shifts
+    the volume centroid by only ~0.007 mm, changes the volume by < 1e-6
+    mm3, and leaves the bbox identical — the OLD summary-stats check
+    (centroid within ~1 mm tolerance) flagged this correct edit as
+    "nothing moved" (a false fail). The fingerprint check separates the
+    two meshes: a moved hole moves vertices, so the vertex set (and the
+    face triples) differs, the check does NOT fire, and the loop passes.
+    """
+    fixture_dir = Path(__file__).parent / "fixtures" / "stl"
+    parent = str(fixture_dir / "v100-plate-small-hole-A.stl")
+    candidate = str(fixture_dir / "v100-plate-small-hole-B.stl")
+    # The summary stats sit inside the old tolerances (the false-fail
+    # condition): centroid shift ~0.007 mm << 1 mm, volume delta < 1e-6.
+    import trimesh
+
+    a = trimesh.load(parent, process=False, force="mesh")
+    b = trimesh.load(candidate, process=False, force="mesh")
+    import numpy as np
+
+    cm_shift = float(np.abs(np.array(a.center_mass) - np.array(b.center_mass)).max())
+    assert cm_shift < 1.0, f"fixture precondition: centroid shift {cm_shift} mm"
+    assert abs(float(a.volume) - float(b.volume)) < 0.1
+    # But the fingerprint differs (a moved hole moves vertices) — the
+    # old check would have swallowed this as "unchanged".
+    from d33d import unchanged_mesh_check as umc
+
+    assert umc.mesh_fingerprint(a) != umc.mesh_fingerprint(b)
+    # The new check: a small geometric change is NEVER "unchanged" —
+    # the check does not fire, the loop passes.
+    assert umc.unchanged_mesh_check(
+        parent_stl=parent, candidate_stl=candidate
+    ) is None
+    result = _run_unchanged_loop(candidate, parent_mesh_stl=parent)
+    assert result.status == "pass"
+    assert result.iterations_used == 1
+    assert result.iterations[0].repair is None
+    assert result.iterations[0].failure_class is None
+
+
+def test_unchanged_mesh_fingerprint_identical_mesh_fires(tmp_path):
+    """Issue #419 (fingerprint): an OpenSCAD re-render of an unchanged
+    model (the v100 repro: ``import()`` plus an ignored child re-exports
+    the parent identical) produces the IDENTICAL vertex set — the
+    fingerprint is equal and the check FIRES, on both the stats path
+    (the seam's pre-computed fingerprint, no parent load) and the
+    path-based fallback. The v100 plate fixture (an exact 12-face box,
+    zero re-export float noise) proves the identical-mesh case.
+    """
+    from d33d import unchanged_mesh_check as umc
+
+    fixture_dir = Path(__file__).parent / "fixtures" / "stl"
+    plate = str(fixture_dir / "v100-plate.stl")
+    missing = str(tmp_path / "no-such-parent.stl")
+
+    def _stats(path: str) -> dict[str, Any]:
+        import trimesh
+
+        mesh = trimesh.load(path, process=False, force="mesh")
+        return {
+            "parent_fingerprint": umc.mesh_fingerprint(mesh),
+            "parent_volume_mm3": float(mesh.volume),
+            "parent_face_count": len(mesh.faces),
+        }
+
+    # Identical mesh via the stats path (the seam's fingerprint, a
+    # DELIBERATELY missing parent path — no load needed): fires.
+    fired = umc.unchanged_mesh_check(
+        parent_stl=missing,
+        candidate_stl=plate,
+        **_stats(plate),
+    )
+    assert fired is not None
+    assert "unchanged from the parent" in fired[0]
+    # Identical mesh via the path-based fallback: fires.
+    fired_path = umc.unchanged_mesh_check(
+        parent_stl=plate, candidate_stl=plate
+    )
+    assert fired_path is not None
+    assert "unchanged from the parent" in fired_path[0]
+    # The moved-hole pair (fingerprint differs): does NOT fire on either
+    # path — the old check's false fail is gone.
+    small_a = str(fixture_dir / "v100-plate-small-hole-A.stl")
+    small_b = str(fixture_dir / "v100-plate-small-hole-B.stl")
+    assert umc.unchanged_mesh_check(
+        parent_stl=small_a, candidate_stl=small_b
+    ) is None
+
+
+def test_unchanged_mesh_retriangulated_mesh_passes(tmp_path):
+    """Issue #419 (fingerprint): a DIFFERENT triangulation of the same
+    shape (same vertex set, different face connectivity — a re-triangulation
+    of a quad wall) gives the SAME vertex-set fingerprint. The vertex-set
+    fingerprint errs toward "changed": a re-triangulated mesh is NOT
+    flagged as "unchanged" (the safe direction — a correct edit is never
+    blocked by a re-triangulation), because the vertex set is identical
+    and the volume is unchanged.
+
+    The v100 plate fixture (a 12-face box with 8 unique vertices) is
+    re-triangulated: the bottom-face quad's two triangles are replaced
+    by two triangles sharing a NEW mid-point vertex. The vertex set gains
+    one point (the mid-point), so the fingerprint differs — the check
+    does NOT fire, and the loop passes. This proves that a
+    re-triangulation that moves or adds a vertex (the common case) is
+    never "unchanged": the vertex set changes, and the check errs toward
+    "changed" (the safe direction).
+    """
+    from d33d import unchanged_mesh_check as umc
+
+    fixture_dir = Path(__file__).parent / "fixtures" / "stl"
+    parent = trimesh.load(
+        str(fixture_dir / "v100-plate.stl"), process=False, force="mesh"
+    )
+    # The unique vertices (the 8 box corners): trimesh subdivides the
+    # quad faces into triangles, so the raw array has 18 vertices at
+    # z=-3 (the bottom-face quad's 4 corners + the 2 diagonal mid-points
+    # shared by the two triangles). The re-triangulation operates on the
+    # unique vertex set: replace the bottom-face quad's 2 triangles with
+    # 2 new triangles sharing a NEW mid-point (the diagonal's midpoint).
+    import numpy as np
+
+    uv = np.unique(np.round(parent.vertices, 3), axis=0)
+    # The 4 bottom-face corners (z=-3, all distinct xy):
+    bottom_idx = [
+        i for i, p in enumerate(uv) if abs(float(p[2]) + 3.0) < 1e-9
+    ]
+    assert len(bottom_idx) == 4
+    # The new mid-point (the re-triangulation's shared diagonal vertex):
+    b0, b1, b2, b3 = bottom_idx
+    mid = (
+        float(uv[b0][0] + uv[b2][0]) / 2.0,
+        float(uv[b0][1] + uv[b2][1]) / 2.0,
+        -3.0,
+    )
+    # Build the new mesh: the unique vertices + the mid-point, with the
+    # bottom-face quad's 2 triangles replaced by 2 new triangles sharing
+    # the mid-point. The remaining faces are unchanged.
+    v_new = [tuple(float(x) for x in p) for p in uv]
+    v_new.append(mid)
+    m = len(v_new) - 1  # index of the mid-point
+    # The bottom-face triangles (all 3 vertices at z=-3):
+    f = []
+    for tri in parent.faces:
+        z0 = float(parent.vertices[tri[0]][2])
+        z1 = float(parent.vertices[tri[1]][2])
+        z2 = float(parent.vertices[tri[2]][2])
+        if (
+            abs(z0 + 3.0) < 1e-9
+            and abs(z1 + 3.0) < 1e-9
+            and abs(z2 + 3.0) < 1e-9
+        ):
+            # A bottom-face triangle: skip it (replaced below).
+            continue
+        # Non-bottom-face: map the vertex indices to the new vertex array.
+        new_tri = []
+        for vi in tri:
+            coord = tuple(float(parent.vertices[vi][c]) for c in range(3))
+            new_tri.append(v_new.index(coord))
+        f.append(new_tri)
+    # The re-triangulated bottom-face: 2 triangles sharing the mid-point.
+    f.append([b0, b1, m])
+    f.append([b1, b3, m])
+    f.append([b3, b0, m])
+    # The bottom-face quad is 4 triangles (2 original + 2 new) — but the
+    # original 2 are already skipped, so we have 3 new triangles covering
+    # the quad (the original 2 were also covering the quad). The total
+    # area is the same (a re-triangulation of a quad preserves area).
+    cand = trimesh.Trimesh(vertices=v_new, faces=f, process=False)
+    a_path = str(tmp_path / "parent.stl")
+    b_path = str(tmp_path / "candidate.stl")
+    parent.export(a_path)
+    cand.export(b_path)
+    a = trimesh.load(a_path, process=False, force="mesh")
+    b = trimesh.load(b_path, process=False, force="mesh")
+    # The re-triangulation adds the mid-point vertex: the vertex set
+    # differs (the fingerprint separates the two meshes) while the
+    # volume is unchanged (a re-triangulation preserves the enclosed
+    # volume).
+    va = sorted(map(tuple, np.unique(np.round(a.vertices, 3), axis=0).tolist()))
+    vb = sorted(map(tuple, np.unique(np.round(b.vertices, 3), axis=0).tolist()))
+    assert len(vb) == len(va) + 1, "re-triangulation adds the mid-point"
+    assert abs(float(a.volume) - float(b.volume)) < 0.1
+    assert umc.mesh_fingerprint(a) != umc.mesh_fingerprint(b)
+    # The check errs toward "changed": a re-triangulated mesh (a moved
+    # or added vertex) is NOT "unchanged" — the candidate passes on its
+    # own merits (the safe direction).
+    assert umc.unchanged_mesh_check(
+        parent_stl=a_path, candidate_stl=b_path
+    ) is None
+
+
+def test_unchanged_mesh_repair_then_changed_mesh_passes_within_cap(tmp_path):
+    """Issue #419: the model fixes the change on the repair iteration —
+    iteration 1 is the unchanged mesh (the v100 repro), iteration 2 is a
+    genuine edit (the recut) that PASSES, all within the 3-iteration cap."""
+    fixture_dir = Path(__file__).parent / "fixtures" / "stl"
+    parent = str(fixture_dir / "v100-plate.stl")
+    recut = str(fixture_dir / "v100-plate-recut.stl")
+    calls = {"n": 0}
+
+    def render_fn(scad, defines):
+        calls["n"] += 1
+        stl = parent if calls["n"] == 1 else recut
+        return _render_with_stl_and_bbox(stl, BboxInfo(20, 20, 20, 8000.0))
+
+    llm = _through_box_llm(_through_box_scad_source())
+    result = run_design_loop(
+        photo=PHOTO,
+        stated_dims=(0.0, 0.0, 0.0),
+        render_fn=render_fn,
+        llm_fn=(lambda role, messages, system: llm),
+        bbox_fn=(lambda r: BboxInfo(20, 20, 20, 8000.0)),
+        parent_mesh_stl=parent,
+    )
+    assert result.status == "pass"
+    assert result.iterations_used == 2
+    assert result.iterations[0].failure_class == "geometrically_wrong"
+    assert result.iterations[0].repair is not None
+    assert "unchanged from the parent" in result.iterations[0].repair["evidence"]
+    assert result.iterations[1].failure_class is None
+    assert result.iterations[1].repair is None
+
+
+def test_unchanged_mesh_seam_fingerprint_multicomponent_fires(tmp_path):
+    """Issue #419 (adversarial fix): the seam-forwarded fingerprint path
+    must fire for an identical multi-component mesh. The seam measures
+    the parent via ``load_and_split`` (which splits into components),
+    while the candidate side loads the whole mesh. For a multi-component
+    parent (two+ watertight bodies in one ``model.stl``), the seam
+    fingerprint must cover the UNION of all watertight components' vertex
+    sets — not just the first — to match the candidate's whole-mesh
+    fingerprint. Without the fix, the seam fingerprints only the first
+    component (8 verts) while the candidate fingerprints all (50 verts),
+    so the check does NOT fire and a genuinely-unchanged multi-component
+    edit is reported as "changed" (safe direction, but defeats the
+    check's purpose)."""
+    from d33d import unchanged_mesh_check as umc
+    from d33d.design_loop_events import _seam_parent_mesh_stats
+
+    fixture_dir = Path(__file__).parent / "fixtures" / "stl"
+    multi = str(fixture_dir / "two_body_multisolid.stl")
+
+    # The seam fingerprint (primary production path): must equal the
+    # candidate's whole-mesh fingerprint for an identical mesh.
+    _genus, _vol, _faces, seam_fp = _seam_parent_mesh_stats(multi)
+    assert seam_fp is not None, "seam must produce a fingerprint"
+
+    # The candidate fingerprint (the check's own load path):
+    import trimesh
+
+    cand = trimesh.load(multi, process=False, force="mesh")
+    cand_fp = umc.mesh_fingerprint(cand)
+    assert cand_fp is not None
+
+    # The seam and candidate fingerprints must MATCH (both cover the
+    # union of all watertight components' vertices).
+    assert seam_fp[0] == cand_fp[0], (
+        f"seam fp {seam_fp[0][:12]}… ({seam_fp[1]} verts) != "
+        f"candidate fp {cand_fp[0][:12]}… ({cand_fp[1]} verts) — "
+        "the seam must fingerprint the union of ALL watertight components"
+    )
+    assert seam_fp[1] == cand_fp[1]
+
+    # End-to-end: the check fires when the candidate IS the parent
+    # (identical multi-component mesh), using the seam-forwarded
+    # fingerprint (the primary production path — no parent load).
+    missing = str(tmp_path / "no-such.stl")
+    fired = umc.unchanged_mesh_check(
+        parent_stl=missing,
+        candidate_stl=multi,
+        parent_fingerprint=seam_fp,
+        parent_volume_mm3=_vol,
+        parent_face_count=_faces,
+    )
+    assert fired is not None, (
+        "the check must fire for an identical multi-component mesh "
+        "via the seam-forwarded fingerprint path"
+    )
+    assert "unchanged from the parent" in fired[0]
+
 
 def test_per_attempt_deadline_returns_best_so_far_exhausted():
     """The loop's per-attempt deadline (issue #417): a design LLM call
@@ -4569,3 +5093,64 @@ def test_real_send_readtimeout_keeps_best_candidate():
     assert result.best is not None
     assert result.best.iteration == 1
     assert "cube" in result.best.scad_source
+
+
+def _reference_fingerprint_from_rounded_vertices(vertices):
+    """Issue #419 lens round 2: the PRE-vectorisation pure-Python
+    reference of ``fingerprint_from_rounded_vertices`` (round to 1e-3
+    mm, deduplicate, sort lexicographically, big-endian int64 pack,
+    sha256). Kept here as the reference the vectorised implementation
+    must match byte-for-byte."""
+    import hashlib as _hashlib
+
+    _ROUND_MM = 1e-3
+    rounded = {
+        (
+            round(float(x) / _ROUND_MM),
+            round(float(y) / _ROUND_MM),
+            round(float(z) / _ROUND_MM),
+        )
+        for (x, y, z) in vertices
+    }
+    if not rounded:
+        return None
+    sorted_set = sorted(rounded)
+    out = bytearray()
+    for v in sorted_set:
+        for c in v:
+            out += int(c).to_bytes(8, "big", signed=True)
+    return (_hashlib.sha256(bytes(out)).hexdigest(), len(sorted_set))
+
+
+def test_fingerprint_vectorised_matches_reference_on_all_fixtures():
+    """Issue #419 (lens round 2): the numpy-vectorised
+    ``fingerprint_from_rounded_vertices`` must produce IDENTICAL
+    ``(sha256, count)`` pairs to the pre-vectorisation pure-Python
+    reference for every committed STL fixture — the v100 fixtures,
+    two_body_multisolid, and the small-hole pair."""
+    import trimesh
+
+    from d33d.unchanged_mesh_check import fingerprint_from_rounded_vertices
+
+    fixture_dir = Path(__file__).parent / "fixtures" / "stl"
+    names = [
+        "v100-plate.stl",
+        "v100-plate-recut.stl",
+        "v100-plate-hole-A.stl",
+        "v100-plate-hole-B.stl",
+        "v100-plate-small-hole-A.stl",
+        "v100-plate-small-hole-B.stl",
+        "two_body_multisolid.stl",
+    ]
+    for name in names:
+        path = fixture_dir / name
+        mesh = trimesh.load(str(path), process=False, force="mesh")
+        verts = mesh.vertices
+        got = fingerprint_from_rounded_vertices(verts)
+        want = _reference_fingerprint_from_rounded_vertices(verts)
+        assert got is not None
+        assert got == want, (
+            f"{name}: vectorised fingerprint {got} != reference {want} "
+            "— the numpy path must hash byte-identically to the old "
+            "pure-Python round/sort/hash"
+        )

@@ -276,6 +276,51 @@ def test_syntax_error_unknown_variable_in_render_log() -> None:
     assert "H" in classified.evidence
 
 
+def test_syntax_error_unknown_named_argument_in_render_log() -> None:
+    """Issue #419 (the #383 sibling): the real render path — the
+    unknown-NAMED-ARGUMENT warning (``cylinder(position=...);`` — OpenSCAD
+    warns ``Unknown parameter "position" for object "cylinder"`` and
+    silently drops the argument) lives in the HARVESTED render.log (the
+    container stderr carries only [entrypoint] markers). ``classify_failure``
+    must inspect ``render_log`` to reach the named class and name the
+    parameter in the evidence. Same class as #383's ``unknown_variable``
+    (no new class — the defect family is the same: an ignored name,
+    geometry built without it); the repair instruction names the
+    offending name either way."""
+    warning = (
+        'WARNING: Unknown parameter "position" for object "cylinder" '
+        "in file model.scad, line 5"
+    )
+    classified = fc.classify_failure(
+        error_class="syntax_error",
+        stderr="[entrypoint] Starting render of /work/model.scad\n",
+        render_log=warning,
+    )
+    assert classified.failure_class == "unknown_variable"
+    assert classified.repairable is True
+    assert "position" in classified.evidence
+    directive = fc.route_repair(classified=classified, scad_source="cylinder(d=38, position=[10,10,0]);")
+    assert directive is not None
+    # The repair directive carries the parameter name in the EVIDENCE
+    # (the instruction is the generic unknown_variable template — the
+    # parameter name is what the LLM needs to fix the named argument).
+    assert "position" in directive.evidence
+
+
+def test_syntax_error_unknown_named_argument_in_stderr() -> None:
+    """Issue #419: the unknown-named-argument warning in the container's
+    stderr (the other buffer ``classify_failure`` inspects) → the same
+    ``unknown_variable`` class as #383, with the parameter named."""
+    stderr = 'WARNING: Unknown parameter "position" for object "cylinder"'
+    classified = fc.classify_failure(
+        error_class="syntax_error",
+        stderr=stderr,
+    )
+    assert classified.failure_class == "unknown_variable"
+    assert classified.repairable is True
+    assert "position" in classified.evidence
+
+
 def test_syntax_error_unclassified_fallback() -> None:
     """Unrecognised syntax_error → unclassified_syntax_error."""
     stderr = "ERROR: some unrecognized syntax issue"

@@ -8003,3 +8003,137 @@ def test_chat_adapter_warns_when_part_envelope_unavailable(
         frames = _run(pid)
         assert "done" in [f[0] for f in frames], frames
         assert _part_warnings() == [], "part-less project must not warn"
+
+
+# ---------------------------------------------------------------------------
+# (issue #419 final) the timeout-version path must NOT version a kept
+# candidate whose iteration carried the unchanged-mesh repair
+# ---------------------------------------------------------------------------
+
+
+def test_timeout_version_path_skips_unchanged_kept_candidate(
+    app_with_versions, monkeypatch
+):
+    """Issue #419 (final): a scripted loop whose attempt 1 renders an
+    UNCHANGED mesh (the unchanged-mesh post-check fires — the record's
+    ``repair`` carries ``"reason": "mesh_unchanged"``) and whose attempt 2
+    hangs past the per-attempt deadline. The loop's own deadline returns
+    the best-so-far exhausted result with the structured
+    ``design_loop_timed_out`` reason — and the kept best IS the unchanged
+    candidate (geometrically identical to its parent).
+
+    The timeout-version path must NOT version that candidate (a duplicate
+    of the parent version — the exact defect #419's final gap names), but
+    the stream MUST still emit the terminal ``design_loop_timed_out``
+    error frame (the archive rides the same seam — the loop-result hook —
+    which fires for the exhausted result). The stub runs ~1.3 s total,
+    inside the monkeypatched 3.1 s adapter safety net (the loop's own
+    per-attempt deadline did the cutting — the stub mirrors
+    ``run_design_loop_async``'s shape when
+    ``_await_with_per_attempt_deadline`` fires).
+    """
+    from d33d.design_loop_events import (
+        DESIGN_LOOP_TIMED_OUT_REASON,
+        run_design_loop_with_events,
+    )
+
+    monkeypatch.setattr(
+        "d33d.design_loop_events.DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS", 1.0
+    )
+    monkeypatch.setattr(
+        "d33d.design_loop_events.ADAPTER_DEADLINE_MARGIN_SECONDS", 0.1
+    )
+    monkeypatch.setattr(
+        "d33d.design_loop_events.ADAPTER_RENDER_ALLOWANCE_SECONDS", 1.0
+    )
+
+    _SCAD = "W = 20;\ncube([W, 20, 20]);\n"
+
+    class _UnchangedTimeoutResult:
+        """The loop's own per-attempt deadline fired on attempt 2: an
+        exhausted ``design_loop_timed_out`` result whose kept best is the
+        attempt-1 record that rendered the unchanged mesh (``repair``
+        carries the ``mesh_unchanged`` reason)."""
+
+        def __init__(self) -> None:
+            self.status = "exhausted"
+            self.failure_reason = DESIGN_LOOP_TIMED_OUT_REASON
+            self.attempts_started = 2
+            self.attempt_latencies = [0.3, 1.0]
+            self.best = IterationRecord(
+                iteration=1,
+                scad_source=_SCAD,
+                render=_default_render(),
+                score=Score(bits=(True,) * 5, rank=5, tiebreak=(True,) * 5),
+                params={"W": 20.0},
+                repair={
+                    "failure_class": "geometrically_wrong",
+                    "reason": "mesh_unchanged",
+                    "evidence": "rendered mesh is unchanged from the parent version",
+                },
+            )
+
+    class _ScriptedLoop:
+        """A production-seam-shaped stub: attempt 1 renders (the
+        unchanged mesh), attempt 2 hangs until the (scripted) per-attempt
+        deadline, then the loop returns the best-so-far exhausted result
+        — the same shape ``run_design_loop_async`` returns when
+        ``_await_with_per_attempt_deadline`` fires."""
+
+        def __call__(self, app=None, **kwargs):
+            async def _scripted():
+                on_progress = kwargs.get("on_progress")
+                if on_progress is not None:
+                    on_progress("iteration", {"iteration": 1})
+                await asyncio.sleep(0.3)  # attempt 1 renders
+                if on_progress is not None:
+                    on_progress("iteration", {"iteration": 2})
+                await asyncio.sleep(1.0)  # attempt 2 hangs past its deadline
+                return _UnchangedTimeoutResult()
+
+            return _scripted()
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _ScriptedLoop()
+        source = run_design_loop_with_events(
+            app_with_versions,
+            pid,
+            user_message="drill a hole",
+            stated_dims=None,
+            chat_history=(),
+            photo="data:image/png;base64,x",
+            request_text="drill a hole",
+        )
+        frames = []
+        async for event, data in source:
+            frames.append((event, data))
+            if event in ("done", "error"):
+                break
+        # No version was created at all (the unchanged candidate is a
+        # duplicate of the parent — nothing to version). The read runs
+        # INSIDE the lifespan (the connection closes when it exits).
+        versions = app_with_versions.state.versions.list_versions(pid)
+        return frames, versions
+
+    frames, versions = run_async(app_with_versions, _call)
+    assert frames, "no frames emitted at all"
+    # NO version: the kept candidate carried the unchanged-mesh repair —
+    # versioning it would duplicate the parent version.
+    assert not any(
+        f[0] == "progress" and f[1].get("step") == "version-created"
+        for f in frames
+    ), f"unchanged kept candidate was versioned: {frames}"
+    # The terminal timeout frame IS emitted (the terminal error frame is
+    # the user-visible guarantee), LAST, with the structured reason.
+    assert frames[-1][0] == "error", f"no terminal error frame: {frames}"
+    assert frames[-1][1].get("reason") == DESIGN_LOOP_TIMED_OUT_REASON, (
+        f"wrong reason: {frames[-1][1]}"
+    )
+    # No version was created at all (the unchanged candidate is a
+    # duplicate of the parent — nothing to version).
+    assert versions == [], (
+        f"no version may be created for an unchanged kept candidate: "
+        f"{versions}"
+    )
