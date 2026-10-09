@@ -3951,6 +3951,9 @@ def test_design_loop_total_timeout_yields_terminal_error_frame(app_with_versions
     monkeypatch.setattr(
         "d33d.design_loop_events.ADAPTER_DEADLINE_MARGIN_SECONDS", 0.1
     )
+    monkeypatch.setattr(
+        "d33d.design_loop_events.ADAPTER_RENDER_ALLOWANCE_SECONDS", 0.1
+    )
 
     class _StallLoop:
         """Production-seam-shaped stub: takes ``app`` (like the real
@@ -4088,6 +4091,9 @@ def test_design_loop_deadline_fires_among_liveness_frames(app_with_versions, mon
     monkeypatch.setattr(
         "d33d.design_loop_events.ADAPTER_DEADLINE_MARGIN_SECONDS", 0.1
     )
+    monkeypatch.setattr(
+        "d33d.design_loop_events.ADAPTER_RENDER_ALLOWANCE_SECONDS", 0.1
+    )
 
     class _LivenessLoop:
         """Production-seam-shaped stub: takes ``app`` (like the real
@@ -4176,6 +4182,9 @@ def test_design_loop_deadline_cancels_render_task(app_with_versions, monkeypatch
     )
     monkeypatch.setattr(
         "d33d.design_loop_events.ADAPTER_DEADLINE_MARGIN_SECONDS", 0.1
+    )
+    monkeypatch.setattr(
+        "d33d.design_loop_events.ADAPTER_RENDER_ALLOWANCE_SECONDS", 0.1
     )
     task_state: dict[str, object] = {}
 

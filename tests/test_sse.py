@@ -350,6 +350,9 @@ def test_sse_loop_deadline_ends_stream_cleanly(app_with_streaming, monkeypatch):
     monkeypatch.setattr(
         "d33d.design_loop_events.ADAPTER_DEADLINE_MARGIN_SECONDS", 0.05
     )
+    monkeypatch.setattr(
+        "d33d.design_loop_events.ADAPTER_RENDER_ALLOWANCE_SECONDS", 0.05
+    )
 
     class _StallLoop:
         """A production-seam-shaped stub that never terminates within

@@ -52,7 +52,7 @@ from d33d.design_loop import (
     scad_looks_valid,
 )
 from d33d.loop_timeout import AttemptTracker, archive_deadline
-from d33d.render_worker import VIEWS, RenderResult
+from d33d.render_worker import DEFAULT_TIMEOUT_S, VIEWS, RenderResult
 
 logger = logging.getLogger(__name__)
 
@@ -78,16 +78,36 @@ EMPTY_PHOTO_DATA_URI = (
 #: ``monkeypatch.setattr`` it to a small value — the same pattern as
 #: ``versions_routes._DRAIN_TIMEOUT_SECONDS``), never inlined.
 
-#: The margin over the derived total (per-attempt × MAX_ITERATIONS, 360 s)
-#: the adapter's OUTER SAFETY NET deadline adds (issue #417): 60 s of
-#: headroom so a legitimately slow run that the loop's own per-attempt
-#: deadline has already cut off (returning its best-so-far result through
-#: the ordinary exhaustion path) is never cut off twice by the adapter.
-#: The adapter deadline stays below the client's
-#: ``STREAM_TOTAL_TIMEOUT_MS`` (``web/src/lib/api.ts``, 480 s) with margin
-#: (360 + 60 = 420 s < 480 s) so the server's structured frame arrives
-#: before the client's generic "stream interrupted" kill.
+#: The margin over the derived per-attempt worst-case total the adapter's
+#: OUTER SAFETY NET deadline adds (issue #417): 60 s of headroom so a
+#: legitimately slow run that the loop's own per-attempt deadline has
+#: already cut off (returning its best-so-far result through the ordinary
+#: exhaustion path) is never cut off twice by the adapter.
 ADAPTER_DEADLINE_MARGIN_SECONDS = 60.0
+
+#: The per-attempt render allowance in the adapter safety-net sizing
+#: (issue #417 lens round 3): the render worker's OWN subprocess timeout
+#: (:data:`d33d.render_worker.DEFAULT_TIMEOUT_S`, 120 s), imported — never
+#: re-literalised — so the net tracks the worker's real worst case. Each
+#: attempt's wall clock is its budgeted LLM call
+#: (:data:`DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS`) PLUS the render
+#: (``run_container``'s ``subprocess.run`` wall-clock timeout, bounded by
+#: ``DEFAULT_TIMEOUT_S``) plus post-checks, so the net is sized from
+#: (LLM budget + render allowance) × ``MAX_ITERATIONS`` + margin — the
+#: old LLM-only sizing (120 × 3 + 60 = 420 s) killed a legitimately
+#: slow, progressing run (LLM ~90 s + render ~60 s, × 3 = ~450 s) with
+#: NO version kept, the exact QA failure #417 exists to fix.
+ADAPTER_RENDER_ALLOWANCE_SECONDS = DEFAULT_TIMEOUT_S
+
+#: The adapter's OUTER SAFETY NET total deadline in seconds (issue
+#: #417): the per-attempt worst case (LLM budget + render allowance) ×
+#: ``MAX_ITERATIONS`` plus the fixed margin — (120 s + 120 s) × 3 + 60 s
+#: = 780 s. It stays below the client's ``STREAM_TOTAL_TIMEOUT_MS``
+#: (``web/src/lib/api.ts``, 840 s = 14 min) with a 60 s margin so the
+#: server's structured frame arrives before the client's generic
+#: "stream interrupted" kill. Read at call time (module-level name
+#: lookup, so tests can ``monkeypatch.setattr`` it to small values — the
+#: same pattern as the other constants).
 
 #: The distinct structured reason code for a deadline-triggered terminal
 #: error frame. Deliberately NOT the render-worker's ``"timeout"``
@@ -1715,6 +1735,14 @@ async def run_design_loop_with_events(
     # yielded while the render is still running (see the ``asyncio.wait``
     # below), not after it completes.
     _frame_queue: asyncio.Queue[tuple[str, dict[str, Any]] | None] = asyncio.Queue()
+    # The frame-derived attempt tracker (issue #417): assigned ONLY on
+    # the awaitable path (the ``to_thread`` wait loop owns it), and
+    # ``None`` on the sync path where no frames are drained — the
+    # timeout-version fallback below must guard against ``None`` (a
+    # sync stub loop returning a deadline-shaped result with no
+    # ``attempt_latencies`` would otherwise raise ``NameError``/
+    # ``AttributeError`` on the fallback).
+    _attempt_tracker: AttemptTracker | None = None
 
     run_loop = getattr(app.state, "run_design_loop", None)
     if run_loop is None:
@@ -2135,8 +2163,11 @@ async def run_design_loop_with_events(
             # ``design_loop_timed_out`` reason, and the ordinary
             # exhaustion path below surfaces it (and version-creates the
             # kept candidate when one rendered). This adapter deadline is
-            # a GENEROUS OUTER SAFETY NET — the derived total (per-attempt
-            # budget × iteration cap) plus a fixed margin, and below the
+            # a GENEROUS OUTER SAFETY NET — the per-attempt WORST case
+            # (the budgeted LLM call, ``DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS``,
+            # plus the render worker's own subprocess timeout,
+            # ``ADAPTER_RENDER_ALLOWANCE_SECONDS``, plus post-checks)
+            # times the iteration cap, plus a fixed margin, and below the
             # client's ``STREAM_TOTAL_TIMEOUT_MS`` (web/src/lib/api.ts)
             # with documented headroom — that fires only for a run that
             # stops yielding frames before the loop's own deadline can
@@ -2144,7 +2175,8 @@ async def run_design_loop_with_events(
             # legitimately slow run that finishes within its budget is
             # never cut off here.
             _total_deadline = (
-                DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS * MAX_ITERATIONS
+                (DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS + ADAPTER_RENDER_ALLOWANCE_SECONDS)
+                * MAX_ITERATIONS
                 + ADAPTER_DEADLINE_MARGIN_SECONDS
             )
             _deadline = _loop.time() + _total_deadline
@@ -2174,12 +2206,14 @@ async def run_design_loop_with_events(
                 _attempt_count = _attempt_tracker.attempt_count
                 logger.warning(
                     "design loop for project %s exceeded the %ss "
-                    "adapter safety-net deadline (per-attempt %ss × %s "
-                    "attempts + %ss margin; measured %r s per attempt) — "
-                    "emitting terminal design_loop_timed_out frame",
+                    "adapter safety-net deadline (per-attempt LLM %ss + "
+                    "render %ss, × %s attempts + %ss margin; measured %r "
+                    "s per attempt) — emitting terminal design_loop_timed_out "
+                    "frame",
                     project_id,
                     _total_deadline,
                     DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS,
+                    ADAPTER_RENDER_ALLOWANCE_SECONDS,
                     MAX_ITERATIONS,
                     ADAPTER_DEADLINE_MARGIN_SECONDS,
                     _latencies,
@@ -2205,7 +2239,7 @@ async def run_design_loop_with_events(
                     "reason": DESIGN_LOOP_TIMED_OUT_REASON,
                 }
                 if _avg_latency is not None:
-                    _error_data["attempt_latency_seconds"] = round(_avg_latency)
+                    _error_data["attempt_latency_seconds"] = math.ceil(_avg_latency)
                 if _attempt_count > 0:
                     _error_data["attempt_count"] = _attempt_count
                 frames: list[tuple[str, dict[str, Any]]] = _yield_notice()
@@ -2603,14 +2637,23 @@ async def run_design_loop_with_events(
                 else:
                     # Fallback: the frame-derived attempt tracker (the
                     # adapter safety-net path — see the comment above).
-                    _latencies = _attempt_tracker.latencies()
-                    _avg_latency = (
-                        sum(_latencies) / len(_latencies) if _latencies else None
-                    )
-                    if _avg_latency is not None:
-                        error_data["attempt_latency_seconds"] = round(_avg_latency)
-                    if _attempt_tracker.attempt_count > 0:
-                        error_data["attempt_count"] = _attempt_tracker.attempt_count
+                    # Only exists on the awaitable path; a sync stub
+                    # loop with no loop-sourced numbers falls through to
+                    # omitting both fields (no fabricated numbers — the
+                    # SPA never renders a number it has not established).
+                    if _attempt_tracker is not None:
+                        _latencies = _attempt_tracker.latencies()
+                        _avg_latency = (
+                            sum(_latencies) / len(_latencies) if _latencies else None
+                        )
+                        if _avg_latency is not None:
+                            error_data["attempt_latency_seconds"] = math.ceil(
+                                _avg_latency
+                            )
+                        if _attempt_tracker.attempt_count > 0:
+                            error_data["attempt_count"] = (
+                                _attempt_tracker.attempt_count
+                            )
         # Frame order (issue #417 gate resolution): [photo notice(s),
         # version-created (when the kept candidate was stored), terminal
         # error] — the SAME order the adapter-deadline path uses, and the
