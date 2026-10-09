@@ -646,4 +646,28 @@ describe("displayDesignLoopError — the envelope gate (part 2)", () => {
       expect(display.carriedAxes, `carried_axes=${JSON.stringify(bad)}`).toBeUndefined();
     }
   });
+
+  it.each([
+    ["mesh_unchanged", "The change didn't take after 2 tries"],
+    ["through_hole_missing", "The hole didn't go all the way through after 2 tries"],
+    ["screw_clearance_wrong", "A screw hole was still smaller than its clearance after 2 tries"],
+    ["stack_height_mismatch", "The stacked parts still don't add up to the height you asked for after 2 tries"],
+  ])("%s states the attempt count from the frame's attempts (issue #432)", (reason, prefix) => {
+    const display = displayDesignLoopError({
+      message: `Design loop exhausted: ${reason}`,
+      reason,
+      attempts: 2,
+    });
+    expect(display.message.startsWith(prefix)).toBe(true);
+    expect(display.message).toBe(copy.failure.postCheckAttempts[reason as "mesh_unchanged"](2));
+  });
+
+  it("a post-check stop without attempts falls back to the no-count sentence (issue #432)", () => {
+    const display = displayDesignLoopError({
+      message: "Design loop exhausted: screw_clearance_wrong",
+      reason: "screw_clearance_wrong",
+    });
+    expect(display.message).toBe(copy.failure.reasons.screw_clearance_wrong);
+    expect(display.message).not.toMatch(/tries/);
+  });
 });

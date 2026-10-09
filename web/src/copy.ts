@@ -16,6 +16,17 @@
 /** Narrow no-break space — keeps "34 mm" from breaking across a line. */
 const NB = "\u202F";
 
+/** The post-check reasons (issue #432): each stops the loop with its own
+ *  attempt-count sentence (`copy.failure.postCheckAttempts`). */
+export type PostCheckReason =
+  | "mesh_unchanged"
+  | "through_hole_missing"
+  | "screw_clearance_wrong"
+  | "stack_height_mismatch";
+
+/** "try" for one, "tries" otherwise (issue #432). */
+const triesWord = (attempts: number): string => (attempts === 1 ? "try" : "tries");
+
 /** One decimal, always, with the unit attached. Every displayed dimension. */
 export const mm = (value: number): string => `${value.toFixed(1)}${NB}mm`;
 
@@ -470,6 +481,22 @@ export const failure = {
    *  established). */
   slowModelTimeout: (attemptSeconds: number, attemptCount: number): string =>
     `The model is slow right now (about ${attemptSeconds}s an attempt), so I stopped after ${attemptCount} tries.`,
+  /** The post-check stop copy (issue #432): each post-check reason's sentence
+   *  with the ACTUAL attempt count the loop used (the frame's `attempts`,
+   *  from `iterations_used`). A sibling of `reasons` (a function-valued
+   *  entry would break the string-only `reasons` lookup); errorMapping.ts
+   *  selects it only when `attempts` is a valid count — otherwise the flat
+   *  `reasons` sentence stands (no count the SPA has not established). */
+  postCheckAttempts: {
+    mesh_unchanged: (attempts: number): string =>
+      `The change didn't take after ${attempts} ${triesWord(attempts)} — nothing in the part moved.`,
+    through_hole_missing: (attempts: number): string =>
+      `The hole didn't go all the way through after ${attempts} ${triesWord(attempts)} — it stopped short of the far face.`,
+    screw_clearance_wrong: (attempts: number): string =>
+      `A screw hole was still smaller than its clearance after ${attempts} ${triesWord(attempts)} — the screw won't fit.`,
+    stack_height_mismatch: (attempts: number): string =>
+      `The stacked parts still don't add up to the height you asked for after ${attempts} ${triesWord(attempts)}.`,
+  } satisfies Record<PostCheckReason, (attempts: number) => string>,
   /** The renderer image pre-flight disclosure (issue #346): the fault
    *  line naming the verified reason (image missing vs label mismatch).
    *  A sibling of `reasons`, not a reason-code entry: the failure turn

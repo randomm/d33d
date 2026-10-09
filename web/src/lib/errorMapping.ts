@@ -30,7 +30,7 @@
  * entry.
  */
 
-import { copy } from "../copy";
+import { copy, type PostCheckReason } from "../copy";
 
 /** The W/D/H axis letters → nouns and adjectives — re-exported from the
  *  copy deck (which owns all user-facing strings; the copy deck is the
@@ -192,6 +192,18 @@ export interface DisplayError {
   measuredAxes?: Partial<Record<"W" | "D" | "H", number>>;
 }
 
+const POST_CHECK_REASON_SET: ReadonlySet<string> = new Set<string>(
+  Object.keys(copy.failure.postCheckAttempts),
+);
+
+function isPostCheckReason(reason: string): reason is PostCheckReason {
+  return POST_CHECK_REASON_SET.has(reason);
+}
+
+function isValidAttempts(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value > 0;
+}
+
 /** Parse the gate-7 envelope failure string produced by
  *  `d33d/print_validation.py` (`_GATE7_ENVELOPE_PREFIX`):
  *  `gate7/envelope: dimension {i} ({bbox}mm) exceeds envelope {limit}mm`.
@@ -317,6 +329,10 @@ export function displayDesignLoopError(
      *  `int` or omits the field entirely; a malformed value is dropped at
      *  the use site (the generic reason sentence stands). */
     attempt_count?: number;
+    /** The loop's attempt count on a post-check stop (issue #432,
+     *  omit-not-null): selects the sentence's "after N tries" clause. A
+     *  malformed value is dropped at the use site (the flat sentence stands). */
+    attempts?: number;
   },
   envelopeLimits?: [number, number, number],
 ): DisplayError {
@@ -359,6 +375,12 @@ export function displayDesignLoopError(
       ) {
         message = copy.failure.slowModelTimeout(lat, cnt);
       }
+    }
+    // The post-check stop copy (issue #432): with a valid attempt count the
+    // sentence states it ("after 2 tries"); absent or malformed → the flat
+    // `reasons` sentence (no count the SPA has not established).
+    if (isPostCheckReason(reason) && isValidAttempts(data.attempts)) {
+      message = copy.failure.postCheckAttempts[reason](data.attempts);
     }
     // The carried-axis variant: the frame's `carried_axes` is the set the
     // gate enforced (the user's earlier statements, held by the carry-

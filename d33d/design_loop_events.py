@@ -51,6 +51,7 @@ from d33d.design_loop import (
     _gate_selection_extents,
     scad_looks_valid,
 )
+from d33d.evals.failure_capture import POST_CHECK_REASONS
 from d33d.loop_timeout import AttemptTracker, archive_deadline
 from d33d.render_worker import DEFAULT_TIMEOUT_S, VIEWS, RenderResult
 
@@ -2613,6 +2614,17 @@ async def run_design_loop_with_events(
         reason = _structured_reason(result)
         if reason is not None:
             error_data["reason"] = reason
+        # Issue #432: a post-check stop carries the attempt count (the
+        # loop's ``iterations_used``) so the SPA states it ("after 2 tries").
+        # Omitted when the reason is not a post-check or the count is unknown.
+        _attempts = getattr(result, "iterations_used", None)
+        if (
+            reason in POST_CHECK_REASONS
+            and isinstance(_attempts, int)
+            and not isinstance(_attempts, bool)
+            and _attempts > 0
+        ):
+            error_data["attempts"] = _attempts
         # The missing/empty ``${ENV}`` variable name (issue #303): the
         # model pre-flight's ``ModelPreflight.env_var`` rides the result as
         # ``env_var`` so the SPA's ``FailureTurn`` can render the helper

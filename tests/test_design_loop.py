@@ -4277,12 +4277,36 @@ def test_identical_repair_stop_reports_attempt_n_minus_1_as_best(tmp_path):
     repeated post-check's reason (mesh_unchanged here)."""
     fixture_dir = Path(__file__).parent / "fixtures" / "stl"
     parent = str(fixture_dir / "v100-plate.stl")
-    result = _run_unchanged_loop(parent, parent_mesh_stl=parent)
+    # Each attempt's SCAD carries a distinct title, so the reported best is
+    # identifiable as attempt N-1's record (not merely "some" record).
+    base = _through_box_scad_source()
+    scads = [f"// attempt one\n{base}", f"// attempt two\n{base}"]
+    calls = {"n": 0}
+
+    def llm_fn(role, messages, system):
+        calls["n"] += 1
+        return _through_box_llm(scads[min(calls["n"], 2) - 1])
+
+    render = _render_with_stl_and_bbox(parent, BboxInfo(20, 20, 20, 8000.0))
+    result = run_design_loop(
+        photo=PHOTO,
+        stated_dims=(0.0, 0.0, 0.0),
+        render_fn=lambda scad, defines: render,
+        llm_fn=llm_fn,
+        bbox_fn=lambda r: BboxInfo(20, 20, 20, 8000.0),
+        parent_mesh_stl=parent,
+    )
     assert result.status == "exhausted"
     assert result.iterations_used == 2
     assert result.failure_reason == "mesh_unchanged"
+    assert "// attempt two" in result.iterations[1].scad_source
+    assert "// attempt one" in result.iterations[0].scad_source
+    # Discriminating: the reported best is attempt N-1's record, identified
+    # by its own scad title — it fails if best were taken from attempt N.
     assert result.best is result.iterations[0]
     assert result.best.iteration == 1
+    assert "// attempt one" in result.best.scad_source
+    assert "// attempt two" not in result.best.scad_source
 
 
 def test_stack_height_identical_repeat_stops_at_attempt_2(tmp_path):
