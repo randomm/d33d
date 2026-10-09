@@ -1325,11 +1325,12 @@ def classify(
         return "oom"
     stl_present = isinstance(stl_path, str) and bool(stl_path)
     if not stl_present:
-        if exit_code != 0:
-            if STL_ABORT_RE.search(stderr or ""):
-                return "syntax_error"
-            if OPENSCAD_DIAGNOSTIC_RE.search(stderr or "") or OPENSCAD_DIAGNOSTIC_RE.search(render_log or ""):
-                return "syntax_error"
+        if exit_code != 0 and (
+            STL_ABORT_RE.search(stderr or "")
+            or OPENSCAD_DIAGNOSTIC_RE.search(stderr or "")
+            or OPENSCAD_DIAGNOSTIC_RE.search(render_log or "")
+        ):
+            return "syntax_error"
         return "container_error"
     if not _csg_and_views_valid(csg_path, views):
         return "artifact_error"

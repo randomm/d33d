@@ -5093,3 +5093,64 @@ def test_real_send_readtimeout_keeps_best_candidate():
     assert result.best is not None
     assert result.best.iteration == 1
     assert "cube" in result.best.scad_source
+
+
+def _reference_fingerprint_from_rounded_vertices(vertices):
+    """Issue #419 lens round 2: the PRE-vectorisation pure-Python
+    reference of ``fingerprint_from_rounded_vertices`` (round to 1e-3
+    mm, deduplicate, sort lexicographically, big-endian int64 pack,
+    sha256). Kept here as the reference the vectorised implementation
+    must match byte-for-byte."""
+    import hashlib as _hashlib
+
+    _ROUND_MM = 1e-3
+    rounded = {
+        (
+            round(float(x) / _ROUND_MM),
+            round(float(y) / _ROUND_MM),
+            round(float(z) / _ROUND_MM),
+        )
+        for (x, y, z) in vertices
+    }
+    if not rounded:
+        return None
+    sorted_set = sorted(rounded)
+    out = bytearray()
+    for v in sorted_set:
+        for c in v:
+            out += int(c).to_bytes(8, "big", signed=True)
+    return (_hashlib.sha256(bytes(out)).hexdigest(), len(sorted_set))
+
+
+def test_fingerprint_vectorised_matches_reference_on_all_fixtures():
+    """Issue #419 (lens round 2): the numpy-vectorised
+    ``fingerprint_from_rounded_vertices`` must produce IDENTICAL
+    ``(sha256, count)`` pairs to the pre-vectorisation pure-Python
+    reference for every committed STL fixture — the v100 fixtures,
+    two_body_multisolid, and the small-hole pair."""
+    import trimesh
+
+    from d33d.unchanged_mesh_check import fingerprint_from_rounded_vertices
+
+    fixture_dir = Path(__file__).parent / "fixtures" / "stl"
+    names = [
+        "v100-plate.stl",
+        "v100-plate-recut.stl",
+        "v100-plate-hole-A.stl",
+        "v100-plate-hole-B.stl",
+        "v100-plate-small-hole-A.stl",
+        "v100-plate-small-hole-B.stl",
+        "two_body_multisolid.stl",
+    ]
+    for name in names:
+        path = fixture_dir / name
+        mesh = trimesh.load(str(path), process=False, force="mesh")
+        verts = mesh.vertices
+        got = fingerprint_from_rounded_vertices(verts)
+        want = _reference_fingerprint_from_rounded_vertices(verts)
+        assert got is not None
+        assert got == want, (
+            f"{name}: vectorised fingerprint {got} != reference {want} "
+            "— the numpy path must hash byte-identically to the old "
+            "pure-Python round/sort/hash"
+        )

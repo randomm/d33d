@@ -83,6 +83,7 @@ from d33d.render_worker import (
     build_hash,
     canonical_build_command,
 )
+from d33d.unchanged_mesh_check import MESH_UNCHANGED_REASON
 
 logger = logging.getLogger(__name__)
 
@@ -1169,7 +1170,7 @@ def _dim_params(
 def _unchanged_mesh_post_check(
     parent_stl: str | None,
     render: RenderResult,
-    parent_fingerprint: tuple[str, str, int] | None = None,
+    parent_fingerprint: tuple[str, int] | None = None,
     parent_volume_mm3: float | None = None,
     parent_face_count: int | None = None,
 ) -> tuple[str, str] | None:
@@ -1847,7 +1848,7 @@ async def run_design_loop_async(
     through_baseline_genus: int | None = None,
     through_baseline_genus_source: str | None = None,
     parent_mesh_stl: str | None = None,
-    parent_fingerprint: tuple[str, str, int] | None = None,
+    parent_fingerprint: tuple[str, int] | None = None,
     parent_volume_mm3: float | None = None,
     parent_face_count: int | None = None,
     on_progress_iteration: Any = "_current",
@@ -2443,7 +2444,7 @@ async def run_design_loop_async(
                     "instruction": _instruction,
                     "scad_source": scad_source,
                     "evidence": _evidence,
-                    "reason": "mesh_unchanged",
+                    "reason": MESH_UNCHANGED_REASON,
                 }
                 _unchanged_repair_fired = True
 
@@ -2739,7 +2740,7 @@ def run_design_loop(
     through_baseline_genus: int | None = None,
     through_baseline_genus_source: str | None = None,
     parent_mesh_stl: str | None = None,
-    parent_fingerprint: tuple[str, str, int] | None = None,
+    parent_fingerprint: tuple[str, int] | None = None,
     parent_volume_mm3: float | None = None,
     parent_face_count: int | None = None,
     renderer_check: Callable[[], bool] | None = None,
@@ -2981,8 +2982,8 @@ def _exhausted(
         # derivation found no reason at all.
         if reason is None:
             _repair = getattr(best, "repair", None)
-            if isinstance(_repair, dict) and _repair.get("reason") == "mesh_unchanged":
-                reason = "mesh_unchanged"
+            if isinstance(_repair, dict) and _repair.get("reason") == MESH_UNCHANGED_REASON:
+                reason = MESH_UNCHANGED_REASON
     return DesignResult(
         status="exhausted",
         best=best,

@@ -2058,6 +2058,12 @@ async def run_design_loop_with_events(
     # baseline used and its source (the ``through_baseline_genus_source``
     # kwarg — the check logs it with its decision), so QA can see why
     # the check passed or failed.
+    # Deferred import (issue #419 lens round 2): this module is imported
+    # by ``d33d.design_loop`` at module level, so the unchanged-mesh
+    # reason constant is pulled in here instead of at the top to keep
+    # the import graph acyclic.
+    from d33d.unchanged_mesh_check import MESH_UNCHANGED_REASON
+
     if row is not None:
         _latest_ver = (
             app.state.versions.latest_version(project_id)
@@ -2768,9 +2774,11 @@ async def run_design_loop_with_events(
             # adapter-deadline path uses — version-created before the
             # error: the ticket's gate resolution).
             _kept_repair = getattr(_kept_best, "repair", None)
+            from d33d.unchanged_mesh_check import MESH_UNCHANGED_REASON
+
             _kept_unchanged = (
                 isinstance(_kept_repair, dict)
-                and _kept_repair.get("reason") == "mesh_unchanged"
+                and _kept_repair.get("reason") == MESH_UNCHANGED_REASON
             )
             if (
                 _kept_best is not None

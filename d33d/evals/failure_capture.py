@@ -62,6 +62,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field, ValidationError
 
+from d33d.unchanged_mesh_check import MESH_UNCHANGED_REASON
+
 #: The closed enum of failure classes a failures.jsonl line may carry.
 #:
 #: 11 named LLM classes (the design-loop superset from
@@ -160,7 +162,7 @@ LOOP_LEVEL_FAILURE_REASONS: frozenset[str] = frozenset(
         # the hook must admit it: without this, an exhausted
         # unchanged-mesh turn would raise ``ValueError`` in the
         # failures.jsonl hook and silently lose its archive line.
-        "mesh_unchanged",
+        MESH_UNCHANGED_REASON,
     }
 )
 

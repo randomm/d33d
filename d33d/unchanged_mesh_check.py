@@ -57,10 +57,14 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "MESH_UNCHANGED_REASON",
     "UNCHANGED_INSTRUCTION",
+    "fingerprint_from_rounded_vertices",
     "mesh_fingerprint",
     "unchanged_mesh_check",
 ]
@@ -86,6 +90,15 @@ _VOLUME_REL_TOL = 0.001
 _VOLUME_ABS_FLOOR_MM3 = 0.1
 
 
+#: The structured reason the design loop's unchanged-mesh post-check
+#: fires: the candidate's rendered mesh is GEOMETRICALLY identical to
+#: the parent's (issue #419). The single name of the fired-check reason
+#: — the check module owns the detection, :data:`UNCHANGED_INSTRUCTION`
+#: owns the fix, and this constant owns the reason the loop's repair
+#: dict, ``_exhausted``'s reason swap, the failure archive's vocabulary
+#: and the adapter's version-skip all compare against.
+MESH_UNCHANGED_REASON = "mesh_unchanged"
+
 #: The repair instruction the loop carries to the next iteration when
 #: the check fires (issue #419): the candidate's rendered mesh is
 #: identical to the parent's, so the requested change did not take.
@@ -110,33 +123,13 @@ UNCHANGED_INSTRUCTION = (
 )
 
 
-def _fingerprint_bytes(values: list[Any]) -> bytes:
-    """Pack ``values`` (already rounded to 1e-3 mm) as big-endian int64."""
-    out = bytearray()
-    for v in values:
-        out += int(v).to_bytes(8, "big", signed=True)
-    return bytes(out)
-
-
 def fingerprint_from_rounded_vertices(
     vertices: Iterable[tuple[float, float, float]],
 ) -> tuple[str, int] | None:
-    """The geometry fingerprint from an iterable of vertex triples:
-    ``(sha256(sorted rounded vertex set), vertex_set_size)``.
+    """The shared fingerprint helper (module docstring: the rationale).
 
-    The single shared round/sort/hash helper — the ONE implementation
-    of the fingerprint's round-to-1e-3-mm, deduplicate, sort, and
-    sha256 logic, used by both the check's own ``mesh_fingerprint`` and
-    the seam's parent-mesh fingerprint (``design_loop_events``'s
-    ``_seam_parent_mesh_stats``) so the two sides hash identically by
-    construction (no re-implemented round/sort/sha256 that could drift
-    apart — the drift the multi-component seam test guards against).
-
-    ``vertices`` is any iterable of ``(x, y, z)`` coordinate triples
-    (``mesh.vertices`` or a union of per-component vertex iterables —
-    the caller supplies whichever load shape it used). ``None`` for an
-    empty vertex set (a load failure — the caller's empty_model gate
-    already handles that shape) or an unreadable vertex set.
+    ``vertices`` is any iterable of ``(x, y, z)`` coordinate triples;
+    ``None`` for an empty vertex set or an unreadable vertex set.
     """
     try:
         rounded = {
@@ -151,32 +144,29 @@ def fingerprint_from_rounded_vertices(
         return None
     if not rounded:
         return None
-    sorted_set = sorted(rounded)
-    vbytes = _fingerprint_bytes([c for v in sorted_set for c in v])
-    return (hashlib.sha256(vbytes).hexdigest(), len(sorted_set))
+    # Vectorised sort/hash (issue #419 lens round 2): the ROUNDING step
+    # stays in pure Python (``round(float(x) / 1e-3)`` — Python's exact
+    # half-up integer rounding of the float division; numpy's
+    # ``round(x / 1e-3)`` does double rounding of the already-inexact
+    # quotient and drifts on ties, so it must NOT replace it). The
+    # dedup/sort/hash is numpy's: ``np.unique(axis=0)`` sorts the
+    # integer rows lexicographically (the same order as ``sorted`` over
+    # the int tuples) and the native int64 big-endian pack matches the
+    # old per-int ``to_bytes`` output byte-for-byte (the equality is
+    # pinned by the reference test in tests/test_design_loop.py, which
+    # keeps the old implementation as a reference and compares
+    # fingerprints on every committed STL fixture).
+    rounded_arr = np.asarray(list(rounded), dtype=np.int64)
+    unique = np.unique(rounded_arr, axis=0)
+    vbytes = unique.astype(">i8").tobytes()
+    return (hashlib.sha256(vbytes).hexdigest(), int(unique.shape[0]))
 
 
 def mesh_fingerprint(mesh: Any) -> tuple[str, int] | None:
-    """The mesh's geometry fingerprint:
-    ``(sha256(sorted rounded vertex set), vertex_set_size)``.
+    """The mesh's geometry fingerprint (module docstring: the rationale).
 
-    The vertex set is each vertex rounded to 1e-3 mm, deduplicated
-    (STLs repeat vertices per face), and sorted lexicographically, so
-    the hash is order-independent, re-export-noise-insensitive, and
-    multi-component-safe (it is the union of every component's
-    vertices — no per-component assumption). A real geometric change
-    (a moved hole, a resized bore, a re-triangulation that moves or
-    adds a vertex) changes the vertex set; an OpenSCAD re-export of an
-    unchanged model (the v100 repro) re-hashes identically (the 1e-3
-    mm rounding absorbs the STL float noise). A different
-    triangulation of the same shape (same vertex set, different
-    connectivity) re-hashes identically — the check errs toward
-    "changed", the safe direction (a correct edit is never blocked by
-    a re-triangulation).
-
-    ``None`` when the mesh has zero vertices (a load failure — the
-    caller's empty_model gate already handles that shape) or the
-    vertices cannot be read.
+    ``None`` when the mesh has zero vertices or the vertices cannot be
+    read.
     """
     try:
         verts = mesh.vertices
@@ -188,14 +178,10 @@ def mesh_fingerprint(mesh: Any) -> tuple[str, int] | None:
 
 
 def _load_mesh(path: str) -> Any | None:
-    """Load the STL at ``path`` for the unchanged-mesh comparison.
+    """Load the STL at ``path`` (module docstring: the load shape).
 
-    ``None`` on any load failure (missing file, trimesh error) — the
-    caller then abstains (a fabricated baseline would make the gate
-    lie). The load is the SAME shape on both sides (``process=False``,
-    ``force="mesh"``) so the fingerprint comparison is symmetric; NO
-    ``merge_vertices`` is applied here — the mesh is measured as the
-    exporter wrote it, on both sides.
+    ``None`` on any load failure — the caller abstains (a fabricated
+    baseline would make the gate lie).
     """
     if not path or not isinstance(path, str):
         return None
@@ -219,14 +205,10 @@ def _load_mesh(path: str) -> Any | None:
 
 
 def _volume(mesh: Any) -> float | None:
-    """The mesh's volume, or ``None`` when it cannot be read.
+    """The mesh's signed volume (module docstring: the sanity leg).
 
-    ``mesh.volume`` is the SIGNED volume (trimesh sums per-face signed
-    tetrahedra) and RAISES only for a mesh whose winding is too
-    inconsistent to sum — the caller then abstains on the volume sanity
-    leg (the fingerprint comparison is the primary signal). A
-    zero-volume mesh (a degenerate shape) returns ``0.0`` — the caller
-    treats ``abs(parent) <= 0`` as "the volume leg abstains".
+    ``None`` when the volume cannot be read (the caller abstains on
+    the volume leg — the fingerprint comparison is the primary signal).
     """
     try:
         return float(mesh.volume)
@@ -244,34 +226,12 @@ def unchanged_mesh_check(
 ) -> tuple[str, str] | None:
     """Issue #419: the unchanged-mesh post-check (detection).
 
-    Returns ``None`` (the check abstains — the candidate is allowed to
-    pass on its own merits) when:
-
-    - no parent baseline is available: neither ``parent_fingerprint``
-      nor a loadable ``parent_stl``. The seam passes the parent's
-      pre-computed fingerprint (measured off the same mesh load the
-      genus came from); the path-based fallback loads the parent's
-      ``model.stl`` and fingerprints it here. When NEITHER is present
-      (a v1 design, a 3MF import, a missing file), the check abstains
-      — a fabricated baseline would make the gate lie.
-    - ``candidate_stl`` is ``None`` or unloadable (the loop's render
-      has no STL, or it cannot be read).
-    - Either mesh's fingerprint cannot be computed (a zero-vertex load
-      is a load failure — the caller's empty_model gate already
-      handles that shape).
-
-    Returns ``(evidence, instruction)`` when the candidate's rendered
-    mesh has the SAME geometry fingerprint as the parent's (the vertex
-    set is equal, and — as a sanity check — the volume is within
-    tolerance): the evidence names the unchanged geometry (the loop's
-    repair dict carries it to the next iteration's ``REPAIR`` block),
-    and the instruction is :data:`UNCHANGED_INSTRUCTION`.
-
-    A DIFFERENT fingerprint (a different vertex set) means the mesh
-    changed — however small the change (a moved hole, a resized bore,
-    a re-triangulation that moves or adds a vertex) — the check
-    returns ``None`` and the candidate is allowed to pass on its own
-    merits.
+    Module docstring: the fingerprint rationale. Returns
+    ``(evidence, instruction)`` when the candidate's rendered mesh has
+    the SAME geometry fingerprint as the parent's, ``None`` when it
+    changed or the check abstains (no parent baseline, no candidate
+    STL, or an unreadable fingerprint — a fabricated baseline would
+    make the gate lie).
     """
     # The parent side: either a pre-computed fingerprint (the seam
     # measured it off the same load as the genus) or a path to load.
