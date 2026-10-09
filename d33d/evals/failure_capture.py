@@ -64,6 +64,24 @@ from pydantic import BaseModel, Field, ValidationError
 
 from d33d.unchanged_mesh_check import MESH_UNCHANGED_REASON
 
+# Issue #432: loop-level reasons for the deterministic post-checks. Each
+# rides the existing ``geometrically_wrong`` class on the iteration's repair
+# (no new class, no new error_class). This module is their ONLY Python
+# source; the design loop imports them from here.
+THROUGH_HOLE_REASON = "through_hole_missing"
+SCREW_CLEARANCE_REASON = "screw_clearance_wrong"
+STACK_HEIGHT_REASON = "stack_height_mismatch"
+
+#: Every post-check repair reason the loop surfaces as a terminal reason.
+POST_CHECK_REASONS: frozenset[str] = frozenset(
+    {
+        MESH_UNCHANGED_REASON,
+        THROUGH_HOLE_REASON,
+        SCREW_CLEARANCE_REASON,
+        STACK_HEIGHT_REASON,
+    }
+)
+
 #: The closed enum of failure classes a failures.jsonl line may carry.
 #:
 #: 11 named LLM classes (the design-loop superset from
@@ -139,7 +157,7 @@ GATE_REASON_CLASSES: frozenset[str] = frozenset(
 #: alongside the gate bits. Without this, a Docker-down design turn
 #: would raise in :func:`_exhausted_loop_event` and the failures.jsonl
 #: archive would log an exception on EVERY such turn.
-LOOP_LEVEL_FAILURE_REASONS: frozenset[str] = frozenset(
+_LOOP_LEVEL_BASE_REASONS: frozenset[str] = frozenset(
     {
         "renderer_unavailable",
         "model_unconfigured",
@@ -165,6 +183,11 @@ LOOP_LEVEL_FAILURE_REASONS: frozenset[str] = frozenset(
         MESH_UNCHANGED_REASON,
     }
 )
+#: Issue #432: union only the post-check reasons not already listed above.
+LOOP_LEVEL_FAILURE_REASONS: frozenset[str] = (
+    _LOOP_LEVEL_BASE_REASONS | (POST_CHECK_REASONS - _LOOP_LEVEL_BASE_REASONS)
+)
+
 
 #: Hard cap on ``output_scad`` line length (chars) — an unbounded LLM
 #: runaway source would otherwise dominate the file. Mirrors the design

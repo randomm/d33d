@@ -30,7 +30,7 @@
  * entry.
  */
 
-import { copy } from "../copy";
+import { copy, type PostCheckReason } from "../copy";
 
 /** The W/D/H axis letters → nouns and adjectives — re-exported from the
  *  copy deck (which owns all user-facing strings; the copy deck is the
@@ -46,7 +46,7 @@ export { SIZE_AXIS_ADJECTIVES, SIZE_AXIS_WORDS } from "../copy";
  *  the terminal error frame's `reason` field can hold.
  *  `copy.failure.reasons` holds the sentences; this is the key set totality
  *  is asserted against. */
-export const FAILURE_REASONS: readonly string[] = [
+export const FAILURE_REASONS = [
   // GATE_REASON_BITS (d33d/design_loop.py, bit order)
   "error_class_not_ok",
   "views_blank_or_missing",
@@ -94,7 +94,19 @@ export const FAILURE_REASONS: readonly string[] = [
   // the change taking, and the SPA renders the deck's `mesh_unchanged`
   // sentence ("The change didn't take — nothing in the part moved.").
   "mesh_unchanged",
-];
+  // Issue #432: the post-check reasons (d33d/failure_classes.py). Each rides
+  // `geometrically_wrong` on the repair; the loop exhausts with its own reason.
+  "through_hole_missing",
+  "screw_clearance_wrong",
+  "stack_height_mismatch",
+] as const;
+
+/** A loop-level reason code; `tsc` checks any `Record<FailureReason, …>` is total. */
+export type FailureReason = (typeof FAILURE_REASONS)[number];
+
+/** Compile-time totality (issue #432): a `FailureReason` with no sentence in
+ *  `copy.failure.reasons` is a `tsc` error here, not a silent fallback. */
+export const FAILURE_REASON_COPY: Record<FailureReason, string> = copy.failure.reasons;
 
 /** The generic fallback for a reason code outside the closed set. */
 const UNKNOWN_REASON_COPY =
@@ -178,6 +190,18 @@ export interface DisplayError {
    *  bbox gate actually compared, per axis, omit-not-null; issue #367).
    *  Absent → the size card renders only the carried/asked rows. */
   measuredAxes?: Partial<Record<"W" | "D" | "H", number>>;
+}
+
+const POST_CHECK_REASON_SET: ReadonlySet<string> = new Set<string>(
+  Object.keys(copy.failure.postCheckAttempts),
+);
+
+function isPostCheckReason(reason: string): reason is PostCheckReason {
+  return POST_CHECK_REASON_SET.has(reason);
+}
+
+function isValidAttempts(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value > 0;
 }
 
 /** Parse the gate-7 envelope failure string produced by
@@ -305,6 +329,10 @@ export function displayDesignLoopError(
      *  `int` or omits the field entirely; a malformed value is dropped at
      *  the use site (the generic reason sentence stands). */
     attempt_count?: number;
+    /** The loop's attempt count on a post-check stop (issue #432,
+     *  omit-not-null): selects the sentence's "after N tries" clause. A
+     *  malformed value is dropped at the use site (the flat sentence stands). */
+    attempts?: number;
   },
   envelopeLimits?: [number, number, number],
 ): DisplayError {
@@ -347,6 +375,12 @@ export function displayDesignLoopError(
       ) {
         message = copy.failure.slowModelTimeout(lat, cnt);
       }
+    }
+    // The post-check stop copy (issue #432): with a valid attempt count the
+    // sentence states it ("after 2 tries"); absent or malformed → the flat
+    // `reasons` sentence (no count the SPA has not established).
+    if (isPostCheckReason(reason) && isValidAttempts(data.attempts)) {
+      message = copy.failure.postCheckAttempts[reason](data.attempts);
     }
     // The carried-axis variant: the frame's `carried_axes` is the set the
     // gate enforced (the user's earlier statements, held by the carry-

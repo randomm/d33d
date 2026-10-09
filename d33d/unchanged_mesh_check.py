@@ -65,6 +65,7 @@ __all__ = [
     "MESH_UNCHANGED_REASON",
     "UNCHANGED_INSTRUCTION",
     "fingerprint_from_rounded_vertices",
+    "fingerprint_stl",
     "mesh_fingerprint",
     "unchanged_mesh_check",
 ]
@@ -177,6 +178,27 @@ def mesh_fingerprint(mesh: Any) -> tuple[str, int] | None:
     return fingerprint_from_rounded_vertices(verts)
 
 
+def fingerprint_stl(path: str | None) -> tuple[str, int] | None:
+    """Issue #432: the geometry fingerprint of the STL at ``path`` — one
+    load, then :func:`mesh_fingerprint`. ``None`` abstains (missing or
+    unreadable file, or an empty mesh)."""
+    if path is None:
+        return None
+    mesh = _load_mesh(path)
+    if mesh is None:
+        return None
+    try:
+        return mesh_fingerprint(mesh)
+    except Exception:
+        # A degenerate loaded mesh abstains, never raises (issue #432).
+        logger.warning(
+            "unchanged-mesh check: failed to fingerprint %r",
+            Path(path).name,
+            exc_info=True,
+        )
+        return None
+
+
 def _load_mesh(path: str) -> Any | None:
     """Load the STL at ``path`` (module docstring: the load shape).
 
@@ -192,8 +214,9 @@ def _load_mesh(path: str) -> Any | None:
         import trimesh
 
         return trimesh.load(str(p), process=False, force="mesh")
-    except (OSError, ValueError, RuntimeError):
-        # Missing file, unreadable bytes, or a trimesh parse failure —
+    except Exception:
+        # Missing file, unreadable bytes, or any trimesh parse failure
+        # (struct.error / IndexError on a malformed STL included) —
         # any load failure → abstain, never a raise. The exception is
         # logged with its traceback (the ``genus_from_stl`` pattern) and
         # only the path's BASENAME is logged — never the full path

@@ -69,6 +69,12 @@ from d33d.config.catalogue import Catalogue
 from d33d.config.probes import CapabilityResult
 from d33d.config.resolve import resolve_model
 from d33d.design_llm import LLMResult, send
+from d33d.evals.failure_capture import (
+    POST_CHECK_REASONS,
+    SCREW_CLEARANCE_REASON,
+    STACK_HEIGHT_REASON,
+    THROUGH_HOLE_REASON,
+)
 from d33d.failure_classes import (
     REPAIRABLE_CLASSES,
     ClassifiedFailure,
@@ -76,6 +82,7 @@ from d33d.failure_classes import (
     detect_magic_numbers,
     route_repair,
 )
+from d33d.identical_repair import IdenticalRepairTracker
 from d33d.render_worker import (
     RENDER_WORKER_IMAGE,
     RenderResult,
@@ -83,7 +90,7 @@ from d33d.render_worker import (
     build_hash,
     canonical_build_command,
 )
-from d33d.unchanged_mesh_check import MESH_UNCHANGED_REASON
+from d33d.unchanged_mesh_check import MESH_UNCHANGED_REASON, fingerprint_stl
 
 logger = logging.getLogger(__name__)
 
@@ -2014,6 +2021,9 @@ async def run_design_loop_async(
     best: IterationRecord | None = None
     best_score: Score | None = None
     prev_score: Score | None = None
+    # Issue #432: the identical-repair stop state (previous post-check
+    # fingerprint + last rendered record) — see d33d.identical_repair.
+    tracker = IdenticalRepairTracker()
     consecutive_no_improvement = 0
     iterations: list[IterationRecord] = []
     # The loop's OWN per-attempt wall clock (issue #417): one
@@ -2137,6 +2147,9 @@ async def run_design_loop_async(
                 confirm_sentence=_confirm_sentence,
             )
             iterations.append(record)
+            # Issue #432: a non-render attempt breaks the consecutive-renders
+            # premise of the identical-repair stop - reset the tracker.
+            tracker.reset()
             if best is None or is_best(candidate_score, best_score):
                 best = record
                 best_score = candidate_score
@@ -2318,6 +2331,7 @@ async def run_design_loop_async(
                         "instruction": _instr,
                         "scad_source": scad_source,
                         "evidence": _evidence,
+                        "reason": SCREW_CLEARANCE_REASON,
                     }
                     _screw_repair_fired = True
 
@@ -2355,6 +2369,7 @@ async def run_design_loop_async(
                     "instruction": _instruction,
                     "scad_source": scad_source,
                     "evidence": _evidence,
+                    "reason": THROUGH_HOLE_REASON,
                 }
                 _through_repair_fired = True
 
@@ -2396,10 +2411,13 @@ async def run_design_loop_async(
                 )
                 if directive is not None:
                     failure_class = "geometrically_wrong"
-                    from d33d.stack_height_check import STACK_HEIGHT_INSTRUCTION
+                    from d33d.stack_height_check import stack_height_instruction
 
                     _stack_repair = directive.to_dict()
-                    _stack_repair["instruction"] = STACK_HEIGHT_INSTRUCTION
+                    _stack_repair["instruction"] = stack_height_instruction(
+                        _declared, _measured
+                    )
+                    _stack_repair["reason"] = STACK_HEIGHT_REASON
                     next_repair = _stack_repair
                     _stack_repair_fired = True
 
@@ -2448,6 +2466,17 @@ async def run_design_loop_async(
                 }
                 _unchanged_repair_fired = True
 
+        # Issue #432: identical-repair stop. A post-check repair whose
+        # rendered mesh equals the PREVIOUS iteration's (same post-check
+        # reason) cannot move — stop after this attempt instead of repairing
+        # to an identical mesh until the budget runs out.
+        _post_reason = (
+            next_repair.get("reason") if isinstance(next_repair, dict) else None
+        )
+        _post_fp: tuple[str, int] | None = None
+        if _post_reason in POST_CHECK_REASONS:
+            _post_fp = await asyncio.to_thread(fingerprint_stl, render.stl)
+
         record = IterationRecord(
             iteration=iteration,
             scad_source=scad_source,
@@ -2494,6 +2523,16 @@ async def run_design_loop_async(
         # reaches this check (it ``continue``s before any render call).
         if render.error_class == "container_error":
             return _container_error_stop(iterations, best)
+
+        # Issue #432 operator decision: a repeated post-check on an identical
+        # mesh reports N-1 (the prior RENDERED record, never iterations[-2])
+        # with the post-check reason as the fallback (a gate/error_class
+        # reason on N-1 still wins inside _exhausted).
+        _repeated = tracker.observe_render(_post_reason, _post_fp, record)
+        if _repeated is not None:
+            return _exhausted(
+                iterations, _repeated, _repeated.score, fallback_reason=_post_reason
+            )
 
         repair = next_repair
         if consecutive_no_improvement >= NO_IMPROVEMENT_LIMIT:
@@ -2919,6 +2958,7 @@ def _exhausted(
     best: IterationRecord | None,
     best_score: Score | None,
     failure_reason: str | None = None,
+    fallback_reason: str | None = None,
 ) -> DesignResult:
     """Build the exhaustion result: best-scoring candidate + a STRUCTURED
     failure reason (weakest gate bit of the best, never free text, never
@@ -2980,10 +3020,19 @@ def _exhausted(
         # ``failure_reason`` override (the per-attempt deadline, issue #417)
         # wins — it is already set here, so this swap only fires when the
         # derivation found no reason at all.
+        # Issue #432: the same rule for the through-hole, screw-clearance and
+        # stack-height post-checks — each carries its own reason on the repair.
         if reason is None:
             _repair = getattr(best, "repair", None)
-            if isinstance(_repair, dict) and _repair.get("reason") == MESH_UNCHANGED_REASON:
-                reason = MESH_UNCHANGED_REASON
+            _repair_reason = (
+                _repair.get("reason") if isinstance(_repair, dict) else None
+            )
+            if _repair_reason in POST_CHECK_REASONS:
+                reason = _repair_reason
+    if reason is None:
+        # Issue #432: the identical-repair stop's post-check reason, used only
+        # when no gate or error_class reason could be derived.
+        reason = fallback_reason
     return DesignResult(
         status="exhausted",
         best=best,

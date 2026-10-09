@@ -2939,7 +2939,8 @@ def test_screw_clearance_undersize_at_cap_returns_best_effort():
     result = _run_screw_loop(llm, "a 60 × 45 mm plate with an M4 hole")
     assert result.status == "exhausted"
     assert result.iterations_used == MAX_ITERATIONS == 3
-    assert result.failure_reason is None
+    # Issue #432: the undersize hole is now a loop-level reason, not a gate bit.
+    assert result.failure_reason == "screw_clearance_wrong"
     for iteration in result.iterations:
         assert iteration.failure_class == "geometrically_wrong"
         assert iteration.repair is not None
@@ -3127,7 +3128,9 @@ def test_through_hole_pocket_request_fails_geometrically_wrong(tmp_path):
     # The all-green candidate does NOT pass: the post-check routes the
     # repair and the loop takes the repair iterations within the cap.
     assert result.status == "exhausted"
-    assert result.iterations_used == MAX_ITERATIONS == 3
+    # Issue #432: the scripted pocket is identical on every attempt, so the
+    # identical-repair stop ends the loop after attempt 2.
+    assert result.iterations_used == 2
     first = result.iterations[0]
     # All five gate bits green (genus is not a gate bit) yet the
     # structured repair fired.
@@ -3137,6 +3140,11 @@ def test_through_hole_pocket_request_fails_geometrically_wrong(tmp_path):
     assert first.repair["failure_class"] == "geometrically_wrong"
     assert "full thickness" in first.repair["instruction"]
     assert "does not pass" in first.repair["instruction"]
+    # Issue #432: the measured span rides the instruction, and the terminal
+    # reason is the loop-level through_hole_missing (not the generic message).
+    assert "Measured: the part is" in first.repair["instruction"]
+    assert result.failure_reason == "through_hole_missing"
+    assert first.repair["reason"] == "through_hole_missing"
 
 
 def test_through_hole_through_mesh_passes(tmp_path):
@@ -4246,7 +4254,8 @@ def test_unchanged_mesh_v100_repro_fires_geometrically_wrong(tmp_path):
     # repair and the loop exhausts (the scripted model repeats the
     # unchanged mesh to the cap).
     assert result.status == "exhausted"
-    assert result.iterations_used == MAX_ITERATIONS == 3
+    # Issue #432: the identical mesh repeats, so the loop stops after 2.
+    assert result.iterations_used == 2
     first = result.iterations[0]
     # All five gate bits green (the mesh IS the parent — a valid render)
     # yet the structured repair fired.
@@ -4260,6 +4269,119 @@ def test_unchanged_mesh_v100_repro_fires_geometrically_wrong(tmp_path):
     # The terminal reason is the structured mesh_unchanged (the SPA maps
     # it to "The change didn't take — nothing in the part moved.").
     assert result.failure_reason == "mesh_unchanged"
+
+
+def test_identical_repair_stop_reports_attempt_n_minus_1_as_best(tmp_path):
+    """Issue #432 operator decision: when the identical-repair stop fires at
+    attempt N, the reported best and reason come from attempt N-1 — the
+    repeated post-check's reason (mesh_unchanged here)."""
+    fixture_dir = Path(__file__).parent / "fixtures" / "stl"
+    parent = str(fixture_dir / "v100-plate.stl")
+    # Each attempt's SCAD carries a distinct title, so the reported best is
+    # identifiable as attempt N-1's record (not merely "some" record).
+    base = _through_box_scad_source()
+    scads = [f"// attempt one\n{base}", f"// attempt two\n{base}"]
+    calls = {"n": 0}
+
+    def llm_fn(role, messages, system):
+        calls["n"] += 1
+        return _through_box_llm(scads[min(calls["n"], 2) - 1])
+
+    render = _render_with_stl_and_bbox(parent, BboxInfo(20, 20, 20, 8000.0))
+    result = run_design_loop(
+        photo=PHOTO,
+        stated_dims=(0.0, 0.0, 0.0),
+        render_fn=lambda scad, defines: render,
+        llm_fn=llm_fn,
+        bbox_fn=lambda r: BboxInfo(20, 20, 20, 8000.0),
+        parent_mesh_stl=parent,
+    )
+    assert result.status == "exhausted"
+    assert result.iterations_used == 2
+    assert result.failure_reason == "mesh_unchanged"
+    assert "// attempt two" in result.iterations[1].scad_source
+    assert "// attempt one" in result.iterations[0].scad_source
+    # Discriminating: the reported best is attempt N-1's record, identified
+    # by its own scad title — it fails if best were taken from attempt N.
+    assert result.best is result.iterations[0]
+    assert result.best.iteration == 1
+    assert "// attempt one" in result.best.scad_source
+    assert "// attempt two" not in result.best.scad_source
+
+
+def test_non_render_attempt_resets_identical_repair_tracker(tmp_path, monkeypatch):
+    """Issue #432: an attempt that produced no render (empty SCAD) breaks the
+    consecutive-renders premise. Attempt 1 X (mesh F), attempt 2 empty, attempt
+    3 X (mesh F) must NOT stop at 3 on the stale attempt-1 fingerprint. The stop
+    fires at 4 (repeat of 3) and reports attempt 3 — the N-1 RENDERED record —
+    not iterations[-2], which is the empty attempt-2 record."""
+    fixture_dir = Path(__file__).parent / "fixtures" / "stl"
+    parent = str(fixture_dir / "v100-plate.stl")
+    base = _through_box_scad_source()
+    scads = [
+        f"// attempt one\n{base}",
+        "",
+        f"// attempt three\n{base}",
+        f"// attempt four\n{base}",
+    ]
+    calls = {"n": 0}
+    # Isolate the identical-repair tracker: the empty attempt is itself a
+    # no-improvement step, so the generic no-improvement stop would otherwise
+    # end the run at attempt 3 for an unrelated reason.
+    import d33d.design_loop as _dl
+
+    monkeypatch.setattr(_dl, "NO_IMPROVEMENT_LIMIT", 99)
+
+    def llm_fn(role, messages, system):
+        calls["n"] += 1
+        return _through_box_llm(scads[min(calls["n"], len(scads)) - 1])
+
+    render = _render_with_stl_and_bbox(parent, BboxInfo(20, 20, 20, 8000.0))
+    result = run_design_loop(
+        photo=PHOTO,
+        stated_dims=(0.0, 0.0, 0.0),
+        render_fn=lambda scad, defines: render,
+        llm_fn=llm_fn,
+        bbox_fn=lambda r: BboxInfo(20, 20, 20, 8000.0),
+        parent_mesh_stl=parent,
+        max_iterations=4,
+    )
+    assert result.status == "exhausted"
+    # Attempt 3 did not stop: the stop fires at 4, not 3.
+    assert result.iterations_used == 4
+    assert result.failure_reason == "mesh_unchanged"
+    assert result.best is result.iterations[2]
+    assert "// attempt three" in result.best.scad_source
+    assert result.best.render is not None
+
+
+def test_stack_height_identical_repeat_stops_at_attempt_2(tmp_path):
+    """Issue #432: the identical-repair stop applies to the stack-height
+    post-check too. A real STL whose mesh repeats across attempts stops the
+    loop after attempt 2, reporting attempt 1 as best and the stack reason,
+    with the declared-vs-measured fact in the repair instruction."""
+    from pathlib import Path as _Path
+
+    import trimesh
+
+    v65 = (_Path(__file__).parent / "fixtures" / "scad" / "v65-lid-difference-inversion.scad").read_text()
+    stl = str(tmp_path / "slab.stl")
+    trimesh.creation.box(extents=(20.0, 20.0, 4.0)).export(stl)
+    result = run_design_loop(
+        photo=PHOTO,
+        stated_dims=(20.0, 20.0, 0.0),
+        render_fn=lambda scad, defines: _render_with_stl_and_bbox(
+            stl, BboxInfo(20.0, 20.0, 4.0, 400.0)
+        ),
+        llm_fn=(lambda role, messages, system: _scad_llm(v65)),
+        bbox_fn=(lambda r: BboxInfo(20.0, 20.0, 4.0, 400.0)),
+    )
+    assert result.status == "exhausted"
+    assert result.iterations_used == 2
+    assert result.failure_reason == "stack_height_mismatch"
+    assert result.best is result.iterations[0]
+    assert "11 mm" in result.iterations[0].repair["instruction"]
+    assert "4 mm" in result.iterations[0].repair["instruction"]
 
 
 def test_unchanged_mesh_genuine_edit_passes(tmp_path):

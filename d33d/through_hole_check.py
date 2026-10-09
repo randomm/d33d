@@ -32,6 +32,7 @@ contains no "through", so no stripping is needed).
 from __future__ import annotations
 
 import logging
+import math
 import re
 
 from d33d.part_holes import HOLE_NOUNS
@@ -348,7 +349,46 @@ def route_through_hole_repair(
             genus,
         )
         return None
-    return (evidence, THROUGH_HOLE_INSTRUCTION)
+    return (evidence, _instruction_with_span(THROUGH_HOLE_INSTRUCTION, stl))
+
+
+def _instruction_with_span(instruction: str, stl: str | None) -> str:
+    """Issue #432: append the measured part z-span to the repair instruction,
+    so the next attempt cuts a solid that reaches past both faces by a known
+    margin. Abstains to the bare instruction when the STL cannot be read."""
+    if not isinstance(stl, str) or not stl:
+        return instruction
+    import trimesh
+
+    try:
+        bounds = trimesh.load(stl, process=False, force="mesh").bounds
+    except Exception as exc:  # any malformed-mesh parse error: abstain, never abort
+        logger.warning(
+            "through-hole span unavailable (stl %s): %r — repair sent without the measured z-span",
+            stl,
+            exc,
+            exc_info=True,
+        )
+        return instruction
+    if bounds is None:
+        logger.warning(
+            "through-hole span unavailable (stl %s): empty mesh — repair sent without the measured z-span",
+            stl,
+        )
+        return instruction
+    zmin, zmax = (float(v) for v in bounds[:, 2])
+    if not (math.isfinite(zmin) and math.isfinite(zmax)):
+        logger.warning(
+            "through-hole span unavailable (stl %s): non-finite z bound — repair sent without the measured z-span",
+            stl,
+        )
+        return instruction
+    thickness = zmax - zmin
+    return (
+        f"{instruction} Measured: the part is {thickness:g} mm thick "
+        f"(z {zmin:g} to {zmax:g} mm); the cutting solid must span z "
+        f"{zmin - 1:g} to {zmax + 1:g} mm (1 mm past each face)."
+    )
 
 
 def through_hole_check(
