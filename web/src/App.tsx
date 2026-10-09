@@ -1761,6 +1761,10 @@ export default function App({ client }: AppProps) {
   // exists (the design-state envelope's `part`). FirstRun is suppressed
   // while Screen 2 is up (the same centred space; never both).
   const isScreen2 = designStatePart !== null;
+  // The first-run card's visibility, computed ONCE and shared by its mount
+  // and the plate caption (issue #434): the caption is shown exactly when
+  // the card is not.
+  const firstRunCardShown = isFirstRun && !isScreen2 && !panelsHidden;
   // The single derivation of "are the part's units unsettled?" — drives
   // BOTH the PlateBackdrop suppression and the ImportReport caption so the
   // unsettled-caption invariant (plate hidden ⇔ caption shown) can't drift.
@@ -1892,7 +1896,7 @@ export default function App({ client }: AppProps) {
           moment the user has no idea what to type. The build plate is
           drawn to scale behind it; the screen goes away once the
           conversation starts. Hidden with the other panels on backslash. */}
-      {isFirstRun && !isScreen2 && !panelsHidden && (
+      {firstRunCardShown && (
         <FirstRun
           onSend={handleSendMessage}
           onPhotoSelect={() => {
@@ -1920,7 +1924,13 @@ export default function App({ client }: AppProps) {
           unsettled (the caption says the size is unknown); it is restored
           once settled. */}
       {envelope !== null && !panelsHidden && !partUnsettled && (
-        <PlateBackdrop x={envelope.x} y={envelope.y} z={envelope.z} verified={envelope.verified} />
+        <PlateBackdrop
+          x={envelope.x}
+          y={envelope.y}
+          z={envelope.z}
+          verified={envelope.verified}
+          showCaption={!firstRunCardShown}
+        />
       )}
 
       {/* Layer 10 — Screen 2 (issue #334, D6/D7): the import report +
