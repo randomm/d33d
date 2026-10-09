@@ -4638,3 +4638,61 @@ def test_unchanged_mesh_repair_then_changed_mesh_passes_within_cap(tmp_path):
     assert "unchanged from the parent" in result.iterations[0].repair["evidence"]
     assert result.iterations[1].failure_class is None
     assert result.iterations[1].repair is None
+
+
+def test_unchanged_mesh_seam_fingerprint_multicomponent_fires(tmp_path):
+    """Issue #419 (adversarial fix): the seam-forwarded fingerprint path
+    must fire for an identical multi-component mesh. The seam measures
+    the parent via ``load_and_split`` (which splits into components),
+    while the candidate side loads the whole mesh. For a multi-component
+    parent (two+ watertight bodies in one ``model.stl``), the seam
+    fingerprint must cover the UNION of all watertight components' vertex
+    sets — not just the first — to match the candidate's whole-mesh
+    fingerprint. Without the fix, the seam fingerprints only the first
+    component (8 verts) while the candidate fingerprints all (50 verts),
+    so the check does NOT fire and a genuinely-unchanged multi-component
+    edit is reported as "changed" (safe direction, but defeats the
+    check's purpose)."""
+    from d33d import unchanged_mesh_check as umc
+    from d33d.design_loop_events import _seam_parent_mesh_stats
+
+    fixture_dir = Path(__file__).parent / "fixtures" / "stl"
+    multi = str(fixture_dir / "two_body_multisolid.stl")
+
+    # The seam fingerprint (primary production path): must equal the
+    # candidate's whole-mesh fingerprint for an identical mesh.
+    _genus, _vol, _faces, seam_fp = _seam_parent_mesh_stats(multi)
+    assert seam_fp is not None, "seam must produce a fingerprint"
+
+    # The candidate fingerprint (the check's own load path):
+    import trimesh
+
+    cand = trimesh.load(multi, process=False, force="mesh")
+    cand_fp = umc.mesh_fingerprint(cand)
+    assert cand_fp is not None
+
+    # The seam and candidate fingerprints must MATCH (both cover the
+    # union of all watertight components' vertices).
+    assert seam_fp[0] == cand_fp[0], (
+        f"seam fp {seam_fp[0][:12]}… ({seam_fp[1]} verts) != "
+        f"candidate fp {cand_fp[0][:12]}… ({cand_fp[1]} verts) — "
+        "the seam must fingerprint the union of ALL watertight components"
+    )
+    assert seam_fp[1] == cand_fp[1]
+
+    # End-to-end: the check fires when the candidate IS the parent
+    # (identical multi-component mesh), using the seam-forwarded
+    # fingerprint (the primary production path — no parent load).
+    missing = str(tmp_path / "no-such.stl")
+    fired = umc.unchanged_mesh_check(
+        parent_stl=missing,
+        candidate_stl=multi,
+        parent_fingerprint=seam_fp,
+        parent_volume_mm3=_vol,
+        parent_face_count=_faces,
+    )
+    assert fired is not None, (
+        "the check must fire for an identical multi-component mesh "
+        "via the seam-forwarded fingerprint path"
+    )
+    assert "unchanged from the parent" in fired[0]

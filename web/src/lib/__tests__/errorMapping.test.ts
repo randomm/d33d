@@ -57,7 +57,7 @@ const LOOP_FAILURE_REASONS = [
   "renderer_image_stale",
   // Loop-level unchanged-mesh post-check (d33d/unchanged_mesh_check.py,
   // issue #419) — a v2+ edit whose rendered mesh equals the parent's
-  // (volume + face count within epsilon) exhausted without the change
+  // (geometry fingerprint identical) exhausted without the change
   // taking; the terminal frame carries `reason: "mesh_unchanged"`.
   "mesh_unchanged",
 ];

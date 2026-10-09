@@ -1463,36 +1463,6 @@ def _stored_part_mesh_path(row: dict[str, Any], conn: Any) -> Path | None:
     return path
 
 
-def _measured_genus_for_file(stl_path: str) -> int | None:
-    """Issue #386 (final): measure a stored part mesh's genus (the
-    ``model.stl``-twin of :func:`_measured_genus_for_dir` for a part
-    path).
-
-    Returns ``None`` (the check abstains) when the file is missing,
-    the load/split fails, or there are zero watertight components — a
-    fabricated baseline would make the gate lie.
-    """
-    from d33d.part_mesh_topology import genus_from_stl
-
-    return genus_from_stl(stl_path)
-
-
-def _measured_genus_for_dir(render_artifact_dir: str) -> int | None:
-    """Issue #386 (v2+ baseline): measure the parent version's rendered
-    genus from its ``render_artifact_dir`` (the ``model.stl`` inside).
-
-    Returns ``None`` (the check abstains) when the directory or the
-    ``model.stl`` is missing, the load/split fails, or there are zero
-    watertight components — a fabricated baseline would make the gate lie.
-    """
-    from d33d.part_mesh_topology import genus_from_stl
-
-    stl_path = Path(render_artifact_dir) / "model.stl"
-    if not stl_path.is_file():
-        return None
-    return genus_from_stl(str(stl_path))
-
-
 def _seam_parent_mesh_stats(
     stl_path: str,
 ) -> tuple[int | None, float | None, int | None, tuple[str, int] | None]:
@@ -1513,12 +1483,8 @@ def _seam_parent_mesh_stats(
     then never re-loads the parent mesh. ``None`` per metric when
     unavailable (missing file, load failure, zero watertight components)
     — a fabricated baseline would make the gate lie.
-
-    ``_measured_parent_stats`` (the 3-tuple) is a projection of this
-    for existing callers that do not need the fingerprint.
     """
     from d33d.part_mesh_topology import load_and_split, mesh_topology
-    from d33d.unchanged_mesh_check import mesh_fingerprint
 
     if not Path(stl_path).is_file():
         return (None, None, None, None)
@@ -1547,42 +1513,41 @@ def _seam_parent_mesh_stats(
                 total_faces += len(comp.faces)
         if total_faces <= 0:
             return (genus, None, None, None)
-        # Fingerprint: the union of every watertight component's vertex
+        # Fingerprint: the union of EVERY watertight component's vertex
         # set (the vertex-set hash is multi-component-safe by
         # construction — no per-component assumption). Computed off the
-        # SAME load as the genus.
+        # SAME load as the genus. The union must match the candidate's
+        # whole-mesh load (``trimesh.load(process=False, force="mesh")``
+        # → ``mesh_fingerprint`` on all vertices) so the seam-forwarded
+        # and path-fallback paths agree for multi-component parents.
+        import hashlib as _hl
+
+        from d33d.unchanged_mesh_check import _ROUND_MM
+
+        all_verts: set[tuple[int, int, int]] = set()
         for comp in components:
             if comp.is_watertight:
-                fingerprint = mesh_fingerprint(comp)
-                if fingerprint is not None:
-                    break
+                for (x, y, z) in comp.vertices:
+                    all_verts.add(
+                        (
+                            round(float(x) / _ROUND_MM),
+                            round(float(y) / _ROUND_MM),
+                            round(float(z) / _ROUND_MM),
+                        )
+                    )
+        if all_verts:
+            sorted_set = sorted(all_verts)
+            vbytes = bytearray()
+            for v in sorted_set:
+                for c in v:
+                    vbytes += int(c).to_bytes(8, "big", signed=True)
+            fingerprint = (
+                _hl.sha256(bytes(vbytes)).hexdigest(),
+                len(sorted_set),
+            )
         return (genus, total_vol, total_faces, fingerprint)
     except (ValueError, TypeError, RuntimeError, IndexError):
         return (genus, None, None, None)
-
-
-def _measured_parent_stats(stl_path: str) -> tuple[int | None, float | None, int | None]:
-    """Issue #419 (consolidation): the 3-tuple projection of
-    :func:`_seam_parent_mesh_stats` — the parent mesh's genus, volume,
-    and face count (existing callers keep this shape; the fingerprint
-    rides the same seam load, measured off it directly)."""
-    genus, vol, faces, _fp = _seam_parent_mesh_stats(stl_path)
-    return (genus, vol, faces)
-
-
-def _measured_parent_stats_for_dir(render_artifact_dir: str) -> tuple[int | None, float | None, int | None]:
-    """Issue #419 (consolidation): the parent version's rendered mesh stats
-    from its ``model.stl`` (the ``render_artifact_dir`` twin of
-    :func:`_measured_parent_stats`). Thin wrapper — the measurement is
-    the single shared helper."""
-    return _measured_parent_stats(str(Path(render_artifact_dir) / "model.stl"))
-
-
-def _measured_parent_stats_for_file(stl_path: str) -> tuple[int | None, float | None, int | None]:
-    """Issue #419 (consolidation): a stored part mesh's stats (the
-    ``part.stl`` twin). Thin wrapper — the measurement is the single
-    shared helper."""
-    return _measured_parent_stats(stl_path)
 
 
 async def _resolve_version_create(

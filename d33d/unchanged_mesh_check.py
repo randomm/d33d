@@ -109,10 +109,8 @@ UNCHANGED_INSTRUCTION = (
 )
 
 
-def _fingerprint_bytes(values: list[Any], n: int) -> bytes:
-    """Pack ``values`` (already rounded to 1e-3 mm) as big-endian
-    float64. ``n`` is the total element count so the byte string is
-    length-unambiguous."""
+def _fingerprint_bytes(values: list[Any]) -> bytes:
+    """Pack ``values`` (already rounded to 1e-3 mm) as big-endian int64."""
     out = bytearray()
     for v in values:
         out += int(v).to_bytes(8, "big", signed=True)
@@ -154,9 +152,7 @@ def mesh_fingerprint(mesh: Any) -> tuple[str, int] | None:
             for (x, y, z) in verts
         }
         sorted_set = sorted(rounded)
-        vbytes = _fingerprint_bytes(
-            [c for v in sorted_set for c in v], len(sorted_set) * 3
-        )
+        vbytes = _fingerprint_bytes([c for v in sorted_set for c in v])
         return (hashlib.sha256(vbytes).hexdigest(), len(sorted_set))
     except (ValueError, TypeError, RuntimeError, IndexError, OverflowError):
         return None
