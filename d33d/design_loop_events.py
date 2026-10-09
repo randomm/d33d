@@ -1495,32 +1495,39 @@ def _measured_genus_for_dir(render_artifact_dir: str) -> int | None:
 
 def _seam_parent_mesh_stats(
     stl_path: str,
-) -> tuple[int | None, float | None, int | None, Any, float | None]:
-    """Issue #419 (lens fix): the SEAM parent-mesh measurement — genus,
-    volume, face count, centroid, and bbox diagonal from ONE mesh load.
+) -> tuple[int | None, float | None, int | None, tuple[str, int] | None]:
+    """Issue #419: the SEAM parent-mesh measurement — genus, volume, face
+    count, and the GEOMETRY FINGERPRINT from ONE mesh load.
 
     The single shared helper the chat and finalize seams call off the
     event loop: the genus feeds the through-hole baseline, the volume
-    and face count feed the unchanged-mesh check, and the centroid and
-    bbox diagonal (the check's position-sensitive legs) come from the
-    SAME load — the check then never re-loads the parent mesh for the
-    centroid. ``None`` per metric when unavailable (missing file, load
-    failure, zero watertight components) — a fabricated baseline would
-    make the gate lie.
+    and face count feed the unchanged-mesh check (the volume as a sanity
+    check, the face count as the evidence), and the fingerprint (the
+    exact vertex set, rounded to 1e-3 mm, deduplicated, sorted,
+    sha256-hashed) is the check's primary signal — "unchanged" means the
+    GEOMETRY is identical, not just its summary stats (a small hole
+    moved 10 mm on a large plate shifts the centroid by ~0.007 mm and
+    the volume by < 1e-6 mm3, both inside any tolerance, but moves
+    vertices, so the fingerprint separates the two meshes). The
+    fingerprint is computed off the SAME load as the genus — the check
+    then never re-loads the parent mesh. ``None`` per metric when
+    unavailable (missing file, load failure, zero watertight components)
+    — a fabricated baseline would make the gate lie.
 
-    ``_measured_parent_stats`` (the 3-tuple) is a projection of this for
-    existing callers that do not need the position-sensitive legs.
+    ``_measured_parent_stats`` (the 3-tuple) is a projection of this
+    for existing callers that do not need the fingerprint.
     """
     from d33d.part_mesh_topology import load_and_split, mesh_topology
+    from d33d.unchanged_mesh_check import mesh_fingerprint
 
     if not Path(stl_path).is_file():
-        return (None, None, None, None, None)
+        return (None, None, None, None)
     try:
         components = load_and_split(stl_path)
     except (OSError, ValueError, RuntimeError):
-        return (None, None, None, None, None)
+        return (None, None, None, None)
     if not components:
-        return (None, None, None, None, None)
+        return (None, None, None, None)
     # Genus: the shared helper's measurement (zero-watertight abstain).
     genus = None
     try:
@@ -1530,77 +1537,36 @@ def _seam_parent_mesh_stats(
     except (ValueError, RuntimeError, IndexError, TypeError):
         genus = None
     # Volume + face count: sum across watertight components.
-    centroid: Any = None
-    diag: float | None = None
+    fingerprint: tuple[str, int] | None = None
     try:
         total_vol = 0.0
         total_faces = 0
-        # Volume-weighted centroid across all watertight components (issue
-        # #419 lens fix): the path-based unchanged-mesh check loads the
-        # parent with ``trimesh.load(process=False, force="mesh")`` and
-        # reads the whole mesh's ``center_mass`` (volume-weighted across
-        # all faces). For a single-component STL (the OpenSCAD output
-        # case) this equals ``components[0].center_mass``; for a
-        # multi-component STL it is the volume-weighted sum across all
-        # components. Using the whole-mesh centroid here keeps the seam
-        # and the check's path-based fallback measuring the SAME metric.
-        vol_weighted_cm = [0.0, 0.0, 0.0]
         for comp in components:
             if comp.is_watertight:
-                v = float(comp.volume)
-                total_vol += v
+                total_vol += float(comp.volume)
                 total_faces += len(comp.faces)
-                try:
-                    cm = comp.center_mass
-                    if v != 0.0:
-                        for i in range(3):
-                            vol_weighted_cm[i] += float(cm[i]) * v
-                except (ValueError, TypeError, RuntimeError, IndexError):
-                    pass
         if total_faces <= 0:
-            return (genus, None, None, None, None)
-        # Centroid: volume-weighted across watertight components (the
-        # whole-mesh centroid the path-based check computes). When the
-        # total volume is zero (all components degenerate) the centroid
-        # is undefined — abstain.
-        if abs(total_vol) > 0.0:
-            centroid = [
-                vol_weighted_cm[i] / total_vol for i in range(3)
-            ]
-        else:
-            centroid = None
-        # Bbox diagonal of the merged parent mesh (all components).
-        # Use the full bounding box (all components) to match the
-        # path-based check's ``mesh.bounds`` (the whole-mesh bounds).
-        all_bounds_lo = [float("inf")] * 3
-        all_bounds_hi = [float("-inf")] * 3
+            return (genus, None, None, None)
+        # Fingerprint: the union of every watertight component's vertex
+        # set (the vertex-set hash is multi-component-safe by
+        # construction — no per-component assumption). Computed off the
+        # SAME load as the genus.
         for comp in components:
-            try:
-                b = comp.bounds
-                for i in range(3):
-                    all_bounds_lo[i] = min(all_bounds_lo[i], float(b[0][i]))
-                    all_bounds_hi[i] = max(all_bounds_hi[i], float(b[1][i]))
-            except (ValueError, TypeError, RuntimeError, IndexError):
-                continue
-        if all_bounds_lo[0] < float("inf"):
-            diag = float(
-                ((all_bounds_hi[0] - all_bounds_lo[0]) ** 2
-                 + (all_bounds_hi[1] - all_bounds_lo[1]) ** 2
-                 + (all_bounds_hi[2] - all_bounds_lo[2]) ** 2) ** 0.5
-            )
-        else:
-            diag = None
-        return (genus, total_vol, total_faces, centroid, diag)
+            if comp.is_watertight:
+                fingerprint = mesh_fingerprint(comp)
+                if fingerprint is not None:
+                    break
+        return (genus, total_vol, total_faces, fingerprint)
     except (ValueError, TypeError, RuntimeError, IndexError):
-        return (genus, None, None, None, None)
+        return (genus, None, None, None)
 
 
 def _measured_parent_stats(stl_path: str) -> tuple[int | None, float | None, int | None]:
     """Issue #419 (consolidation): the 3-tuple projection of
     :func:`_seam_parent_mesh_stats` — the parent mesh's genus, volume,
-    and face count (existing callers keep this shape; the centroid and
-    bbox diagonal ride the same seam load, measured off it directly)."""
-    genus, vol, faces, _cm, _diag = _seam_parent_mesh_stats(stl_path)
+    and face count (existing callers keep this shape; the fingerprint
+    rides the same seam load, measured off it directly)."""
+    genus, vol, faces, _fp = _seam_parent_mesh_stats(stl_path)
     return (genus, vol, faces)
 
 
@@ -2087,7 +2053,7 @@ async def run_design_loop_with_events(
             # in #418's parent-version block, not a separate one).
             _render_dir = _latest_ver["render_artifact_dir"]
             _pm_stl_path = str(Path(_render_dir) / "model.stl")
-            _parent_genus, _parent_vol, _parent_faces, _parent_cm, _parent_diag = (
+            _parent_genus, _parent_vol, _parent_faces, _parent_fp = (
                 await asyncio.to_thread(_seam_parent_mesh_stats, _pm_stl_path)
             )
             if _parent_genus is not None:
@@ -2120,13 +2086,10 @@ async def run_design_loop_with_events(
             if _parent_faces is not None:
                 kwargs["parent_face_count"] = _parent_faces
             # Issue #419 (lens fix): the unchanged-mesh check's
-            # position-sensitive legs (centroid + bbox diagonal) from
-            # the SAME seam load — the check uses these and does not
-            # re-load the parent mesh for the centroid.
-            if _parent_cm is not None:
-                kwargs["parent_centroid"] = _parent_cm
-            if _parent_diag is not None:
-                kwargs["parent_bbox_diagonal_mm"] = _parent_diag
+            # geometry fingerprint from the SAME seam load — the check
+            # uses it directly and does not re-load the parent mesh.
+            if _parent_fp is not None:
+                kwargs["parent_fingerprint"] = _parent_fp
         elif row.get("part_filename"):
             # V1 on import: the stored part mesh's genus, volume, and
             # face count (the mesh the render imports). A 3MF import
@@ -2137,16 +2100,14 @@ async def run_design_loop_with_events(
             _stored_genus: int | None = None
             _stored_vol: float | None = None
             _stored_faces: int | None = None
-            _stored_cm: Any = None
-            _stored_diag: float | None = None
+            _stored_fp: Any = None
             _stored_path = _stored_part_mesh_path(row, app.state.conn)
             if _stored_path is not None:
                 (
                     _stored_genus,
                     _stored_vol,
                     _stored_faces,
-                    _stored_cm,
-                    _stored_diag,
+                    _stored_fp,
                 ) = await asyncio.to_thread(
                     _seam_parent_mesh_stats, str(_stored_path)
                 )
@@ -2179,12 +2140,10 @@ async def run_design_loop_with_events(
             if _stored_faces is not None:
                 kwargs["parent_face_count"] = _stored_faces
             # Issue #419 (lens fix): the unchanged-mesh check's
-            # position-sensitive legs from the SAME seam load (no
+            # geometry fingerprint from the SAME seam load (no
             # double parent load).
-            if _stored_cm is not None:
-                kwargs["parent_centroid"] = _stored_cm
-            if _stored_diag is not None:
-                kwargs["parent_bbox_diagonal_mm"] = _stored_diag
+            if _stored_fp is not None:
+                kwargs["parent_fingerprint"] = _stored_fp
         else:
             # Issue #418: a part-less project. No version yet → the
             # NEW-design default: the kwarg is omitted (the loop

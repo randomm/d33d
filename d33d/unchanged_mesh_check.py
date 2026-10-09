@@ -1,42 +1,57 @@
 """Unchanged-mesh post-check (issue #419).
 
 The design loop's ok-render post-check for an edit turn (v2+) whose
-rendered mesh is unchanged from its parent version's rendered mesh. A
-candidate whose volume, face count, AND volume centroid all equal the
-parent's (within their respective tolerances) is NOT a change — it does
-not pass. The QA v100 repro: a plate import, "make the center hole
-38 mm" → the fill-and-recut offer was accepted, but the model's SCAD had
-``scale(1) import("part.stl")`` with NO semicolon, so the following
-``difference() { ... }`` became a CHILD of ``import()`` (which ignores
-children) and re-exported the parent byte-for-byte (664 faces,
-56315.87 mm3, delta 0) — and the loop passed "Your design is ready".
+rendered mesh is unchanged from its parent version's rendered mesh.
+"Unchanged" means the GEOMETRY is identical — not just its summary
+stats. The candidate's rendered mesh is loaded with trimesh and its
+geometry fingerprint is compared against the parent's: the parent
+fingerprint comes from the SAME load the seam already made (the
+``parent_fingerprint`` kwarg) or, on the path-based fallback, is
+computed from the parent's ``model.stl`` right here. The fingerprint is
+the exact VERTEX SET — each coordinate rounded to 1e-3 mm, deduplicated
+(STLs repeat vertices per face), sorted lexicographically, and
+sha256-hashed — a single hash (the vertex set alone already separates
+every real geometric change, and it is multi-component-safe by
+construction). A volume-within-tolerance comparison rides as a sanity
+check.
 
-Why volume + face count + centroid (and not just the first two)?
+Why the fingerprint and not summary stats?
 
-Volume and face count alone are TRANSLATION-INVARIANT: a legitimate edit
-that moves a hole ("move the hole 10 mm left"), rotates or mirrors a
-feature, or swaps a feature for an equal-volume one leaves volume and
-face count unchanged. The centroid (``mesh.center_mass``) is the
-position-sensitive signal: it shifts when a feature moves even if the
-total volume is identical. For the v100 plate fixtures (120×80×6 mm,
-38 mm bore): a 10 mm hole move shifts the centroid by 1.34 mm — well
-over the 1 mm tolerance, yet leaves volume (Δ 0.0002 mm³) and face
-count (Δ 0) unchanged. "Unchanged" must mean volume, face count, AND
-centroid all within tolerance.
+Volume, face count, and centroid are all translation-invariant or
+scale-insensitive: a legitimate edit that moves a small hole (a Ø3
+bore moved 10 mm on a 120 mm plate) shifts the volume centroid by
+~0.007 mm and changes the volume by < 1e-6 mm3 — every summary stat
+sits inside tolerance and the old check flagged a correct edit as
+"nothing moved" (false fail, the PM's #419 concern). The fingerprint
+is exact: ANY real geometric change, however small, moves at least one
+vertex (a moved hole moves its rim; a resized bore moves its wall; a
+re-triangulation moves or adds a vertex), and an OpenSCAD re-render of
+an unchanged model (the v100 case: ``import()`` plus an ignored child)
+re-exports the identical geometry (identical vertex set) — the STL
+float noise in low-order bits is absorbed by the 1e-3 mm rounding.
+
+A DIFFERENT triangulation of the same shape (same vertices, different
+connectivity) does not change the vertex set — the check passes,
+erring toward "changed", the safe direction (a correct edit is never
+blocked by a re-triangulation). The same reasoning holds for a
+re-triangulation that MOVES or ADDS a vertex (the common case): the
+vertex set changes, the check fires, and the candidate is flagged for
+repair — which is correct, since a re-triangulation that moves
+vertices is not an unchanged mesh.
 
 The mesh comparison is LOAD-AND-COMPARE ONLY (no trimesh boolean ops —
 CI has no reliable boolean backend): the candidate's ``render.stl`` and
-the parent's stored ``model.stl`` are both loaded with trimesh and their
-face counts, signed volumes, and volume centroids are compared. Both
-sides go through the SAME load (``trimesh.load(process=False,
-force="mesh")`` without a subsequent ``merge_vertices``), so the
-comparison is symmetric: metrics measured by identical means are
-comparable even though the two files were written by different OpenSCAD
-invocations (re-export float noise).
+the parent's stored ``model.stl`` (or the seam's pre-computed
+fingerprint) are compared via their fingerprints. Both sides go through
+the SAME load shape (``trimesh.load(process=False, force="mesh")``,
+no ``merge_vertices`` — the mesh is measured as the exporter wrote
+it), so the comparison is symmetric even though the two files were
+written by different OpenSCAD invocations (re-export float noise).
 """
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from pathlib import Path
 from typing import Any
@@ -45,46 +60,29 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "UNCHANGED_INSTRUCTION",
+    "mesh_fingerprint",
     "unchanged_mesh_check",
 ]
 
-#: The relative tolerance on the VOLUME comparison (issue #419): a
-#: re-export of identical geometry is not byte-identical (STL floats
-#: drift in low-order bits across exports), but a genuine ~1 mm edit
-#: on a ~50 k mm3 part changes the volume by well OVER 0.1% (a 1 mm
-#: deep, 10 mm diameter pocket on the v100 plate is ~78.5 mm3 ≈ 0.15%
-#: of 50799.79 mm3 — over the 0.1% threshold; a 1 mm change anywhere
-#: on a smaller part is a much larger percentage). ``max(0.1% of the
-#: parent, 0.1 mm3 absolute floor)`` is the pass threshold: below it
-#: the mesh is "unchanged" on this leg (the check may still fire if
-#: the other legs are also unchanged), at or above it the volume
-#: changed (the check passes on this leg).
+#: The vertex coordinate rounding (mm) used by the fingerprint: 1e-3
+#: mm is far below the precision of any printable edit (sub-micron
+#: noise in the STL float round-trip) and far above the export noise,
+#: so identical geometry re-exported by a different OpenSCAD
+#: invocation hashes identically while any real geometric change
+#: (a moved vertex, an added vertex) hashes differently.
+_ROUND_MM = 1e-3
+
+#: The relative tolerance on the VOLUME sanity check: a re-export of
+#: identical geometry is not byte-identical (STL floats drift in
+#: low-order bits across exports), but a genuine ~1 mm edit on a
+#: ~50 k mm3 part changes the volume by well over 0.1%. ``max(0.1% of
+#: the parent, 0.1 mm3 absolute floor)`` is the pass threshold.
 _VOLUME_REL_TOL = 0.001
 
 #: The absolute floor on the volume comparison (mm3): a tiny part
 #: (sub-mm scale) where 0.1% is below the noise floor of the export
 #: itself — the floor keeps the epsilon from vanishing.
 _VOLUME_ABS_FLOOR_MM3 = 0.1
-
-#: The relative tolerance on the FACE COUNT comparison: re-triangulation
-#: of identical geometry can shift the face count slightly (a different
-#: export order, a re-split of a quad); a genuine edit that changes the
-#: geometry changes the count by more than 1% (a pocket adds faces, a
-#: recut changes the count by the number of facets the cut crosses).
-_FACE_REL_TOL = 0.01
-
-#: The absolute floor on the CENTROID comparison (mm): the
-#: position-sensitive leg. A re-export of the same geometry gives the
-#: same centroid to sub-mm precision; a genuine edit that moves a hole
-#: 10 mm shifts the centroid by a measurable amount (for the v100
-#: plate fixtures: 1.34 mm for a 10 mm hole move — over the 1 mm
-#: floor). The tolerance is ``max(1.0 mm, 1% of the parent's bbox
-#: diagonal)`` — the relative component scales the threshold up for
-#: large parts (a 1 mm centroid shift on a 500 mm part is noise; on a
-#: 20 mm part it is a real edit) and the 1 mm floor keeps it from
-#: vanishing on tiny parts.
-_CENTROID_ABS_FLOOR_MM = 0.1
-_CENTROID_REL_TOL = 0.001
 
 
 #: The repair instruction the loop carries to the next iteration when
@@ -111,15 +109,68 @@ UNCHANGED_INSTRUCTION = (
 )
 
 
+def _fingerprint_bytes(values: list[Any], n: int) -> bytes:
+    """Pack ``values`` (already rounded to 1e-3 mm) as big-endian
+    float64. ``n`` is the total element count so the byte string is
+    length-unambiguous."""
+    out = bytearray()
+    for v in values:
+        out += int(v).to_bytes(8, "big", signed=True)
+    return bytes(out)
+
+
+def mesh_fingerprint(mesh: Any) -> tuple[str, int] | None:
+    """The mesh's geometry fingerprint:
+    ``(sha256(sorted rounded vertex set), vertex_set_size)``.
+
+    The vertex set is each vertex rounded to 1e-3 mm, deduplicated
+    (STLs repeat vertices per face), and sorted lexicographically, so
+    the hash is order-independent, re-export-noise-insensitive, and
+    multi-component-safe (it is the union of every component's
+    vertices — no per-component assumption). A real geometric change
+    (a moved hole, a resized bore, a re-triangulation that moves or
+    adds a vertex) changes the vertex set; an OpenSCAD re-export of an
+    unchanged model (the v100 repro) re-hashes identically (the 1e-3
+    mm rounding absorbs the STL float noise). A different
+    triangulation of the same shape (same vertex set, different
+    connectivity) re-hashes identically — the check errs toward
+    "changed", the safe direction (a correct edit is never blocked by
+    a re-triangulation).
+
+    ``None`` when the mesh has zero vertices (a load failure — the
+    caller's empty_model gate already handles that shape) or the
+    vertices cannot be read.
+    """
+    try:
+        verts = mesh.vertices
+        if len(verts) <= 0:
+            return None
+        rounded = {
+            (
+                round(float(x) / _ROUND_MM),
+                round(float(y) / _ROUND_MM),
+                round(float(z) / _ROUND_MM),
+            )
+            for (x, y, z) in verts
+        }
+        sorted_set = sorted(rounded)
+        vbytes = _fingerprint_bytes(
+            [c for v in sorted_set for c in v], len(sorted_set) * 3
+        )
+        return (hashlib.sha256(vbytes).hexdigest(), len(sorted_set))
+    except (ValueError, TypeError, RuntimeError, IndexError, OverflowError):
+        return None
+
+
 def _load_mesh(path: str) -> Any | None:
     """Load the STL at ``path`` for the unchanged-mesh comparison.
 
     ``None`` on any load failure (missing file, trimesh error) — the
     caller then abstains (a fabricated baseline would make the gate
     lie). The load is the SAME shape on both sides (``process=False``,
-    ``force="mesh"``) so the face-count / volume / centroid comparison
-    is symmetric; NO ``merge_vertices`` is applied here — the mesh is
-    measured as the exporter wrote it, on both sides.
+    ``force="mesh"``) so the fingerprint comparison is symmetric; NO
+    ``merge_vertices`` is applied here — the mesh is measured as the
+    exporter wrote it, on both sides.
     """
     if not path or not isinstance(path, str):
         return None
@@ -147,10 +198,10 @@ def _volume(mesh: Any) -> float | None:
 
     ``mesh.volume`` is the SIGNED volume (trimesh sums per-face signed
     tetrahedra) and RAISES only for a mesh whose winding is too
-    inconsistent to sum — the caller then abstains on the volume leg
-    and relies on the face count + centroid. A zero-volume mesh
-    (a degenerate shape) returns ``0.0`` — the caller treats
-    ``abs(parent) <= 0`` as "the volume leg abstains".
+    inconsistent to sum — the caller then abstains on the volume sanity
+    leg (the fingerprint comparison is the primary signal). A
+    zero-volume mesh (a degenerate shape) returns ``0.0`` — the caller
+    treats ``abs(parent) <= 0`` as "the volume leg abstains".
     """
     try:
         return float(mesh.volume)
@@ -158,188 +209,109 @@ def _volume(mesh: Any) -> float | None:
         return None
 
 
-def _center_mass(mesh: Any) -> Any | None:
-    """The mesh's volume centroid (3D point), or ``None`` when it
-    cannot be read (zero-volume mesh, non-watertight mesh where the
-    centroid is undefined, or a trimesh computation failure)."""
-    try:
-        return mesh.center_mass
-    except (ValueError, TypeError, RuntimeError, IndexError, ZeroDivisionError):
-        return None
-
-
-def _bbox_diagonal(mesh: Any) -> float | None:
-    """The diagonal extent of the mesh's bounding box (a scalar proxy
-    for part size), or ``None`` when the bounds cannot be read. Used to
-    scale the centroid tolerance: a 1 mm shift on a 20 mm part is a
-    real edit; on a 500 mm part it is noise."""
-    try:
-        b = mesh.bounds
-        lo, hi = b[0], b[1]
-        return float(
-            ((hi[0] - lo[0]) ** 2 + (hi[1] - lo[1]) ** 2 + (hi[2] - lo[2]) ** 2) ** 0.5
-        )
-    except (ValueError, TypeError, RuntimeError, IndexError):
-        return None
-
-
 def unchanged_mesh_check(
     *,
     parent_stl: str | None,
     candidate_stl: str | None,
+    parent_fingerprint: tuple[str, int] | None = None,
     parent_volume_mm3: float | None = None,
     parent_face_count: int | None = None,
-    parent_centroid: Any = None,
-    parent_bbox_diagonal_mm: float | None = None,
 ) -> tuple[str, str] | None:
     """Issue #419: the unchanged-mesh post-check (detection).
 
     Returns ``None`` (the check abstains — the candidate is allowed to
     pass on its own merits) when:
 
-    - ``parent_stl`` is ``None`` AND ``parent_volume_mm3`` is ``None``
-      (no parent version, no stored ``model.stl`` — a v1 design, a 3MF
-      import, a missing file). The parent side must have SOME baseline;
-      when pre-computed stats are supplied (``parent_volume_mm3`` and
-      ``parent_face_count``), ``parent_stl`` may be ``None`` (the path
-      is not needed — the stats were already measured off the same mesh
-      load the genus came from). ``parent_centroid`` / ``parent_bbox_
-      diagonal_mm`` ride that same seam load: when supplied, the check
-      uses them directly and the parent mesh is never loaded (the
-      path-based load remains a fallback only).
-    - ``candidate_stl`` is ``None`` or unloadable (the loop's
-      render has no STL, or it cannot be read).
-    - Either mesh's face count cannot be read (a zero-face load is a
-      load failure — the caller's empty_model gate already handles
-      that shape).
+    - no parent baseline is available: neither ``parent_fingerprint``
+      nor a loadable ``parent_stl``. The seam passes the parent's
+      pre-computed fingerprint (measured off the same mesh load the
+      genus came from); the path-based fallback loads the parent's
+      ``model.stl`` and fingerprints it here. When NEITHER is present
+      (a v1 design, a 3MF import, a missing file), the check abstains
+      — a fabricated baseline would make the gate lie.
+    - ``candidate_stl`` is ``None`` or unloadable (the loop's render
+      has no STL, or it cannot be read).
+    - Either mesh's fingerprint cannot be computed (a zero-vertex load
+      is a load failure — the caller's empty_model gate already
+      handles that shape).
 
     Returns ``(evidence, instruction)`` when the candidate's rendered
-    mesh equals the parent's on ALL THREE legs (volume, face count, and
-    volume centroid each within their tolerance): the evidence names
-    the unchanged metrics (the loop's repair dict carries it to the
-    next iteration's ``REPAIR`` block), and the instruction is
-    :data:`UNCHANGED_INSTRUCTION`.
+    mesh has the SAME geometry fingerprint as the parent's (the vertex
+    set is equal, and — as a sanity check — the volume is within
+    tolerance): the evidence names the unchanged geometry (the loop's
+    repair dict carries it to the next iteration's ``REPAIR`` block),
+    and the instruction is :data:`UNCHANGED_INSTRUCTION`.
 
-    A change on ANY ONE leg (volume changed, face count changed, or
-    centroid changed) means the mesh is NOT unchanged — the check
+    A DIFFERENT fingerprint (a different vertex set) means the mesh
+    changed — however small the change (a moved hole, a resized bore,
+    a re-triangulation that moves or adds a vertex) — the check
     returns ``None`` and the candidate is allowed to pass on its own
     merits.
     """
-    # The parent side: either a path to load, or pre-computed stats.
-    # Both must be present for the check to have a baseline.
-    parent: Any | None = None
-    parent_faces: int | None = None
-    parent_vol: float | None = None
-    parent_cm: Any | None = None
-    parent_diag: float | None = None
-
-    if parent_volume_mm3 is not None or parent_face_count is not None:
-        # Pre-computed stats path: the parent mesh was already loaded
-        # (off the event loop) in the seam that measured the genus,
-        # volume, face count, centroid, and bbox diagonal in ONE load.
-        # Use those stats directly — the parent mesh is NEVER loaded
-        # here (a second load would re-read the same bytes from disk;
-        # issue #419 lens fix). A missing centroid / diagonal stat
-        # degrades the centroid leg to abstain — it does NOT fall back
-        # to a load.
-        if parent_face_count is not None and parent_face_count > 0:
-            parent_faces = parent_face_count
-        if parent_volume_mm3 is not None:
-            parent_vol = parent_volume_mm3
-        if parent_faces is None:
-            return None  # no usable face count → abstain
-        if parent_centroid is not None:
-            parent_cm = parent_centroid
-        parent_diag = parent_bbox_diagonal_mm
+    # The parent side: either a pre-computed fingerprint (the seam
+    # measured it off the same load as the genus) or a path to load.
+    # When both are present the fingerprint is used (the path-based
+    # load stays a fallback only).
+    parent_fp: tuple[str, int] | None = None
+    if parent_fingerprint is not None:
+        parent_fp = parent_fingerprint
     elif parent_stl is not None:
-        # Path-based fallback (the original design): load the parent
-        # mesh ONCE for every metric (face count, volume, centroid,
-        # bbox diagonal).
         parent = _load_mesh(parent_stl)
-        if parent is None:
-            return None
-        parent_faces = len(parent.faces)
-        if parent_faces <= 0:
-            return None
-        parent_vol = _volume(parent)
-        parent_cm = _center_mass(parent)
-        parent_diag = _bbox_diagonal(parent)
-    else:
-        # No parent at all → abstain.
-        return None
+        if parent is not None:
+            parent_fp = mesh_fingerprint(parent)
+    if parent_fp is None:
+        return None  # no parent baseline → abstain
 
     if candidate_stl is None or not isinstance(candidate_stl, str) or not candidate_stl:
         return None
     candidate = _load_mesh(candidate_stl)
     if candidate is None:
         return None
-    candidate_faces = len(candidate.faces)
-    if candidate_faces <= 0:
+    candidate_fp = mesh_fingerprint(candidate)
+    if candidate_fp is None:
         return None
     candidate_vol = _volume(candidate)
-    candidate_cm = _center_mass(candidate)
 
-    # -- Leg 1: Face count (primary signal; re-export noise is tiny) --
-    face_delta = abs(candidate_faces - parent_faces)
-    face_tol = max(_FACE_REL_TOL * parent_faces, 1.0)
-    faces_changed = face_delta > face_tol
+    # -- Leg 1 (primary): the geometry fingerprint (the exact vertex
+    # set). ANY real geometric change, however small, changes the
+    # vertex set; a re-export of identical geometry (the v100 repro)
+    # re-hashes identically (1e-3 mm rounding absorbs the STL float
+    # noise).
+    if candidate_fp[0] != parent_fp[0]:
+        return None  # geometry changed → the check does NOT fire
 
-    # -- Leg 2: Volume (relative tolerance with an absolute floor) --
-    # A non-watertight mesh cannot yield a volume; the leg abstains.
+    # -- Leg 2 (sanity): volume within tolerance. A fingerprint match
+    # implies the vertex set is identical, so the volume is within
+    # tolerance by construction; this leg guards against a degenerate
+    # case and keeps the evidence honest (it names the volume the
+    # operator can verify).
     if (
-        parent_vol is not None
+        parent_volume_mm3 is not None
         and candidate_vol is not None
-        and abs(parent_vol) > 0.0
+        and abs(parent_volume_mm3) > 0.0
     ):
-        vol_delta = abs(candidate_vol - parent_vol)
-        vol_tol = max(_VOLUME_REL_TOL * abs(parent_vol), _VOLUME_ABS_FLOOR_MM3)
-        vol_changed = vol_delta > vol_tol
-    else:
-        vol_changed = False
+        vol_delta = abs(candidate_vol - parent_volume_mm3)
+        vol_tol = max(
+            _VOLUME_REL_TOL * abs(parent_volume_mm3), _VOLUME_ABS_FLOOR_MM3
+        )
+        if vol_delta > vol_tol:
+            return None  # fingerprint matched but volume moved → not unchanged
 
-    # -- Leg 3: Volume centroid (the position-sensitive leg) --
-    # Catches the "move the hole 10 mm left" case: same volume, same
-    # face count — only the centroid moves. Abstinest when either
-    # side's centroid is unavailable (zero-volume / non-watertight
-    # mesh). The tolerance scales with part size: max(1.0 mm, 1% of
-    # the parent's bbox diagonal) — a 1 mm shift on a 120 mm part is
-    # 0.8% (noise), but the 1 mm floor keeps the threshold from
-    # vanishing on tiny parts.
-    centroid_changed = False
-    if parent_cm is not None and candidate_cm is not None:
-        try:
-            import numpy as np
-
-            cm_delta = float(np.abs(np.array(parent_cm) - np.array(candidate_cm)).max())
-            # Scale the tolerance by part size: the parent's bbox
-            # diagonal when measured (the stats path's ``None`` diagonal
-            # degrades to the candidate's — a size proxy is a proxy, and
-            # the tolerance floor keeps the leg honest either way).
-            extent = parent_diag if parent_diag is not None else _bbox_diagonal(candidate)
-            if extent is None:
-                extent = 0.0
-            cm_tol = max(_CENTROID_ABS_FLOOR_MM, _CENTROID_REL_TOL * extent)
-            centroid_changed = cm_delta > cm_tol
-        except (ValueError, TypeError, RuntimeError, IndexError):
-            centroid_changed = False
-
-    # Unchanged = ALL THREE legs within tolerance.
-    if faces_changed or vol_changed or centroid_changed:
-        return None
-
-    # All three legs within tolerance: the mesh is unchanged. Build the
-    # evidence naming the unchanged numbers.
-    if parent_vol is not None:
-        _vol = f"{parent_vol:,.2f}"
+    # Fingerprint match: the geometry is identical. Build the evidence
+    # naming the unchanged numbers.
+    if parent_volume_mm3 is not None:
+        _vol = f"{parent_volume_mm3:,.2f}"
     else:
         _vol = "unknown (non-watertight)"
     if candidate_vol is not None:
         _cvol = f"{candidate_vol:,.2f}"
     else:
         _cvol = _vol
+    _pf = parent_face_count if parent_face_count is not None else "unknown"
     evidence = (
         f"rendered mesh is unchanged from the parent version "
-        f"(volume {_vol} mm3, {parent_faces} faces; "
-        f"candidate: {_cvol} mm3, {candidate_faces} faces)"
+        f"(geometry fingerprint {parent_fp[0][:12]}…; "
+        f"{parent_fp[1]} vertices; volume {_vol} mm3, "
+        f"{_pf} faces; candidate: {_cvol} mm3)"
     )
     return evidence, UNCHANGED_INSTRUCTION

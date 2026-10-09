@@ -1963,10 +1963,9 @@ def _build_production_design_loop():
                 "through_baseline_genus_source"
             ),
             parent_mesh_stl=kwargs.get("parent_mesh_stl"),
+            parent_fingerprint=kwargs.get("parent_fingerprint"),
             parent_volume_mm3=kwargs.get("parent_volume_mm3"),
             parent_face_count=kwargs.get("parent_face_count"),
-            parent_centroid=kwargs.get("parent_centroid"),
-            parent_bbox_diagonal_mm=kwargs.get("parent_bbox_diagonal_mm"),
             model=res.entry.model,
             prompt_version=prompt_version,
             on_progress=on_progress,
