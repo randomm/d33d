@@ -2556,10 +2556,13 @@ async def run_design_loop_async(
             # The prior RENDERED attempt's record (never iterations[-2], which
             # may be a non-render record in between).
             _prev = prev_rendered
-            assert _prev is not None  # a repeat implies a prior rendered attempt
-            return _exhausted(
-                iterations, _prev, _prev.score, failure_reason=_post_reason
-            )
+            if _prev is not None:
+                # A gate/error_class reason on N-1 always wins; the repeated
+                # post-check reason is only the fallback (issue #432).
+                return _exhausted(
+                    iterations, _prev, _prev.score, fallback_reason=_post_reason
+                )
+            # No prior rendered attempt to report: not a stop, keep looping.
         prev_rendered = record
 
         repair = next_repair
@@ -2986,6 +2989,7 @@ def _exhausted(
     best: IterationRecord | None,
     best_score: Score | None,
     failure_reason: str | None = None,
+    fallback_reason: str | None = None,
 ) -> DesignResult:
     """Build the exhaustion result: best-scoring candidate + a STRUCTURED
     failure reason (weakest gate bit of the best, never free text, never
@@ -3056,6 +3060,10 @@ def _exhausted(
             )
             if _repair_reason in POST_CHECK_REASONS:
                 reason = _repair_reason
+    if reason is None:
+        # Issue #432: the identical-repair stop's post-check reason, used only
+        # when no gate or error_class reason could be derived.
+        reason = fallback_reason
     return DesignResult(
         status="exhausted",
         best=best,
