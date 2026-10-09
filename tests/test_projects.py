@@ -3006,6 +3006,112 @@ def test_offer_center_hole_no_match_lists_measured_holes(app_with_projects) -> N
     )
 
 
+# ---------------------------------------------------------------------------
+# Issue #414: the "center" reference frame — a translated part's real
+# centre (the extents/2 "centre" is wrong for any part whose bounding
+# box does not start at the origin).
+# ---------------------------------------------------------------------------
+
+
+def test_offer_translated_part_center_hole_selected_by_real_bounds(app_with_projects) -> None:
+    """Issue #414: a part whose bounds are [100..220] × [50..130]
+    (extents 120×80 — the extents/2 "centre" would be (60, 40)) with a
+    hole at its TRUE centre (160, 90) + corner holes: "make the center
+    hole 38 mm" must select the (160, 90) hole via the real bounds
+    centre, not no-match (as the extents/2 centre would, 111.8 mm from
+    the hole)."""
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "TranslatedCenter"})
+        pid = r.json()["id"]
+        conn = app_with_projects.state.conn
+        holes_report = {
+            "hole_count": 4,
+            "holes": [
+                {"center": [160.0, 90.0, 6.0], "axis": [0.0, 0.0, 1.0], "diameter_mm": 10.0},
+                {"center": [108.0, 58.0, 6.0], "axis": [0.0, 0.0, 1.0], "diameter_mm": 4.0},
+                {"center": [212.0, 58.0, 6.0], "axis": [0.0, 0.0, 1.0], "diameter_mm": 4.0},
+                {"center": [212.0, 122.0, 6.0], "axis": [0.0, 0.0, 1.0], "diameter_mm": 4.0},
+            ],
+            "bbox_file_units": [120.0, 80.0, 12.0],
+            "bbox_bounds_file_units": [[100.0, 50.0, 0.0], [220.0, 130.0, 12.0]],
+        }
+        conn.raw.execute(
+            "UPDATE projects SET part_filename='part.stl', part_format='stl', "
+            "part_unit='mm', part_unit_status='settled', part_scale=1.0, part_report=? "
+            "WHERE id=?",
+            (json.dumps(holes_report), pid),
+        )
+        conn.commit()
+        r2 = await client.post(
+            f"/api/projects/{pid}/chat", json={"message": "make the center hole 38 mm"}
+        )
+        frames = await _drive_event_source(app_with_projects, client, pid)
+        svc = app_with_projects.state.versions
+        return r2.status_code, frames, svc.get_pending_offer(pid)
+
+    status, frames, offer = _run_async(app_with_projects, _call)
+    assert status == 202, status
+    done = [d for e, d in frames if e == "done"]
+    assert done, f"no done frame: {frames}"
+    msg = done[0].get("message", "")
+    # The (160, 90) hole is the part's true centre — it must be
+    # selected (a fresh offer), not a no-match (the extents/2 centre
+    # would have been 111.8 mm from it).
+    assert "I don't see a hole" not in msg, (
+        f"the hole at the part's TRUE centre must be selected, got: {msg}"
+    )
+    assert offer is not None, "offer must be stored"
+    center = offer.get("center")
+    assert center is not None, f"offer missing center: {offer}"
+    assert abs(center[0] - 160.0) < 1e-6, offer
+    assert abs(center[1] - 90.0) < 1e-6, offer
+    assert offer.get("diameter_mm") == 10.0, offer
+
+
+def test_offer_translated_part_corner_only_holes_no_match(app_with_projects) -> None:
+    """Issue #414: the same translated part (bounds [100..220] ×
+    [50..130]) with ONLY corner holes (none near the true centre) +
+    "the center hole" → no-match (the nearest corner hole is 61.06 mm
+    from (160, 90), beyond the 15%-of-diagonal threshold of 21.6 mm)."""
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "TranslatedNoMatch"})
+        pid = r.json()["id"]
+        conn = app_with_projects.state.conn
+        holes_report = {
+            "hole_count": 3,
+            "holes": [
+                {"center": [108.0, 58.0, 6.0], "axis": [0.0, 0.0, 1.0], "diameter_mm": 4.0},
+                {"center": [212.0, 58.0, 6.0], "axis": [0.0, 0.0, 1.0], "diameter_mm": 4.0},
+                {"center": [212.0, 122.0, 6.0], "axis": [0.0, 0.0, 1.0], "diameter_mm": 4.0},
+            ],
+            "bbox_file_units": [120.0, 80.0, 12.0],
+            "bbox_bounds_file_units": [[100.0, 50.0, 0.0], [220.0, 130.0, 12.0]],
+        }
+        conn.raw.execute(
+            "UPDATE projects SET part_filename='part.stl', part_format='stl', "
+            "part_unit='mm', part_unit_status='settled', part_scale=1.0, part_report=? "
+            "WHERE id=?",
+            (json.dumps(holes_report), pid),
+        )
+        conn.commit()
+        r2 = await client.post(
+            f"/api/projects/{pid}/chat", json={"message": "make the center hole 38 mm"}
+        )
+        frames = await _drive_event_source(app_with_projects, client, pid)
+        svc = app_with_projects.state.versions
+        return r2.status_code, frames, svc.get_pending_offer(pid)
+
+    status, frames, offer = _run_async(app_with_projects, _call)
+    assert status == 202, status
+    done = [d for e, d in frames if e == "done"]
+    assert done, f"no done frame: {frames}"
+    msg = done[0].get("message", "")
+    assert "I don't see a hole" in msg, f"expected no-match reply, got: {msg}"
+    assert offer is None, f"no-match must NOT store a pending offer, got: {offer}"
+
+
 def test_fill_recut_no_match_lead_matches_copy_ts() -> None:
     """Issue #414 — the ``FRILL_NO_MATCH_LEAD`` template equals
     ``copy.ts``'s ``fillRecut.noMatchLead`` with the same substitutions

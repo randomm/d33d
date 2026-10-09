@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
-from d33d.hole_select import NoMatchHole, holes_in_mm, select_measured_hole
+from typing import Any
+
+from d33d.hole_select import (
+    NoMatchHole,
+    holes_in_mm,
+    report_bounds_mm,
+    select_measured_hole,
+)
 
 # ---------------------------------------------------------------------------
 # holes_in_mm — scale guards (issue #396 lens item 2)
@@ -323,3 +330,133 @@ def test_snap_axis_single_definition_no_duplicate():
         "d33d.hole_measure must not have its own top-level _snap_axis "
         "definition (DRY: it imports from d33d.part_holes)"
     )
+
+
+# ---------------------------------------------------------------------------
+# Issue #414: the "center" reference frame — the centre must come from
+# REAL bounds, not from extents/2 (extents/2 is only correct when the
+# bounding box starts at the origin).
+# ---------------------------------------------------------------------------
+
+def _make_report(bounds, holes, extents=None):
+    """Build a stored part report: ``bounds`` is ``(lo, hi)`` — two
+    3-vectors in file units (the stored ``bbox_bounds_file_units``);
+    ``extents`` defaults to hi−lo.``holes`` are in file units (the
+    import's storage contract)."""
+    lo, hi = bounds
+    if extents is None:
+        extents = [hi[i] - lo[i] for i in range(3)]
+    report: dict[str, Any] = {
+        "bbox_file_units": list(extents),
+        "bbox_bounds_file_units": [list(lo), list(hi)],
+        "holes": holes,
+    }
+    return report
+
+
+def test_report_bounds_scaled_to_mm():
+    """The report's REAL bounds, scaled by the part's scale, are the mm
+    bounds ``select_measured_hole`` must centre on (extents/2 is only the
+    origin-anchored special case)."""
+    from d33d.hole_select import report_bounds_mm
+
+    report = _make_report(
+        ([100.0, 50.0, 0.0], [220.0, 130.0, 12.0]),
+        [],
+    )
+    lo, hi = report_bounds_mm(report, 1.0)
+    assert lo == [100.0, 50.0, 0.0], f"lo mm bounds wrong: {lo}"
+    assert hi == [220.0, 130.0, 12.0], f"hi mm bounds wrong: {hi}"
+    # A missing scale → no usable bounds (never file units as mm).
+    assert report_bounds_mm(report, None) is None
+    assert report_bounds_mm(report, 0.0) is None
+    # No bounds key (legacy report) → None (the extents/2 path is a lie
+    # for any non-origin part, so the center rule degrades to point-at).
+    assert report_bounds_mm({"bbox_file_units": [120.0, 80.0, 6.0]}, 1.0) is None
+    # A corrupt bounds blob → None (omit-not-raise, same contract as
+    # holes_in_mm).
+    assert report_bounds_mm({"bbox_bounds_file_units": "bad"}, 1.0) is None
+    assert report_bounds_mm(
+        {"bbox_bounds_file_units": [[1, 2, 3], ["a", 4, 5]]}, 1.0
+    ) is None
+
+
+def test_center_rule_selects_hole_at_true_centre_of_translated_part():
+    """Issue #414 failing test: a part translated to bounds
+    [100..220] × [50..130] (extents [120, 80]) with a hole at its TRUE
+    centre (160, 90). The extents/2 "centre" is (60, 40) — 134.5 mm from
+    the real centre — so the old code no-matched (or, if the corner
+    holes' distance happened to beat it, picked the wrong hole). The
+    bounds-based centre (160, 90) sits ON the centre hole: it must be
+    selected, not a NoMatchHole, not None."""
+    # One centre hole (160, 90) + three corner holes near the true
+    # centre of the bounds: (108, 58) / (212, 58) / (212, 122).
+    holes = [
+        {"center": [160.0, 90.0, 6.0], "axis": [0.0, 0.0, 1.0], "diameter_mm": 10.0},
+        {"center": [108.0, 58.0, 6.0], "axis": [0.0, 0.0, 1.0], "diameter_mm": 4.0},
+        {"center": [212.0, 58.0, 6.0], "axis": [0.0, 0.0, 1.0], "diameter_mm": 4.0},
+        {"center": [212.0, 122.0, 6.0], "axis": [0.0, 0.0, 1.0], "diameter_mm": 4.0},
+    ]
+    bounds = [(100.0, 50.0, 0.0), (220.0, 130.0, 12.0)]
+    report = _make_report(bounds, holes)  # extents [120, 80, 12]
+    mm = holes_in_mm(report, 1.0)
+    lo, hi = report_bounds_mm(report, 1.0)
+    selected = select_measured_hole(
+        mm, "make the center hole 38 mm", None,
+        trigger_size=38.0, bounds_mm=[lo, hi],
+    )
+    assert isinstance(selected, dict), (
+        f"the hole at the part's TRUE centre must be selected, got {selected!r}"
+    )
+    assert abs(selected["diameter_mm"] - 10.0) < 1e-6, (
+        f"the (160, 90) hole is the centre hole, got {selected!r}"
+    )
+
+
+def test_center_rule_translated_part_corner_only_holes_no_match():
+    """Issue #414: the same translated part (bounds [100..220] ×
+    [50..130]) with ONLY corner holes (none at the true centre) +
+    'the center hole' must be a NoMatchHole. The nearest corner hole
+    (108, 58) is 61.06 mm from the true centre (160, 90) — far beyond
+    the 30 mm match threshold, so no measured hole matches the
+    position."""
+    holes = [
+        {"center": [108.0, 58.0, 6.0], "axis": [0.0, 0.0, 1.0], "diameter_mm": 4.0},
+        {"center": [212.0, 58.0, 6.0], "axis": [0.0, 0.0, 1.0], "diameter_mm": 4.0},
+        {"center": [212.0, 122.0, 6.0], "axis": [0.0, 0.0, 1.0], "diameter_mm": 4.0},
+    ]
+    report = _make_report([(100.0, 50.0, 0.0), (220.0, 130.0, 12.0)], holes)
+    mm = holes_in_mm(report, 1.0)
+    lo, hi = report_bounds_mm(report, 1.0)
+    selected = select_measured_hole(
+        mm, "make the center hole 38 mm", None,
+        trigger_size=38.0, bounds_mm=[lo, hi],
+    )
+    # Nearest corner (108, 58) is 61.06 mm from (160, 90) — beyond the
+    # 30 mm match threshold → NoMatchHole.
+    assert isinstance(selected, NoMatchHole), (
+        f"a translated part with only corner holes must no-match, got {selected!r}"
+    )
+
+
+def test_center_rule_origin_centred_part_unchanged():
+    """Issue #414: a part centred on the origin (negative to positive
+    bounds) must behave exactly as before — the knob's (0, 0) hole is
+    the centre hole, and the extents/2 centre happens to agree with the
+    bounds centre for this symmetric part."""
+    holes = [
+        {"center": [0.0, 0.0, 5.0], "axis": [0.0, 0.0, 1.0], "diameter_mm": 10.0},
+        {"center": [-10.0, 0.0, 5.0], "axis": [0.0, 0.0, 1.0], "diameter_mm": 20.0},
+        {"center": [10.0, 0.0, 5.0], "axis": [0.0, 0.0, 1.0], "diameter_mm": 30.0},
+    ]
+    report = _make_report([(-20.0, -20.0, -5.0), (20.0, 20.0, 15.0)], holes)
+    mm = holes_in_mm(report, 1.0)
+    lo, hi = report_bounds_mm(report, 1.0)
+    selected = select_measured_hole(
+        mm, "make the center hole 38 mm", None,
+        trigger_size=38.0, bounds_mm=[lo, hi],
+    )
+    assert isinstance(selected, dict), (
+        f"the origin-centred (0, 0) hole must be selected, got {selected!r}"
+    )
+    assert selected["diameter_mm"] == 10.0, selected

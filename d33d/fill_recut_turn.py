@@ -26,7 +26,12 @@ from d33d.fill_recut import (
     no_match_hole_reply,
     own_feature_names,
 )
-from d33d.hole_select import NoMatchHole, holes_in_mm, select_measured_hole
+from d33d.hole_select import (
+    NoMatchHole,
+    holes_in_mm,
+    report_bounds_mm,
+    select_measured_hole,
+)
 from d33d.part_holes import HOLE_NOUNS, no_hole_reply, part_has_hole_evidence
 from d33d.part_units import USABLE_UNIT_STATUSES
 
@@ -151,9 +156,14 @@ def fill_recut_turn(
                     # selection and instruction (the user's numbers are
                     # in mm — comparing file units against an mm trigger
                     # size and an mm bbox would pick the wrong hole).
+                    # Issue #414: the centre reference is the part's
+                    # REAL bounds (``bbox_bounds_file_units`` scaled by
+                    # the same scale — extents/2 is only the
+                    # origin-anchored special case).
                     report = part.get("report") if part else None
                     scale = part.get("scale")
                     holes = holes_in_mm(report, scale) if report else []
+                    bounds_mm = report_bounds_mm(report, scale) if report else None
                     bbox_mm: list[float] | None = None
                     if isinstance(report, dict):
                         bbox_fu = report.get("bbox_file_units")
@@ -181,6 +191,7 @@ def fill_recut_turn(
                         selected = select_measured_hole(
                             holes, message, bbox_mm,
                             trigger_size=trigger["size"],
+                            bounds_mm=bounds_mm,
                         )
                         if selected is None:
                             # Ambiguous or no qualifier matched: use the
