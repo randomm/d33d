@@ -80,12 +80,23 @@ export interface BriefZones {
 }
 
 /** A W/D/H row that belongs to the part (an axis row, or a param row the
- *  dimension protocol named W / D / H) — NOT a change. */
+ *  dimension protocol named W / D / H) — NOT a change.
+ *
+ *  Issue #416 (defect 2): the model may emit a `part_width` / `part_depth`
+ *  / `part_height` param (the part's own W/D/H as a named parameter). These
+ *  rows are the part's own dimensions, not a change — they must not appear
+ *  under "Your changes". The check covers both the literal W/D/H name and
+ *  the model's `part_width`/`part_depth`/`part_height` naming (a closed
+ *  set — never inferred from name substrings). */
 function isPartRow(e: DesignStateEntry): boolean {
-  return (
-    (e.name === "W" || e.name === "D" || e.name === "H") &&
-    (e.kind === "axis" || e.kind === "param")
-  );
+  const isWdhName =
+    e.name === "W" ||
+    e.name === "D" ||
+    e.name === "H" ||
+    e.name === "part_width" ||
+    e.name === "part_depth" ||
+    e.name === "part_height";
+  return isWdhName && (e.kind === "axis" || e.kind === "param");
 }
 
 /** The COLLAPSIBLE predicate (the same one the single list uses): a
