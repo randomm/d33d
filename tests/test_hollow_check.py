@@ -47,6 +47,12 @@ def test_missing_stl_abstains() -> None:
         "a spring-loaded cap",
         "a hollow cylinder",
         "brackets for a shelf",
+        "a cup 50 mm across, 60 mm tall, 1 mm wall",
+        "a thin-walled box",
+        "an enclosure for a PCB",
+        "a bowl",
+        "a container with a lid",
+        "a tray with 30° sides",
     ],
 )
 def test_thin_or_hollow_request_is_exempt(request_text: str) -> None:
@@ -54,7 +60,9 @@ def test_thin_or_hollow_request_is_exempt(request_text: str) -> None:
     assert hollow_solid_check(request_text, SHELL) is None
 
 
-@pytest.mark.parametrize("request_text", ["a box", "a lid for a 40 mm jar", ""])
+@pytest.mark.parametrize(
+    "request_text", ["a box", "a lid for a 40 mm jar", "a cupboard door", ""]
+)
 def test_request_naming_no_thin_form_is_not_exempt(request_text: str) -> None:
     assert not is_hollow_request(request_text)
     assert hollow_solid_check(request_text, SHELL) is not None

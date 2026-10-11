@@ -34,8 +34,8 @@ __all__ = [
 HOLLOW_RATIO = 0.10
 
 _HOLLOW_WORDS_RE = re.compile(
-    r"\b(shell|frame|ring|tube|wire|mesh|lattice|bracket|hook|spring|hollow)"
-    r"(s|es)?\b",
+    r"\b(shell|frame|ring|tube|wire|mesh|lattice|bracket|hook|spring|hollow"
+    r"|thin|walled|cup|bowl|container|enclosure|tray|sleeve)(s|es)?\b",
     re.IGNORECASE,
 )
 
