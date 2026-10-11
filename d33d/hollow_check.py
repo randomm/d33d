@@ -35,9 +35,13 @@ HOLLOW_RATIO = 0.10
 
 _HOLLOW_WORDS_RE = re.compile(
     r"\b(shell|frame|ring|tube|wire|mesh|lattice|bracket|hook|spring|hollow"
-    r"|thin|walled|cup|bowl|container|enclosure|tray|sleeve)(s|es)?\b",
+    r"|thin[- ]walled|cup|bowl|container|enclosure|tray|sleeve)(s|es)?\b",
     re.IGNORECASE,
 )
+
+# A hollow noun that is the object of "for" names what the part holds, not
+# the part itself ("a stand for a cup"), so it does not exempt the request.
+_FOR_OBJECT_RE = re.compile(r"\bfor\s+(?:(?:an?|the|some|my|your)\s+)?$", re.IGNORECASE)
 
 HOLLOW_INSTRUCTION = (
     "The rendered solid is almost empty compared with its bounding box — "
@@ -53,7 +57,11 @@ HOLLOW_INSTRUCTION = (
 
 def is_hollow_request(request: str) -> bool:
     """True when the request names a thin or hollow form (exempt)."""
-    return bool(_HOLLOW_WORDS_RE.search(request or ""))
+    text = request or ""
+    return any(
+        not _FOR_OBJECT_RE.search(text[: m.start()])
+        for m in _HOLLOW_WORDS_RE.finditer(text)
+    )
 
 
 def _bbox_volume(mesh: Any) -> float | None:
