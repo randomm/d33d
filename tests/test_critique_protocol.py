@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -668,6 +669,44 @@ def test_review_render_any_call_side_exception_is_unreviewed():
     llm, _ = _scripted_review_llm(sqlite3.OperationalError("database is locked"))
     verdict = asyncio.run(review_render(_REVIEW_VIEWS, "box", None, llm_fn=llm))
     assert verdict == ReviewVerdict(status="unreviewed", why="call_error")
+
+
+class Boom(Exception):
+    """An exception outside every named edge class."""
+
+
+def test_review_render_any_exception_is_unreviewed_never_aborts():
+    # Issue #435: a failing review must never lose a passing candidate, so any
+    # Exception from the edge degrades to unreviewed (CancelledError is a
+    # BaseException and still propagates; see the next test).
+    llm, _ = _scripted_review_llm(Boom("unlisted"))
+    verdict = asyncio.run(review_render(_REVIEW_VIEWS, "box", None, llm_fn=llm))
+    assert verdict == ReviewVerdict(status="unreviewed", why="call_error")
+
+
+def test_review_render_cancellation_still_propagates():
+    llm, _ = _scripted_review_llm(asyncio.CancelledError())
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(review_render(_REVIEW_VIEWS, "box", None, llm_fn=llm))
+
+
+def test_review_render_sync_llm_fn_runs_off_loop_under_wait_for_budget():
+    # Issue #435: a sync llm_fn must not block the event loop, so the caller's
+    # wait_for budget can cut it off.
+    def slow_llm(role, messages, system):
+        time.sleep(0.5)
+        return _review_reply('{"verdict": "pass", "reason": "x"}')
+
+    async def run() -> float:
+        started = time.monotonic()
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(
+                review_render(_REVIEW_VIEWS, "box", None, llm_fn=slow_llm),
+                timeout=0.05,
+            )
+        return time.monotonic() - started
+
+    assert asyncio.run(run()) < 0.4
 
 
 def test_review_render_non_vision_tier_is_unreviewed_no_vision():

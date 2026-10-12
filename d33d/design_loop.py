@@ -61,7 +61,7 @@ import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import Any, Literal
 
 import httpx
 
@@ -96,9 +96,11 @@ from d33d.render_worker import (
 )
 from d33d.scad_center_check import center_vector_warning
 from d33d.unchanged_mesh_check import fingerprint_stl
-
-if TYPE_CHECKING:
-    from d33d.critique_protocol import ReviewVerdict
+from d33d.visual_review import (
+    ReviewVerdict,
+    render_view_data_uris,
+    review_render,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -404,6 +406,21 @@ class IterationRecord:
     #: deterministic template. The record carries the raw text — the
     #: guard runs server-side, never in the model.
     confirm_sentence: str | None = None
+
+
+#: Issue #435: the ordered closed set of post-checks that can appear in
+#: ``DesignResult.checks_run``, in pipeline order. The UI word map
+#: (``web/src/copy.ts`` ``passCard.checkWords``) must have exactly these keys
+#: (tests/test_issue435_check_keys.py).
+CHECK_KEYS: tuple[str, ...] = (
+    "size",
+    "watertight",
+    "screw_clearance",
+    "through_holes",
+    "stack_height",
+    "change_detected",
+    "hollow",
+)
 
 
 @dataclass(frozen=True)
@@ -2717,7 +2734,7 @@ async def run_design_loop_async(
             iterations,
             best,
             best_score,
-            failure_reason=VISUAL_REVIEW_FAILED_REASON,
+            fallback_reason=VISUAL_REVIEW_FAILED_REASON,
         )
     return _exhausted(iterations, best, best_score)
 
@@ -3078,18 +3095,9 @@ async def _visual_review(
     """The issue #435 visual review of one candidate, under its OWN
     per-attempt budget (``DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS``, read at call
     time) — a slow review never eats the design attempt's budget. Returns a
-    :class:`d33d.critique_protocol.ReviewVerdict`; a timeout is ``unreviewed``.
+    :class:`d33d.visual_review.ReviewVerdict`; a timeout is ``unreviewed``.
     """
-    # Lazy import: d33d.critique_protocol imports this module at load time.
-    from d33d.critique_protocol import (
-        ReviewVerdict,
-        render_view_data_uris,
-        review_render,
-    )
-
     views = await asyncio.to_thread(render_view_data_uris, render)
-    if not views:
-        return _log_unreviewed(ReviewVerdict.unreviewed("views_missing"))
     try:
         verdict = await asyncio.wait_for(
             review_render(views, request, photo or None, llm_fn=llm_fn),

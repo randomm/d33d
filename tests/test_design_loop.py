@@ -5285,6 +5285,10 @@ def test_fingerprint_vectorised_matches_reference_on_all_fixtures():
 REVIEW_FAIL_REASON = "the groove is a notch, not a through slot"
 
 
+class Boom(Exception):
+    """A review-edge exception outside every named class (issue #435)."""
+
+
 def _review_render(tmp_path: Path) -> RenderResult:
     """An ok render whose six view PNGs sit in a durable artifact dir, so
     the visual review has the images it needs."""
@@ -5402,9 +5406,10 @@ def test_review_fail_then_no_improvement_stop_keeps_visual_review_failed(tmp_pat
     "reply",
     [
         RuntimeError("provider down"),
+        Boom("unlisted"),
         _llm_result(content="looks fine to me"),
     ],
-    ids=["call-error", "unparseable"],
+    ids=["call-error", "unlisted-exception", "unparseable"],
 )
 def test_unreviewed_candidate_still_passes_without_the_flag(tmp_path, reply):
     result, _ = _run_review_loop(tmp_path, replies=[reply])

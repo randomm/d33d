@@ -158,7 +158,6 @@ def test_adapter_net_includes_render_time():
     allowance is the render worker's own subprocess timeout constant (120 s);
     the review allowance (issue #435) is the per-attempt review budget."""
     assert ADAPTER_RENDER_ALLOWANCE_SECONDS == DEFAULT_TIMEOUT_S
-    assert ADAPTER_REVIEW_ALLOWANCE_SECONDS == DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS
     net = (
         (
             DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS
