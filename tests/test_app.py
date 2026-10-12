@@ -1448,6 +1448,51 @@ def test_region_edit_fill_recut_trigger_no_loop(app_with_projects, monkeypatch):
     assert offer["diameter_mm"] == 30.0, offer
 
 
+def test_region_edit_far_pick_from_any_hole_is_point_at(app_with_projects, monkeypatch):
+    """Issue #437 (review): a viewer pick nowhere near a measured hole
+    names no hole — point-at, no Yes, no pending offer, no loop. The
+    holes are (10, 0) Ø30 and (50, 50) Ø8; the pick at (60, 10) is ~41 mm
+    from the nearer one, far outside the hole's radius."""
+    import d33d.design_loop_events as dle_mod
+    loop_calls: list[dict[str, Any]] = []
+
+    async def _fake_loop(app, pid, **kwargs):
+        loop_calls.append(kwargs)
+        yield ("done", {"message": "ok", "kind": "loop_done"})
+
+    monkeypatch.setattr(dle_mod, "run_design_loop_with_events", _fake_loop)
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "Imported Part"})
+        pid = r.json()["id"]
+        _set_part_columns(app_with_projects, pid, unit_status="settled")
+        _store_measured_holes(app_with_projects, pid)
+        r2 = await client.post(
+            f"/api/projects/{pid}/region-edits",
+            json=_region_edit_body(
+                instruction="make the big hole 38 mm",
+                hit_point_mm=[60.0, 10.0, 20.0],
+                face_normal=[0.0, 1.0, 0.0],
+            ),
+        )
+        source = app_with_projects.state.event_sources.get(pid)
+        frames = []
+        if source is not None:
+            async for event, data in source:
+                frames.append((event, data))
+                if event in ("done", "error"):
+                    break
+        return pid, r2.status_code, frames
+
+    pid, status, frames = _run_async(app_with_projects, _call)
+    assert status == 202, status
+    assert not loop_calls, f"the design loop was called: {loop_calls}"
+    done = [d for e, d in frames if e == "done"]
+    assert done, f"no done frame: {frames}"
+    assert done[0].get("fill_recut_offer") is not True, done
+    assert _svc(app_with_projects).get_pending_offer(pid) is None
+
+
 def test_region_edit_fill_recut_no_hole_no_offer(app_with_projects, monkeypatch):
     """Issue #351 — the region-edit seam reads the SAME stored hole fact
     as the chat route (operator decision 3): a part with

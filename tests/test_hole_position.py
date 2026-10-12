@@ -117,6 +117,12 @@ def test_nearest_hole_to_viewer_pick_between_holes_is_none() -> None:
     assert nearest_hole_to_point(holes, [1.0, 0.0, 0.0]) is None
 
 
+def test_nearest_hole_to_far_viewer_pick_is_none() -> None:
+    """A pick clearly nearer one hole but far from it (~52 mm) names no
+    hole \u2014 no proximity-free offer for a distant hole."""
+    assert nearest_hole_to_point(PLATE, [60.0, 10.0, 0.0]) is None
+
+
 def test_nearest_hole_to_viewer_pick_without_point_is_none() -> None:
     assert nearest_hole_to_point(PLATE, None) is None
     assert nearest_hole_to_point(PLATE, [1.0]) is None

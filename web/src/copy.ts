@@ -1186,11 +1186,6 @@ export const fillRecut = {
   noHole: (noun: string): string =>
     `I don't see a ${noun} on the part you brought — want me to drill one?`,
 
-  /** The point-at fallback (issue #396): the measured-hole selection is
-   *  ambiguous (two equally-near candidates, or no qualifier matched) —
-   *  the offer asks the user to point at the hole on the part. `dim` is
-   *  the user's stated target diameter, mono-formatted (absent when the
-   *  user didn't state a size). */
   /** The Yes-with-no-pending-offer reply (issue #437): a bare "yes" on a
    *  part with measured holes when no offer is live — point at the hole
    *  first; no loop. The backend's FRILL_POINT_FIRST_REPLY carries the
@@ -1198,6 +1193,11 @@ export const fillRecut = {
   pointFirst:
     "Point at the hole on the part first, then I'll fill it and cut a new one there.",
 
+  /** The point-at fallback (issue #396): the measured-hole selection is
+   *  ambiguous (two equally-near candidates, or no qualifier matched) —
+   *  the offer asks the user to point at the hole on the part. `dim` is
+   *  the user's stated target diameter, mono-formatted (absent when the
+   *  user didn't state a size). */
   pointAt: (dim: string | null): string =>
     dim
       ? `Point at the hole on the part and I'll fill it and cut a Ø${dim} mm one there.`

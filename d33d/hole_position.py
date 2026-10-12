@@ -21,6 +21,11 @@ from typing import Any
 #: Two best candidates closer than this (mm) are a tie → point-at.
 AMBIGUITY_MM = 1.0
 
+#: A viewer pick counts as ON a hole when its XY distance from the hole's
+#: centre is within the hole's radius plus this tolerance (mm). Further
+#: away the pick names no hole → point-at, never a Yes for a distant one.
+PICK_TOLERANCE_MM = 2.0
+
 _VERTICAL_RE = re.compile(r"\b(top|upper|bottom|lower)\b", re.IGNORECASE)
 _HORIZONTAL_RE = re.compile(r"\b(left|right)\b", re.IGNORECASE)
 _CORNER_RE = re.compile(r"\bcorner\b", re.IGNORECASE)
@@ -130,9 +135,11 @@ def nearest_hole_to_point(
     """The measured hole nearest a viewer pick (issue #437): the XY distance
     from the pick's ``[x, y, z]`` to each hole's centre (``holes`` in MM).
 
-    ``None`` when there is no usable pick, no hole with a usable centre, or
-    the two nearest holes are within :data:`AMBIGUITY_MM` (a pick between
-    two holes is a point-at, not a guess).
+    ``None`` when there is no usable pick, no hole with a usable centre, the
+    two nearest holes are within :data:`AMBIGUITY_MM` (a pick between two
+    holes is a point-at, not a guess), or the nearest hole's centre is more
+    than its radius + :data:`PICK_TOLERANCE_MM` away (the pick is not on a
+    hole at all).
     """
     if not isinstance(point, (list, tuple)) or len(point) < 2:
         return None
@@ -153,11 +160,19 @@ def nearest_hole_to_point(
     ranked.sort(key=lambda r: r[0])
     if len(ranked) > 1 and ranked[1][0] - ranked[0][0] < AMBIGUITY_MM:
         return None
-    return ranked[0][1]
+    distance, best = ranked[0]
+    try:
+        radius = float(best.get("diameter_mm") or 0.0) / 2.0
+    except (TypeError, ValueError):
+        radius = 0.0
+    if not math.isfinite(radius) or distance > radius + PICK_TOLERANCE_MM:
+        return None
+    return best
 
 
 __all__ = [
     "AMBIGUITY_MM",
+    "PICK_TOLERANCE_MM",
     "nearest_hole_to_point",
     "positional_words",
     "select_positional_hole",
