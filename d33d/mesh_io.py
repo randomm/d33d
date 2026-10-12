@@ -42,7 +42,7 @@ def load_mesh(path: str) -> Any | None:
         # only the path's BASENAME is logged — never the full path
         # (issue #356's host-path-disclosure convention).
         logger.warning(
-            "unchanged-mesh check: failed to load %r", p.name, exc_info=True
+            "mesh load failed: %r", p.name, exc_info=True
         )
         return None
 
