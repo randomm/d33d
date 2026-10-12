@@ -37,6 +37,7 @@ import itertools
 import logging
 import math
 import re
+from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
 
@@ -419,6 +420,8 @@ def stack_height_threshold(declared: float) -> float:
 def stack_height_check(
     scad_source: str,
     measured_z: float | None,
+    *,
+    on_pass: Callable[[], None] | None = None,
 ) -> tuple[float, float] | None:
     """The stack-height post-check (issue #409).
 
@@ -447,4 +450,6 @@ def stack_height_check(
     measured = float(measured_z)
     if abs(declared - measured) > stack_height_threshold(declared):
         return (declared, measured)
+    if on_pass is not None:
+        on_pass()
     return None

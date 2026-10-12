@@ -283,7 +283,7 @@ export const passCard = {
   checksPassed: (count: number): string => `${count} checks`,
 
   /** Issue #435: the short word for each check the server reports as run
-   *  (the closed keys of d33d/pass_checks.py). Only checks that executed are
+   *  (the keys the design loop records in DesignResult.checks_run). Only checks that executed are
    *  listed; a key with no word here is never shown. */
   checkWords: {
     size: "size",

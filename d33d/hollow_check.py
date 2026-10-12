@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Callable
 from typing import Any
 
 from d33d.mesh_io import load_mesh, mesh_volume
@@ -26,7 +27,6 @@ __all__ = [
     "HOLLOW_INSTRUCTION",
     "HOLLOW_RATIO",
     "HOLLOW_SOLID_REASON",
-    "hollow_check_ran",
     "hollow_solid_check",
     "is_hollow_request",
 ]
@@ -74,20 +74,16 @@ def _bbox_volume(mesh: Any) -> float | None:
     return vol if vol > 0 else None
 
 
-def hollow_check_ran(request: str, stl: str | None) -> bool:
-    """Issue #435: did :func:`hollow_solid_check` EXECUTE (not abstain or
-    exempt)? True when the request is not exempt and the STL loads."""
-    if is_hollow_request(request):
-        return False
-    if not stl:
-        return False
-    return load_mesh(stl) is not None
-
-
-def hollow_solid_check(request: str, stl: str | None) -> tuple[str, str] | None:
+def hollow_solid_check(
+    request: str,
+    stl: str | None,
+    *,
+    on_pass: Callable[[], None] | None = None,
+) -> tuple[str, str] | None:
     """``(evidence, instruction)`` when the rendered solid is near-hollow
     and the request is not exempt; ``None`` when the check passes or
-    abstains."""
+    abstains. ``on_pass`` (issue #435) is called only when the check ran
+    and the solid passed — never on an exempt or abstaining call."""
     if is_hollow_request(request):
         return None
     if not stl:
@@ -107,6 +103,8 @@ def hollow_solid_check(request: str, stl: str | None) -> tuple[str, str] | None:
         return None
     ratio = solid / box
     if ratio >= HOLLOW_RATIO:
+        if on_pass is not None:
+            on_pass()
         return None
     evidence = (
         f"solid volume {solid:,.0f} mm³ is {ratio * 100:.1f}% of the "

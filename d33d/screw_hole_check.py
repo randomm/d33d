@@ -21,6 +21,7 @@ no new class, no new dict shape) and routes it through the same
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 from d33d.design_loop import UNDERSIZE_EPSILON_MM
@@ -33,7 +34,6 @@ from d33d.design_prompts import (
 __all__ = [
     "is_screw_hole_candidate",
     "mm",
-    "screw_check_ran",
     "undersize_screw_hole",
 ]
 
@@ -134,25 +134,12 @@ def _screw_scope(
     return sizes, candidates
 
 
-def screw_check_ran(
-    request: str,
-    params: dict[str, float],
-    param_meta: dict[str, Any],
-) -> bool:
-    """Issue #435: did the screw-hole check EXECUTE on this candidate?
-
-    True only when the check applies AND exactly one candidate param exists
-    (the check decides on one param; zero or several abstain). Used to list
-    ``screw_clearance`` on a pass only when it actually ran.
-    """
-    scope = _screw_scope(request, params, param_meta)
-    return scope is not None and len(scope[1]) == 1
-
-
 def undersize_screw_hole(
     request: str,
     params: dict[str, float],
     param_meta: dict[str, Any],
+    *,
+    on_pass: Callable[[], None] | None = None,
 ) -> tuple[str, float, float, str] | None:
     """The deterministic screw-hole clearance post-check (issue #317).
 
@@ -203,8 +190,12 @@ def undersize_screw_hole(
             )
             undersize.append((size, value, clearance, label))
     if len(undersize) != 1:
-        # Zero: nothing to repair.  More than one (two hole params, or
-        # two named screw sizes): the check cannot identify the param
-        # confidently — it does nothing, never a false repair.
+        # Zero: nothing to repair — the check decided on the one candidate
+        # and passed (issue #435: reported via ``on_pass`` only then).
+        # More than one (two hole params, or two named screw sizes): the
+        # check cannot identify the param confidently — it abstains, never
+        # a false repair, and reports nothing.
+        if not undersize and len(candidates) == 1 and on_pass is not None:
+            on_pass()
         return None
     return undersize[0]

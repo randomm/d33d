@@ -461,9 +461,11 @@ class DesignResult:
     #: pass (non-vision tier, call error, unparseable reply, timeout) and on
     #: every non-pass outcome — the pass card says "not visually reviewed".
     visually_reviewed: bool = False
-    #: Issue #435: the closed, ordered keys (:data:`d33d.pass_checks.CHECK_KEYS`)
-    #: of the checks that EXECUTED on the kept pass candidate. An abstaining
-    #: post-check is never listed. Empty on every non-pass outcome.
+    #: Issue #435: the checks that EXECUTED AND PASSED on the kept pass
+    #: candidate, in execution order (size, watertight, screw_clearance,
+    #: through_holes, stack_height, change_detected, hollow). Each post-check
+    #: reports itself at its own pass point, so an abstaining check is never
+    #: listed. Empty on every non-pass outcome.
     checks_run: tuple[str, ...] = ()
 
 
@@ -1121,6 +1123,8 @@ def _through_hole_post_check(
     through_baseline_genus: int | None,
     scad_source: str,
     through_baseline_genus_source: str | None = None,
+    *,
+    on_pass: Callable[[], None] | None = None,
 ) -> tuple[str, str] | None:
     """Issue #386: the through-hole genus post-check (deferred-import
     wrapper, the #317 pattern).
@@ -1142,6 +1146,7 @@ def _through_hole_post_check(
         through_baseline_genus,
         scad_source,
         through_baseline_genus_source,
+        on_pass=on_pass,
     )
 
 
@@ -1149,6 +1154,8 @@ def _undersize_screw_hole(
     request: str,
     params: dict[str, float],
     param_meta: dict[str, Any],
+    *,
+    on_pass: Callable[[], None] | None = None,
 ) -> tuple[str, float, float, str] | None:
     """Issue #317: the deterministic screw-hole clearance post-check.
 
@@ -1161,7 +1168,7 @@ def _undersize_screw_hole(
     design_prompts → design_loop)."""
     from d33d.screw_hole_check import undersize_screw_hole
 
-    return undersize_screw_hole(request, params, param_meta)
+    return undersize_screw_hole(request, params, param_meta, on_pass=on_pass)
 
 
 def _mm(value: float) -> str:
@@ -1197,6 +1204,7 @@ def _unchanged_mesh_post_check(
     parent_fingerprint: tuple[str, int] | None = None,
     parent_volume_mm3: float | None = None,
     parent_face_count: int | None = None,
+    on_pass: Callable[[], None] | None = None,
 ) -> tuple[str, str] | None:
     """Issue #419: the unchanged-mesh post-check (deferred-import wrapper,
     the #317 pattern).
@@ -1222,12 +1230,15 @@ def _unchanged_mesh_post_check(
         parent_fingerprint=parent_fingerprint,
         parent_volume_mm3=parent_volume_mm3,
         parent_face_count=parent_face_count,
+        on_pass=on_pass,
     )
 
 
 def _stack_height_post_check(
     scad_source: str,
     measured_z: float | None,
+    *,
+    on_pass: Callable[[], None] | None = None,
 ) -> tuple[float, float] | None:
     """Issue #409: the stack-height post-check (deferred-import wrapper,
     the #317 pattern).
@@ -1241,7 +1252,7 @@ def _stack_height_post_check(
     """
     from d33d.stack_height_check import stack_height_check
 
-    return stack_height_check(scad_source, measured_z)
+    return stack_height_check(scad_source, measured_z, on_pass=on_pass)
 
 
 def _scad_params(scad_source: str) -> dict[str, float]:
@@ -2201,6 +2212,16 @@ async def run_design_loop_async(
             part_scale=part_scale,
         )
 
+        # Issue #435: the checks that executed and passed on THIS candidate,
+        # in execution order. The gate bits are recorded here; each post-check
+        # appends its key from its own pass point (``on_pass``), never on an
+        # abstain. Only a pass return reads this list.
+        _checks_ran: list[str] = []
+        if bbox is not None and not candidate_score.bbox_abstained:
+            _checks_ran.append("size")
+        if render.error_class == "ok":
+            _checks_ran.append("watertight")
+
         # Failure routing: tagged, structured, NEVER terminal. Compile
         # failures are a low-scoring iteration, not a loop stop.
         failure_class: str | None = None
@@ -2342,7 +2363,10 @@ async def run_design_loop_async(
         _screw_repair_fired = False
         if render.error_class == "ok" and next_repair is None:
             _screw_det = _undersize_screw_hole(
-                request, _scad_params(scad_source), extract_param_meta(scad)
+                request,
+                _scad_params(scad_source),
+                extract_param_meta(scad),
+                on_pass=lambda _ran=_checks_ran: _ran.append("screw_clearance"),
             )
             if _screw_det is not None:
                 _size, _val, _clr, _lbl = _screw_det
@@ -2401,6 +2425,7 @@ async def run_design_loop_async(
                 through_baseline_genus,
                 scad_source,
                 through_baseline_genus_source,
+                on_pass=lambda _ran=_checks_ran: _ran.append("through_holes"),
             )
             if _through_routed is not None:
                 _evidence, _instruction = _through_routed
@@ -2435,7 +2460,11 @@ async def run_design_loop_async(
             and not _through_repair_fired
             and part_scale is None
         ):
-            _stack_det = _stack_height_post_check(scad_source, bbox.z if bbox else None)
+            _stack_det = _stack_height_post_check(
+                scad_source,
+                bbox.z if bbox else None,
+                on_pass=lambda _ran=_checks_ran: _ran.append("stack_height"),
+            )
             if _stack_det is not None:
                 _declared, _measured = _stack_det
                 _evidence = (
@@ -2494,6 +2523,7 @@ async def run_design_loop_async(
                 parent_fingerprint,
                 parent_volume_mm3,
                 parent_face_count,
+                on_pass=lambda _ran=_checks_ran: _ran.append("change_detected"),
             )
             if _unchanged_det is not None:
                 _evidence, _instruction = _unchanged_det
@@ -2532,7 +2562,10 @@ async def run_design_loop_async(
             and part_scale is None
         ):
             _hollow_det = await asyncio.to_thread(
-                hollow_solid_check, request, render.stl
+                hollow_solid_check,
+                request,
+                render.stl,
+                on_pass=lambda _ran=_checks_ran: _ran.append("hollow"),
             )
             if _hollow_det is not None:
                 _evidence, _instruction = _hollow_det
@@ -2623,22 +2656,6 @@ async def run_design_loop_async(
             and _center_finding is None
             and not _review_failed
         ):
-            from d33d.pass_checks import checks_that_ran
-
-            _ran = await asyncio.to_thread(
-                checks_that_ran,
-                request=request,
-                stl=render.stl,
-                render_ok=render.error_class == "ok",
-                bbox=bbox,
-                bbox_abstained=candidate_score.bbox_abstained,
-                scad_source=scad_source,
-                params=_scad_params(scad_source),
-                param_meta=extract_param_meta(scad),
-                part_scale=part_scale,
-                parent_mesh_stl=parent_mesh_stl,
-                through_baseline_genus=through_baseline_genus,
-            )
             return DesignResult(
                 status="pass",
                 best=record,
@@ -2646,7 +2663,7 @@ async def run_design_loop_async(
                 failure_reason=None,
                 iterations_used=iteration,
                 visually_reviewed=_visually_reviewed,
-                checks_run=_ran,
+                checks_run=tuple(_checks_ran),
             )
 
         if best is None or is_best(candidate_score, best_score):
