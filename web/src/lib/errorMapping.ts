@@ -99,6 +99,8 @@ export const FAILURE_REASONS = [
   "through_hole_missing",
   "screw_clearance_wrong",
   "stack_height_mismatch",
+  // Issue #436: the near-hollow post-check (d33d/hollow_check.py).
+  "hollow_solid",
 ] as const;
 
 /** A loop-level reason code; `tsc` checks any `Record<FailureReason, …>` is total. */

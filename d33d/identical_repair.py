@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from d33d.evals.failure_capture import POST_CHECK_REASONS
+from d33d.post_check_reasons import POST_CHECK_REASONS
 
 if TYPE_CHECKING:
     from d33d.design_loop import IterationRecord

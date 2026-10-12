@@ -288,39 +288,55 @@ def test_declared_stack_sum_no_declaration_line_abstains():
 # ---------------------------------------------------------------------------
 
 
-def test_stack_height_check_threshold_is_disagrees_major():
-    """The threshold is ``max(20% of declared, 5 mm)`` — the same pair
-    as bit 5. Declared 11: threshold 5 mm; a diff strictly greater than
-    5 fires, exactly 5 passes."""
+def test_stack_height_check_threshold_is_max_10pct_or_half_mm():
+    """Issue #436: the threshold is ``max(10% of declared, 0.5 mm)``, its
+    own pair (not bit 5's). Declared 11: threshold 1.1 mm; a diff strictly
+    greater than 1.1 fires, exactly 1.1 passes."""
     scad = (
         "a = 6;\nb = 5;\n"
         "total_height = a + b;\n"
         "cube([a, a, a]);\n"
     )
-    # 11 vs 6.0 → diff 5.0, AT the threshold (max(2.2, 5) = 5) → pass.
-    assert stack_height_check(scad, 6.0) is None
-    # 11 vs 5.9 → diff 5.1 > 5 → fire.
-    det = stack_height_check(scad, 5.9)
-    assert det is not None and det == (11.0, 5.9)
-    # 11 vs 16.0 → diff 5.0 → pass (symmetric).
-    assert stack_height_check(scad, 16.0) is None
-    # 11 vs 16.1 → diff 5.1 > 5 → fire.
-    det = stack_height_check(scad, 16.1)
-    assert det is not None and det == (11.0, 16.1)
+    # 11 vs 9.9 → diff 1.1, AT the threshold (max(1.1, 0.5)) → pass.
+    assert stack_height_check(scad, 9.9) is None
+    # 11 vs 9.8 → diff 1.2 > 1.1 → fire.
+    det = stack_height_check(scad, 9.8)
+    assert det is not None and det == (11.0, 9.8)
+    # 11 vs 12.1 → diff 1.1 → pass (symmetric).
+    assert stack_height_check(scad, 12.1) is None
+    # 11 vs 12.2 → diff 1.2 > 1.1 → fire.
+    det = stack_height_check(scad, 12.2)
+    assert det is not None and det == (11.0, 12.2)
 
 
-def test_stack_height_check_small_stack_uses_relative_threshold():
-    """For a small stack (declared 20), 20% = 4 < 5 — the 5 mm floor
-    still wins; for declared 50, 20% = 10 > 5 — the relative threshold
-    wins (a diff of 8 mm passes: 8 ≤ 10)."""
-    scad_small = "a = 10;\nb = 10;\ntotal_height = a + b;\ncube([a, a, a]);\n"
-    assert stack_height_check(scad_small, 16.0) is None  # diff 4 ≤ 5
-    det = stack_height_check(scad_small, 14.9)
-    assert det is not None  # diff 5.1 > 5
+def test_stack_height_check_half_mm_floor_on_small_stack():
+    """Issue #436 boundary: for a small stack (declared 4), 10% = 0.4 < 0.5,
+    so the 0.5 mm floor applies. Diff 0.5 passes; 0.51 fires."""
+    scad_small = "a = 2;\nb = 2;\ntotal_height = a + b;\ncube([a, a, a]);\n"
+    assert stack_height_check(scad_small, 3.5) is None  # diff 0.5
+    det = stack_height_check(scad_small, 3.49)
+    assert det is not None  # diff 0.51 > 0.5
+
+
+def test_stack_height_check_relative_threshold_on_large_stack():
+    """For declared 50, 10% = 5 > 0.5 mm: the relative threshold wins (a
+    diff of 5 passes; 5.1 fires)."""
     scad_big = "a = 25;\nb = 25;\ntotal_height = a + b;\ncube([a, a, a]);\n"
-    assert stack_height_check(scad_big, 42.0) is None  # diff 8 ≤ 10
-    det = stack_height_check(scad_big, 39.9)
-    assert det is not None  # diff 10.1 > 10
+    assert stack_height_check(scad_big, 45.0) is None  # diff 5
+    det = stack_height_check(scad_big, 44.9)
+    assert det is not None  # diff 5.1 > 5
+
+
+def test_stack_height_check_v111_lid_fires():
+    """Issue #436: the v111 lid declares 3.5 but renders 2.5 (the rim strips
+    were discarded). Diff 1.0 > 0.5 fires; the correct lid (3.5 vs 3.5)
+    passes."""
+    broken = _scad("v111-lid-strips.scad")
+    assert declared_stack_sum(broken) is not None
+    assert declared_stack_sum(broken)[0] == 3.5
+    assert stack_height_check(broken, 2.5) == (3.5, 2.5)
+    correct = _scad("lid-plate-correct.scad")
+    assert stack_height_check(correct, 3.5) is None
 
 
 def test_stack_height_check_no_measured_z_abstains():
@@ -365,9 +381,10 @@ def test_correct_lid_fixture_declared_stack_is_eleven():
     [
         (4.0, (11.0, 4.0)),  # the v65 render — fires
         (11.0, None),  # the correct lid — passes
-        (6.0, None),  # diff 5, at the threshold — passes
-        (16.0, None),  # diff 5, at the threshold — passes
-        (16.1, (11.0, 16.1)),  # diff 5.1 — fires
+        (9.9, None),  # diff 1.1, at the threshold — passes
+        (12.1, None),  # diff 1.1, at the threshold — passes
+        (9.8, (11.0, 9.8)),  # diff 1.2 — fires
+        (12.2, (11.0, 12.2)),  # diff 1.2 — fires
         (None, None),  # no mesh — abstains
     ],
 )

@@ -62,24 +62,15 @@ from typing import Any
 
 from pydantic import BaseModel, Field, ValidationError
 
-from d33d.unchanged_mesh_check import MESH_UNCHANGED_REASON
-
-# Issue #432: loop-level reasons for the deterministic post-checks. Each
-# rides the existing ``geometrically_wrong`` class on the iteration's repair
-# (no new class, no new error_class). This module is their ONLY Python
-# source; the design loop imports them from here.
-THROUGH_HOLE_REASON = "through_hole_missing"
-SCREW_CLEARANCE_REASON = "screw_clearance_wrong"
-STACK_HEIGHT_REASON = "stack_height_mismatch"
-
-#: Every post-check repair reason the loop surfaces as a terminal reason.
-POST_CHECK_REASONS: frozenset[str] = frozenset(
-    {
-        MESH_UNCHANGED_REASON,
-        THROUGH_HOLE_REASON,
-        SCREW_CLEARANCE_REASON,
-        STACK_HEIGHT_REASON,
-    }
+# The post-check reason constants live in the neutral ``d33d.post_check_reasons``
+# module; they are re-exported here so existing import paths keep working.
+from d33d.post_check_reasons import (
+    HOLLOW_SOLID_REASON,
+    MESH_UNCHANGED_REASON,
+    POST_CHECK_REASONS,
+    SCREW_CLEARANCE_REASON,
+    STACK_HEIGHT_REASON,
+    THROUGH_HOLE_REASON,
 )
 
 #: The closed enum of failure classes a failures.jsonl line may carry.
@@ -768,10 +759,16 @@ __all__ = [
     "DEFAULT_FAILURES_FILENAME",
     "EVAL_FAILURE_CLASSES",
     "GATE_REASON_CLASSES",
+    "HOLLOW_SOLID_REASON",
     "LOOP_LEVEL_FAILURE_REASONS",
     "MAX_LINE_BYTES",
     "MAX_OUTPUT_SCAD_CHARS",
+    "MESH_UNCHANGED_REASON",
+    "POST_CHECK_REASONS",
     "RENDER_WORKER_CLASSES",
+    "SCREW_CLEARANCE_REASON",
+    "STACK_HEIGHT_REASON",
+    "THROUGH_HOLE_REASON",
     "FailureEvent",
     "append_failure_line",
     "default_failures_path",

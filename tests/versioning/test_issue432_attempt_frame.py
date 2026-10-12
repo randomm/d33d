@@ -15,6 +15,7 @@ POST_CHECK = (
     "through_hole_missing",
     "screw_clearance_wrong",
     "stack_height_mismatch",
+    "hollow_solid",
 )
 
 

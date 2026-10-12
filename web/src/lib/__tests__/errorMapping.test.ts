@@ -64,6 +64,8 @@ const LOOP_FAILURE_REASONS = [
   "through_hole_missing",
   "screw_clearance_wrong",
   "stack_height_mismatch",
+  // Issue #436: the near-hollow post-check.
+  "hollow_solid",
 ];
 
 const CLOSED_SET = [...GATE_REASON_BITS, ...ERROR_CLASSES, ...LOOP_FAILURE_REASONS];

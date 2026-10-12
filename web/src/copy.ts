@@ -22,7 +22,8 @@ export type PostCheckReason =
   | "mesh_unchanged"
   | "through_hole_missing"
   | "screw_clearance_wrong"
-  | "stack_height_mismatch";
+  | "stack_height_mismatch"
+  | "hollow_solid";
 
 /** "try" for one, "tries" otherwise (issue #432). */
 const triesWord = (attempts: number): string => (attempts === 1 ? "try" : "tries");
@@ -496,6 +497,8 @@ export const failure = {
       `A screw hole was still smaller than its clearance after ${attempts} ${triesWord(attempts)} — the screw won't fit.`,
     stack_height_mismatch: (attempts: number): string =>
       `The stacked parts still don't add up to the height you asked for after ${attempts} ${triesWord(attempts)}.`,
+    hollow_solid: (attempts: number): string =>
+      `The part is still almost hollow after ${attempts} ${triesWord(attempts)} — most of the solid is missing.`,
   } satisfies Record<PostCheckReason, (attempts: number) => string>,
   /** The renderer image pre-flight disclosure (issue #346): the fault
    *  line naming the verified reason (image missing vs label mismatch).
@@ -563,6 +566,7 @@ export const failure = {
       "A screw hole is smaller than its clearance — the screw won't fit.",
     stack_height_mismatch:
       "The stacked parts don't add up to the height you asked for.",
+    hollow_solid: "The part is almost hollow — most of the solid is missing.",
     empty_model: "The design produced an empty model — there is nothing to print.",
     artifact_error: "The model file came out unreadable.",
     timeout: "The render ran out of time. A simpler shape will get through.",

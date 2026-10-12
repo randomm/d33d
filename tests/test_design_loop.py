@@ -3539,12 +3539,12 @@ def test_stack_height_direct_check_contract():
     assert _check("W = 20;\ncube([W, W, W]);\n", 20.0) is None
     # Abstains: no measured Z.
     assert _check(v65, None) is None
-    # At the threshold (diff 5, exactly max(20%, 5)): passes.
-    assert _check(v65, 6.0) is None
-    assert _check(v65, 16.0) is None
-    # Just over the threshold (diff 5.1): fires.
-    det = _check(v65, 16.1)
-    assert det is not None and det == (11.0, 16.1)
+    # At the threshold (diff 1.1, exactly max(10%, 0.5) of 11): passes.
+    assert _check(v65, 9.9) is None
+    assert _check(v65, 12.1) is None
+    # Just over the threshold (diff 1.2): fires.
+    det = _check(v65, 12.2)
+    assert det is not None and det == (11.0, 12.2)
 
 
 def test_stack_height_repair_scad_source_equals_iteration_scad():

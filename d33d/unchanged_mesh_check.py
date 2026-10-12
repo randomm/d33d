@@ -59,6 +59,9 @@ from typing import Any
 
 import numpy as np
 
+from d33d.mesh_io import load_mesh, mesh_volume
+from d33d.post_check_reasons import MESH_UNCHANGED_REASON
+
 logger = logging.getLogger(__name__)
 
 __all__ = [
@@ -66,7 +69,9 @@ __all__ = [
     "UNCHANGED_INSTRUCTION",
     "fingerprint_from_rounded_vertices",
     "fingerprint_stl",
+    "load_mesh",
     "mesh_fingerprint",
+    "mesh_volume",
     "unchanged_mesh_check",
 ]
 
@@ -90,15 +95,6 @@ _VOLUME_REL_TOL = 0.001
 #: itself — the floor keeps the epsilon from vanishing.
 _VOLUME_ABS_FLOOR_MM3 = 0.1
 
-
-#: The structured reason the design loop's unchanged-mesh post-check
-#: fires: the candidate's rendered mesh is GEOMETRICALLY identical to
-#: the parent's (issue #419). The single name of the fired-check reason
-#: — the check module owns the detection, :data:`UNCHANGED_INSTRUCTION`
-#: owns the fix, and this constant owns the reason the loop's repair
-#: dict, ``_exhausted``'s reason swap, the failure archive's vocabulary
-#: and the adapter's version-skip all compare against.
-MESH_UNCHANGED_REASON = "mesh_unchanged"
 
 #: The repair instruction the loop carries to the next iteration when
 #: the check fires (issue #419): the candidate's rendered mesh is
@@ -184,7 +180,7 @@ def fingerprint_stl(path: str | None) -> tuple[str, int] | None:
     unreadable file, or an empty mesh)."""
     if path is None:
         return None
-    mesh = _load_mesh(path)
+    mesh = load_mesh(path)
     if mesh is None:
         return None
     try:
@@ -196,46 +192,6 @@ def fingerprint_stl(path: str | None) -> tuple[str, int] | None:
             Path(path).name,
             exc_info=True,
         )
-        return None
-
-
-def _load_mesh(path: str) -> Any | None:
-    """Load the STL at ``path`` (module docstring: the load shape).
-
-    ``None`` on any load failure — the caller abstains (a fabricated
-    baseline would make the gate lie).
-    """
-    if not path or not isinstance(path, str):
-        return None
-    p = Path(path)
-    if not p.is_file():
-        return None
-    try:
-        import trimesh
-
-        return trimesh.load(str(p), process=False, force="mesh")
-    except Exception:
-        # Missing file, unreadable bytes, or any trimesh parse failure
-        # (struct.error / IndexError on a malformed STL included) —
-        # any load failure → abstain, never a raise. The exception is
-        # logged with its traceback (the ``genus_from_stl`` pattern) and
-        # only the path's BASENAME is logged — never the full path
-        # (issue #356's host-path-disclosure convention).
-        logger.warning(
-            "unchanged-mesh check: failed to load %r", p.name, exc_info=True
-        )
-        return None
-
-
-def _volume(mesh: Any) -> float | None:
-    """The mesh's signed volume (module docstring: the sanity leg).
-
-    ``None`` when the volume cannot be read (the caller abstains on
-    the volume leg — the fingerprint comparison is the primary signal).
-    """
-    try:
-        return float(mesh.volume)
-    except (ValueError, TypeError, RuntimeError, IndexError, ZeroDivisionError):
         return None
 
 
@@ -264,7 +220,7 @@ def unchanged_mesh_check(
     if parent_fingerprint is not None:
         parent_fp = parent_fingerprint
     elif parent_stl is not None:
-        parent = _load_mesh(parent_stl)
+        parent = load_mesh(parent_stl)
         if parent is not None:
             parent_fp = mesh_fingerprint(parent)
     if parent_fp is None:
@@ -272,13 +228,13 @@ def unchanged_mesh_check(
 
     if candidate_stl is None or not isinstance(candidate_stl, str) or not candidate_stl:
         return None
-    candidate = _load_mesh(candidate_stl)
+    candidate = load_mesh(candidate_stl)
     if candidate is None:
         return None
     candidate_fp = mesh_fingerprint(candidate)
     if candidate_fp is None:
         return None
-    candidate_vol = _volume(candidate)
+    candidate_vol = mesh_volume(candidate)
 
     # -- Leg 1 (primary): the geometry fingerprint (the exact vertex
     # set). ANY real geometric change, however small, changes the

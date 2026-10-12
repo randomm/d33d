@@ -45,9 +45,22 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+# CENTER_VECTOR_RE matches a vector ``center=[…]`` argument (issue #269
+# follow-up: OpenSCAD's ``center`` is a single boolean; a vector is silently
+# ignored, leaving the geometry uncentred). The d33d scanner is used directly.
+from d33d.scad_center_check import (
+    CENTER_VECTOR_RE,
+    find_primitive_calls,
+    strip_comments_and_strings,
+)
 from tests.slow.test_render_views import _marker_scad
 
 FIXTURES_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "scad"
+
+# Issue #436: the negative fixture for the wrong-typed ``center=[...]`` check.
+# It must carry the vector argument (the check is what fails it), so the
+# fixture scan skips it; ``tests/fast/test_scad_center_check.py`` pins it.
+_INTENTIONALLY_BROKEN_FIXTURES = frozenset({"groove-center-vector.scad"})
 
 # The three primitives that have no ``v``/vector-``center`` parameter.
 _PRIM_RE = re.compile(r"\b(cube|cylinder|sphere)\s*\(")
@@ -56,11 +69,6 @@ _PRIM_RE = re.compile(r"\b(cube|cylinder|sphere)\s*\(")
 # ensuring the preceding char is not part of a longer identifier, e.g.
 # ``xv=`` or ``$v=`` — the ``v`` is not at the start of a real identifier).
 _V_ARG_RE = re.compile(r"(?<![\w$])v\s*=")
-
-# A vector ``center=[…]`` argument (issue #269 follow-up: OpenSCAD's
-# ``center`` is a single boolean; a vector is silently ignored, leaving
-# the geometry uncentred — the exact bug the #269 fix was for).
-_CENTER_VECTOR_RE = re.compile(r"(?<![\w$])center\s*=\s*\[")
 
 # The five feature lines of ``_marker_scad()`` that issue #269 requires to
 # be ``translate()``-based. Each entry is ``(feature name, a regex that must
@@ -99,94 +107,6 @@ _MARKER_FEATURES: tuple[tuple[str, re.Pattern[str]], ...] = (
 )
 
 
-def _strip_comments_and_strings(text: str) -> str:
-    """Strip line comments (SCAD's ``//`` and Python's ``#``) and
-    (single- or triple-)quoted string bodies from SCAD/Python source,
-    preserving line structure.
-
-    The guard only cares about real geometry calls; a ``v=`` or
-    ``center=[…`` that appears inside a comment or a docstring must not be
-    flagged (and must not break the paren-depth call join). Replacing the
-    characters (rather than deleting them) keeps line numbers and offsets
-    aligned with the original text so reported line numbers stay correct.
-    """
-    out: list[str] = []
-    i = 0
-    n = len(text)
-    while i < n:
-        c = text[i]
-        # Line comment (``#`` in Python, ``//`` in SCAD): everything from
-        # the marker to end of line is stripped. A comment marker inside a
-        # string is handled by the string branch first (which runs before
-        # this one for the opening quote).
-        if c == "#" or (c == "/" and text[i + 1 : i + 2] == "/"):
-            j = text.find("\n", i)
-            if j == -1:
-                j = n
-            out.append(" " * (j - i))
-            i = j
-        # Triple-quoted string (docstrings, embedded SCAD strings).
-        elif c in "\"'" and text[i : i + 3] == c * 3:
-            quote = c * 3
-            j = text.find(quote, i + 3)
-            if j == -1:
-                j = n - 3
-            else:
-                j += 2  # keep the closing delimiter's position sane
-            out.append(" " * (j - i))
-            i = j + 3
-        # Single-line string (single or double quoted).
-        elif c in "\"'":
-            quote = c
-            j = i + 1
-            while j < n and text[j] != quote and text[j] != "\n":
-                j += 1
-            out.append(" " * (j - i))
-            i = j
-        else:
-            out.append(c)
-            i += 1
-    return "".join(out)
-
-
-def _find_primitive_calls(text: str) -> list[tuple[int, str]]:
-    """Return ``(start_line, call_text)`` for each ``cube``/``cylinder``/
-    ``sphere`` call in ``text``, joining the call across line breaks by
-    tracking paren depth from the primitive's opening ``(`` to its matching
-    ``)``.
-
-    The call text includes the matched primitive name and its full argument
-    list (up to and including the closing paren). Comments and strings are
-    stripped first so a ``#`` or quote inside the call cannot confuse the
-    depth counter. ``start_line`` is the 1-indexed line of the primitive
-    name in the (comment/string-stripped) text — which is line-aligned with
-    the original.
-    """
-    calls: list[tuple[int, str]] = []
-    for m in _PRIM_RE.finditer(text):
-        open_paren = text.index("(", m.start())
-        depth = 0
-        j = open_paren
-        n = len(text)
-        while j < n:
-            ch = text[j]
-            if ch == "(":
-                depth += 1
-            elif ch == ")":
-                depth -= 1
-                if depth == 0:
-                    break
-            j += 1
-        if depth != 0:
-            # Unbalanced (should not happen in valid SCAD); take to EOL.
-            j = text.find("\n", open_paren)
-            if j == -1:
-                j = n
-        start_line = text.count("\n", 0, m.start()) + 1
-        calls.append((start_line, text[m.start() : j + 1]))
-    return calls
-
-
 def _scan_source(text: str) -> list[tuple[int, str]]:
     """Return ``(line_no, snippet)`` pairs for every primitive call in
     ``text`` that contains a ``v=`` argument OR a vector ``center=[…]``
@@ -197,10 +117,10 @@ def _scan_source(text: str) -> list[tuple[int, str]]:
     before a ``cube(…)`` on the same physical line is NOT flagged (it is not
     part of the ``cube`` call).
     """
-    stripped = _strip_comments_and_strings(text)
+    stripped = strip_comments_and_strings(text)
     hits: list[tuple[int, str]] = []
-    for start_line, call_text in _find_primitive_calls(stripped):
-        if _V_ARG_RE.search(call_text) or _CENTER_VECTOR_RE.search(call_text):
+    for start_line, call_text in find_primitive_calls(stripped, _PRIM_RE):
+        if _V_ARG_RE.search(call_text) or CENTER_VECTOR_RE.search(call_text):
             hits.append((start_line, call_text.replace("\n", " ").strip()))
     return hits
 
@@ -246,6 +166,8 @@ def test_no_v_arg_in_scad_fixtures() -> None:
     )
     all_hits: list[tuple[str, int, str]] = []
     for scad in sorted(FIXTURES_DIR.glob("*.scad")):
+        if scad.name in _INTENTIONALLY_BROKEN_FIXTURES:
+            continue
         text = scad.read_text(encoding="utf-8")
         for lineno, snippet in _scan_source(text):
             all_hits.append((scad.name, lineno, snippet))
@@ -375,10 +297,6 @@ def test_guard_strips_comments_and_strings() -> None:
     # A string literal containing a cube( with v= must not be flagged:
     assert (
         _scan_source('echo("cube([1,1,1], v=[0,0,0]);");')
-    ) == []
-    # A triple-quoted Python docstring containing v= must not be flagged:
-    assert (
-        _scan_source('"""\n cube(v=[0,0,0])\n """')
     ) == []
 
 
