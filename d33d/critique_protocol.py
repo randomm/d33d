@@ -45,6 +45,7 @@ import inspect
 import json
 import logging
 import re
+import sqlite3
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -920,14 +921,19 @@ async def review_render(
         logger.warning("visual review call failed: %s", exc)
         return ReviewVerdict.unreviewed("call_error")
     except (
-        httpx.HTTPError,
         OSError,
         RuntimeError,
         ValueError,
         TypeError,
         KeyError,
+        LookupError,
+        AttributeError,
+        sqlite3.Error,
+        httpx.HTTPError,
     ) as exc:
-        # The call edge's transport / parse failures degrade to unreviewed.
+        # Transport, parse, and request-log storage failures on the edge all
+        # degrade to unreviewed. CancelledError and the loop's own timeout are
+        # not in this tuple and still propagate.
         logger.warning("visual review call failed: %s", exc)
         return ReviewVerdict.unreviewed("call_error")
     parsed = parse_review(result)

@@ -659,6 +659,17 @@ def test_review_render_call_error_is_unreviewed():
     assert verdict == ReviewVerdict(status="unreviewed", why="call_error")
 
 
+def test_review_render_any_call_side_exception_is_unreviewed():
+    # The request-log write on the edge can raise a sqlite3.Error, which is
+    # not an httpx/OSError/RuntimeError/ValueError/TypeError/KeyError. The
+    # review must still degrade to unreviewed, never abort the design run.
+    import sqlite3
+
+    llm, _ = _scripted_review_llm(sqlite3.OperationalError("database is locked"))
+    verdict = asyncio.run(review_render(_REVIEW_VIEWS, "box", None, llm_fn=llm))
+    assert verdict == ReviewVerdict(status="unreviewed", why="call_error")
+
+
 def test_review_render_non_vision_tier_is_unreviewed_no_vision():
     llm, _ = _scripted_review_llm(
         SenderError("tier T2 has no tool channel", status="no_tools_supported")

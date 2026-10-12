@@ -60,6 +60,10 @@ interface PassCardProps {
   views: RenderImage[];
   /** The pass's summary prose (UI face, no dimensions). */
   summary?: string;
+  /** Issue #435: true only when the vision review judged the render
+   *  against the request. Anything else (T2, timeout, error, unknown)
+   *  says "not visually reviewed" — never a confident claim. */
+  visuallyReviewed?: boolean;
   /** The generated source (the disclosure's content — never chat text).
    *  `undefined` or empty string = no source carried this turn
    *  (no disclosure control). */
@@ -75,6 +79,7 @@ export function PassCard({
   versionOrdinal,
   views,
   summary,
+  visuallyReviewed,
   source,
   onBesidePhoto,
 }: PassCardProps) {
@@ -128,6 +133,11 @@ export function PassCard({
           {copy.passCard.partialViews(views.length, TOTAL_VIEWS)}
         </span>
       )}
+      <span className="pass-card-review" data-testid="pass-card-review">
+        {visuallyReviewed === true
+          ? copy.passCard.reviewedAgainstRequest
+          : copy.passCard.notVisuallyReviewed}
+      </span>
       {source !== undefined && source !== "" && (
         <>
           <button

@@ -1428,6 +1428,11 @@ export default function App({ client }: AppProps) {
                     ...(isFillRecutOffer
                       ? { fillRecutOffer: { pending: true } }
                       : {}),
+                    // Issue #435: whether the kept render was judged against
+                    // the request; absent (old server) reads as not reviewed.
+                    ...(isReal && !isAnswer
+                      ? { visuallyReviewed: data.visually_reviewed === true }
+                      : {}),
                   };
                 }),
               );

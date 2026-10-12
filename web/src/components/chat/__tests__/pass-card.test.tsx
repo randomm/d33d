@@ -164,3 +164,20 @@ describe("PassCard", () => {
     expect(onBesidePhoto).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("PassCard review outcome (issue #435)", () => {
+  it("says reviewed against the request when the vision review passed", () => {
+    render(<PassCard versionId={4} versionOrdinal={4} views={SIX_VIEWS} summary="A box." visuallyReviewed={true} />);
+    expect(screen.getByTestId("pass-card-review").textContent).toBe(copy.passCard.reviewedAgainstRequest);
+  });
+
+  it("says not visually reviewed when the review did not run (T2 / timeout / error)", () => {
+    render(<PassCard versionId={4} versionOrdinal={4} views={SIX_VIEWS} summary="A box." visuallyReviewed={false} />);
+    expect(screen.getByTestId("pass-card-review").textContent).toBe(copy.passCard.notVisuallyReviewed);
+  });
+
+  it("an unknown review outcome never reads as reviewed", () => {
+    render(<PassCard versionId={4} versionOrdinal={4} views={SIX_VIEWS} summary="A box." />);
+    expect(screen.getByTestId("pass-card-review").textContent).toBe(copy.passCard.notVisuallyReviewed);
+  });
+});
