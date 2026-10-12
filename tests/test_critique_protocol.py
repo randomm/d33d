@@ -697,3 +697,39 @@ def test_render_view_data_uris_reads_six_pngs_or_nothing(tmp_path: Path):
     uris = render_view_data_uris(SimpleNamespace(render_artifact_dir=str(tmp_path)))
     assert set(uris) == set(REQUIRED_VIEW_NAMES)
     assert uris[REQUIRED_VIEW_NAMES[0]].startswith("data:image/png;base64,")
+
+
+def test_review_render_fail_reason_is_truncated_to_300_chars():
+    # Issue #435: the model-authored reason becomes repair evidence, so it is
+    # bounded before it leaves the review.
+    from d33d.critique_protocol import REVIEW_REASON_MAX_CHARS
+
+    assert REVIEW_REASON_MAX_CHARS == 300
+    long_reason = "x" * 1000
+    llm, _ = _scripted_review_llm(
+        _review_reply('{"verdict": "fail", "reason": "' + long_reason + '"}')
+    )
+    verdict = asyncio.run(review_render(_REVIEW_VIEWS, "box", None, llm_fn=llm))
+    assert verdict.status == "fail"
+    assert verdict.reason == "x" * 300
+
+
+def test_review_vision_enabled_follows_the_probed_vision_flag():
+    # Issue #435 operator decision: gating is the probed CapabilityResult's
+    # vision flag, not the tier label (a T1 model can lack vision).
+    from d33d.config.probes import CapabilityResult
+    from d33d.critique_protocol import review_vision_enabled
+
+    def cap(tools: bool, json_schema: bool, vision: bool) -> CapabilityResult:
+        return CapabilityResult(
+            tools=tools, json_schema=json_schema, vision=vision,
+            max_images=1 if vision else 0,
+        )
+
+    # T0 with vision, and T1 (tools without json_schema) with vision.
+    assert review_vision_enabled(cap(True, True, True)) is True
+    assert review_vision_enabled(cap(True, False, True)) is True
+    # T1 without vision: the tier label alone would have enabled the review.
+    assert review_vision_enabled(cap(True, False, False)) is False
+    assert review_vision_enabled(cap(True, True, False)) is False
+    assert review_vision_enabled(None) is False

@@ -79,10 +79,15 @@ __all__ = [
     "render_view_data_uris",
     "required_views",
     "review_render",
+    "review_vision_enabled",
     "validate_views",
 ]
 
 logger = logging.getLogger(__name__)
+
+#: The model-authored fail reason is bounded before it becomes repair evidence
+#: (issue #435).
+REVIEW_REASON_MAX_CHARS = 300
 
 # ---------------------------------------------------------------------------
 # The six-view contract (single source of truth: render_worker.VIEWS)
@@ -852,7 +857,7 @@ def _review_from_payload(payload: dict[str, Any]) -> ReviewVerdict | None:
     if verdict == "pass":
         return ReviewVerdict.passed()
     if verdict == "fail" and reason:
-        return ReviewVerdict.failed(reason)
+        return ReviewVerdict.failed(reason[:REVIEW_REASON_MAX_CHARS])
     # A fail with no concrete reason, or any other verdict, is not a verdict.
     return None
 
@@ -886,6 +891,13 @@ def parse_review(result: LLMResult) -> ReviewVerdict | None:
             if verdict is not None:
                 return verdict
     return None
+
+
+def review_vision_enabled(capability: CapabilityResult | None) -> bool:
+    """Whether the visual review may send images: the probed vision flag of
+    the resolved model (issue #435). The tier label is not consulted — a
+    tools-only T1 model has no vision and must skip the review."""
+    return capability is not None and bool(capability.vision)
 
 
 async def review_render(

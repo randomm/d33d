@@ -1013,14 +1013,11 @@ describe("SSE stream demux", () => {
 });
 
 describe("STREAM_TOTAL_TIMEOUT_MS constant", () => {
-  it("is strictly greater than the server-side 780 s outer net with margin", () => {
-    // Server safety net: (120 s LLM budget + 120 s render worker timeout)
-    // × 3 attempts + 60 s margin = 780 s (issue #417 lens round 3 — the
-    // net covers render time, not just the LLM budget).
-    // Client must exceed with real margin.
-    expect(STREAM_TOTAL_TIMEOUT_MS).toBeGreaterThan(780_000);
-    // Must have at least 60 s of margin (not just 1 ms more).
-    expect(STREAM_TOTAL_TIMEOUT_MS).toBeGreaterThanOrEqual(840_000);
+  it("is pinned at the server net (1140 s) plus 60 s of network headroom", () => {
+    // Server safety net (issue #435): (120 s attempt + 120 s review allowance
+    // + 120 s render allowance) × 3 attempts + 60 s margin = 1140 s. The
+    // Python twin is tests/test_visual_review_budget.py.
+    expect(STREAM_TOTAL_TIMEOUT_MS).toBe(1_200_000);
   });
 });
 

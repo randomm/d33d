@@ -3042,19 +3042,28 @@ async def _visual_review(
 
     views = await asyncio.to_thread(render_view_data_uris, render)
     if not views:
-        return ReviewVerdict.unreviewed("views_missing")
+        return _log_unreviewed(ReviewVerdict.unreviewed("views_missing"))
     try:
-        return await asyncio.wait_for(
+        verdict = await asyncio.wait_for(
             review_render(views, request, photo or None, llm_fn=llm_fn),
             timeout=DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS,
         )
     except TimeoutError:
-        logger.warning(
-            "visual review exceeded the %ss per-attempt budget — passing the "
-            "candidate as unreviewed",
-            DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS,
-        )
-        return ReviewVerdict.unreviewed("timeout")
+        return _log_unreviewed(ReviewVerdict.unreviewed("timeout"))
+    if verdict.status == "unreviewed":
+        return _log_unreviewed(verdict)
+    return verdict
+
+
+def _log_unreviewed(verdict: ReviewVerdict) -> ReviewVerdict:
+    # Issue #435: the card shows one "not visually reviewed" line for every
+    # cause; the cause is logged here.
+    logger.info(
+        "visual review unreviewed (%s) — candidate passes as not visually "
+        "reviewed",
+        verdict.why,
+    )
+    return verdict
 
 
 async def _await_with_per_attempt_deadline(

@@ -5448,3 +5448,15 @@ def test_review_not_called_when_a_gate_fails(tmp_path):
     )
     assert result.status == "exhausted"
     assert counts["critique"] == 0
+
+
+def test_unreviewed_cause_is_logged_not_shown(tmp_path, caplog):
+    # Issue #435: every unreviewed cause shows the one card line; the cause
+    # goes to the log.
+    import logging
+
+    caplog.set_level(logging.INFO, logger="d33d.design_loop")
+    result, _ = _run_review_loop(tmp_path, replies=[_llm_result(content="looks fine")])
+    assert result.visually_reviewed is False
+    assert any("unreviewed" in r.getMessage() and "unparseable" in r.getMessage()
+               for r in caplog.records)

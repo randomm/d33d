@@ -294,9 +294,9 @@ export const passCard = {
   /** The vision review ran and matched the request. */
   reviewedAgainstRequest:
     "Reviewed against your request — the six views were checked by the vision model.",
-  /** The review did not run (T2/T3, timeout, error, or unparseable reply). */
+  /** The review did not run or gave no usable verdict (any cause; the cause is logged). */
   notVisuallyReviewed:
-    "Not visually reviewed — this model can't look at images, so only the measured checks ran.",
+    "Not visually reviewed — only the measured checks ran.",
   closeDisclosure: "Close the source",
   viewEnlargedCaption:
     "Rendered straight from the model, not a photo of the viewport. This is the picture the system itself looked at.",
