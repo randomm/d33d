@@ -213,3 +213,48 @@ def test_viewer_pick_between_holes_is_point_at(app_with_projects) -> None:
     result, offer = _run_async(app_with_projects, _call)
     assert result is not None and result["outcome"] == "point_at", result
     assert offer is None, offer
+
+
+def test_non_acceptance_reply_discards_the_declined_request(app_with_projects) -> None:
+    """Any non-acceptance reply (not only a clean "no") drops the declined
+    request: a later bare "yes" never fills the declined 38 mm hole."""
+
+    async def _call(client):
+        pid = await _new_plate_project(app_with_projects, client)
+        await _chat(app_with_projects, client, pid, "make the top left hole 38 mm")
+        other = await _chat(app_with_projects, client, pid, "hmm, leave that one")
+        offer = app_with_projects.state.versions.get_pending_offer(pid)
+        yes = await _chat(app_with_projects, client, pid, "yes")
+        return other, offer, yes, app_with_projects.state.versions.get_pending_offer(pid)
+
+    other, offer, yes, final = _run_async(app_with_projects, _call)
+    assert not other.get("fill_recut_offer"), other
+    assert offer is None, offer
+    assert yes["message"] == FRILL_POINT_FIRST_REPLY, yes
+    assert not yes.get("fill_recut_offer"), yes
+    assert final is None, final
+
+
+def test_positional_hole_request_without_holes_is_the_no_hole_reply(app_with_projects) -> None:
+    """A positional phrase on a part with NO measured holes gets the #414
+    no-hole reply: no offer, no Yes flag."""
+
+    async def _call(client):
+        pid = await _new_plate_project(app_with_projects, client)
+        _set_legacy_part(
+            app_with_projects,
+            pid,
+            {
+                "hole_count": 0,
+                "holes": [],
+                "bbox_file_units": [120.0, 80.0, 6.0],
+                "bbox_bounds_file_units": [[0.0, 0.0, 0.0], [120.0, 80.0, 6.0]],
+            },
+        )
+        done = await _chat(app_with_projects, client, pid, "make the top right hole 6 mm")
+        return done, app_with_projects.state.versions.get_pending_offer(pid)
+
+    done, offer = _run_async(app_with_projects, _call)
+    assert "I don't see a hole on the part" in done["message"], done
+    assert not done.get("fill_recut_offer"), done
+    assert offer is None, offer
