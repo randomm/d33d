@@ -45,6 +45,9 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+# CENTER_VECTOR_RE matches a vector ``center=[…]`` argument (issue #269
+# follow-up: OpenSCAD's ``center`` is a single boolean; a vector is silently
+# ignored, leaving the geometry uncentred). The d33d scanner is used directly.
 from d33d.scad_center_check import (
     CENTER_VECTOR_RE,
     find_primitive_calls,
@@ -66,11 +69,6 @@ _PRIM_RE = re.compile(r"\b(cube|cylinder|sphere)\s*\(")
 # ensuring the preceding char is not part of a longer identifier, e.g.
 # ``xv=`` or ``$v=`` — the ``v`` is not at the start of a real identifier).
 _V_ARG_RE = re.compile(r"(?<![\w$])v\s*=")
-
-# A vector ``center=[…]`` argument (issue #269 follow-up: OpenSCAD's
-# ``center`` is a single boolean; a vector is silently ignored, leaving
-# the geometry uncentred — the exact bug the #269 fix was for).
-_CENTER_VECTOR_RE = CENTER_VECTOR_RE  # the d33d scanner, not a copy (issue #436)
 
 # The five feature lines of ``_marker_scad()`` that issue #269 requires to
 # be ``translate()``-based. Each entry is ``(feature name, a regex that must
@@ -122,7 +120,7 @@ def _scan_source(text: str) -> list[tuple[int, str]]:
     stripped = strip_comments_and_strings(text)
     hits: list[tuple[int, str]] = []
     for start_line, call_text in find_primitive_calls(stripped, _PRIM_RE):
-        if _V_ARG_RE.search(call_text) or _CENTER_VECTOR_RE.search(call_text):
+        if _V_ARG_RE.search(call_text) or CENTER_VECTOR_RE.search(call_text):
             hits.append((start_line, call_text.replace("\n", " ").strip()))
     return hits
 

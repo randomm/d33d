@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from d33d.failure_classes import classify_failure
+from d33d.failure_classes import ClassifiedFailure, route_repair
 from d33d.scad_center_check import center_vector_warning
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "scad"
@@ -14,10 +14,11 @@ FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "scad"
 
 def test_vector_center_fixture_is_flagged() -> None:
     src = (FIXTURES / "groove-center-vector.scad").read_text(encoding="utf-8")
-    warning = center_vector_warning(src)
-    assert warning is not None
-    assert 'Unknown parameter "center"' in warning
-    assert "cube" in warning
+    finding = center_vector_warning(src)
+    assert finding is not None
+    call, evidence = finding
+    assert "cube" in call
+    assert "center" in evidence
 
 
 def test_boolean_center_fixture_passes() -> None:
@@ -53,12 +54,17 @@ def test_vector_center_on_multiline_call_is_flagged() -> None:
     assert center_vector_warning(scad) is not None
 
 
-def test_classifies_as_unknown_variable_naming_center() -> None:
+def test_routes_as_unknown_variable_naming_center() -> None:
     src = (FIXTURES / "groove-center-vector.scad").read_text(encoding="utf-8")
-    warning = center_vector_warning(src)
-    assert warning is not None
-    classified = classify_failure(
-        error_class="syntax_error", stderr=warning, scad_source=src
+    finding = center_vector_warning(src)
+    assert finding is not None
+    _call, evidence = finding
+    directive = route_repair(
+        classified=ClassifiedFailure(
+            failure_class="unknown_variable", evidence=evidence, repairable=True
+        ),
+        scad_source=src,
     )
-    assert classified.failure_class == "unknown_variable"
-    assert "center" in classified.evidence
+    assert directive is not None
+    assert directive.failure_class == "unknown_variable"
+    assert "center" in directive.evidence

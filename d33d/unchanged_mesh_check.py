@@ -66,7 +66,9 @@ __all__ = [
     "UNCHANGED_INSTRUCTION",
     "fingerprint_from_rounded_vertices",
     "fingerprint_stl",
+    "load_mesh",
     "mesh_fingerprint",
+    "mesh_volume",
     "unchanged_mesh_check",
 ]
 
@@ -184,7 +186,7 @@ def fingerprint_stl(path: str | None) -> tuple[str, int] | None:
     unreadable file, or an empty mesh)."""
     if path is None:
         return None
-    mesh = _load_mesh(path)
+    mesh = load_mesh(path)
     if mesh is None:
         return None
     try:
@@ -199,7 +201,7 @@ def fingerprint_stl(path: str | None) -> tuple[str, int] | None:
         return None
 
 
-def _load_mesh(path: str) -> Any | None:
+def load_mesh(path: str) -> Any | None:
     """Load the STL at ``path`` (module docstring: the load shape).
 
     ``None`` on any load failure — the caller abstains (a fabricated
@@ -227,7 +229,7 @@ def _load_mesh(path: str) -> Any | None:
         return None
 
 
-def _volume(mesh: Any) -> float | None:
+def mesh_volume(mesh: Any) -> float | None:
     """The mesh's signed volume (module docstring: the sanity leg).
 
     ``None`` when the volume cannot be read (the caller abstains on
@@ -264,7 +266,7 @@ def unchanged_mesh_check(
     if parent_fingerprint is not None:
         parent_fp = parent_fingerprint
     elif parent_stl is not None:
-        parent = _load_mesh(parent_stl)
+        parent = load_mesh(parent_stl)
         if parent is not None:
             parent_fp = mesh_fingerprint(parent)
     if parent_fp is None:
@@ -272,13 +274,13 @@ def unchanged_mesh_check(
 
     if candidate_stl is None or not isinstance(candidate_stl, str) or not candidate_stl:
         return None
-    candidate = _load_mesh(candidate_stl)
+    candidate = load_mesh(candidate_stl)
     if candidate is None:
         return None
     candidate_fp = mesh_fingerprint(candidate)
     if candidate_fp is None:
         return None
-    candidate_vol = _volume(candidate)
+    candidate_vol = mesh_volume(candidate)
 
     # -- Leg 1 (primary): the geometry fingerprint (the exact vertex
     # set). ANY real geometric change, however small, changes the

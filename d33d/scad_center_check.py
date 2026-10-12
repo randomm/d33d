@@ -7,10 +7,10 @@ uncentred. OpenSCAD emits no warning, so the render log looks clean and
 the stderr path (:func:`d33d.render_diagnostics.unknown_parameters`) never
 sees it. This module is the text-level check that catches it.
 
-The violation is reported in OpenSCAD's own unknown-parameter wording so
-it routes through the existing #419 path: the caller feeds the returned
-line to ``classify_failure`` as stderr, which yields ``unknown_variable``
-with evidence naming ``center``.
+The finding is returned as structured ``(call, evidence)`` data. The caller
+builds the ``unknown_variable`` failure directly from it and routes it through
+``route_repair`` (the same downstream as the #419 unknown-parameter path); no
+OpenSCAD stderr line is synthesised.
 
 Only ``cube(`` and ``cylinder(`` calls are scanned; comments and string
 bodies are stripped first so a ``center=[`` inside them is never flagged.
@@ -109,20 +109,20 @@ def center_vector_calls(scad_source: str) -> list[tuple[int, str]]:
     ]
 
 
-def center_vector_warning(scad_source: str) -> str | None:
-    """OpenSCAD-style unknown-parameter warning line for the first
-    wrong-typed ``center=[...]`` call, or ``None`` when there is none.
+def center_vector_warning(scad_source: str) -> tuple[str, str] | None:
+    """The first wrong-typed ``center=[...]`` call as ``(call, evidence)``,
+    or ``None`` when there is none.
 
-    The wording mirrors OpenSCAD's own ``Unknown parameter`` warning so the
-    line is routed by ``classify_failure`` exactly like #419's path; the
-    trailing comment carries the call so the evidence names it.
+    ``call`` is the offending primitive call text; ``evidence`` names the
+    ``center`` argument, the primitive and the call.
     """
     hits = center_vector_calls(scad_source)
     if not hits:
         return None
     _line, call = hits[0]
     prim = call.split("(", 1)[0].strip()
-    return (
-        f'WARNING: Unknown parameter "center" for object "{prim}" '
-        f"(vector center=[...] is not a boolean): {call[:160]}"
+    evidence = (
+        f'center=[...] is a vector on {prim}(); OpenSCAD takes center as a '
+        f"boolean and ignores the vector: {call[:160]}"
     )
+    return call, evidence

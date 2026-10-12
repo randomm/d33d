@@ -18,7 +18,7 @@ import re
 from typing import Any
 
 from d33d.evals.failure_capture import HOLLOW_SOLID_REASON
-from d33d.unchanged_mesh_check import _load_mesh, _volume
+from d33d.unchanged_mesh_check import load_mesh, mesh_volume
 
 logger = logging.getLogger(__name__)
 
@@ -79,12 +79,20 @@ def hollow_solid_check(request: str, stl: str | None) -> tuple[str, str] | None:
     abstains."""
     if is_hollow_request(request):
         return None
-    mesh = _load_mesh(stl) if stl else None
-    if mesh is None:
+    if not stl:
+        logger.info("hollow-solid check abstained: no rendered STL")
         return None
-    solid = _volume(mesh)
+    mesh = load_mesh(stl)
+    if mesh is None:
+        logger.info("hollow-solid check abstained: STL did not load")
+        return None
+    solid = mesh_volume(mesh)
+    if solid is None or solid <= 0:
+        logger.info("hollow-solid check abstained: non-positive solid volume")
+        return None
     box = _bbox_volume(mesh)
-    if solid is None or box is None or solid <= 0:
+    if box is None:
+        logger.info("hollow-solid check abstained: degenerate bounding box")
         return None
     ratio = solid / box
     if ratio >= HOLLOW_RATIO:

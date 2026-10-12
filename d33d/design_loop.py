@@ -2181,20 +2181,27 @@ async def run_design_loop_async(
         # failures are a low-scoring iteration, not a loop stop.
         failure_class: str | None = None
         next_repair: dict[str, Any] | None = None
-        # Issue #436: a wrong-typed ``center=[...]`` on an ok render is
-        # routed like #419's unknown-parameter warning — the SCAD-text
-        # warning line is classified as a syntax_error diagnostic, so it
-        # lands in ``unknown_variable`` with evidence naming ``center``.
-        _center_warning = (
+        # Issue #436: a wrong-typed ``center=[...]`` on an ok render is an
+        # ignored-argument defect of the #419 family: built directly as
+        # ``unknown_variable`` (no synthetic stderr) and routed through the
+        # same ``route_repair`` path below.
+        _center_finding = (
             center_vector_warning(scad_source) if render.error_class == "ok" else None
         )
-        classified = classify_failure(
-            error_class="syntax_error" if _center_warning else render.error_class,
-            stderr=_center_warning or render.stderr,
-            scad_source=scad_source,
-            render_log="" if _center_warning else getattr(render, "render_log", ""),
-        )
-        if render.error_class != "ok" or _center_warning is not None:
+        if _center_finding is not None:
+            classified = ClassifiedFailure(
+                failure_class="unknown_variable",
+                evidence=_center_finding[1],
+                repairable=True,
+            )
+        else:
+            classified = classify_failure(
+                error_class=render.error_class,
+                stderr=render.stderr,
+                scad_source=scad_source,
+                render_log=getattr(render, "render_log", ""),
+            )
+        if render.error_class != "ok" or _center_finding is not None:
             # Non-LLM-addressable render classes (timeout/oom/container_
             # error/...) are non-improving steps and NOT fed back.
             if classified.failure_class in REPAIRABLE_CLASSES:
@@ -2485,13 +2492,19 @@ async def run_design_loop_async(
         # its STL is the imported model's, not the requested solid, so the
         # volume ratio is not a fair signal for it (stated in the PR body).
         _hollow_repair_fired = False
+        # ``_post_check_fired``: one flag over the four post-checks above
+        # (screw, through, stack, unchanged) — the hollow gate and the pass
+        # return both read it.
+        _post_check_fired = (
+            _screw_repair_fired
+            or _through_repair_fired
+            or _stack_repair_fired
+            or _unchanged_repair_fired
+        )
         if (
             render.error_class == "ok"
             and next_repair is None
-            and not _screw_repair_fired
-            and not _through_repair_fired
-            and not _stack_repair_fired
-            and not _unchanged_repair_fired
+            and not _post_check_fired
             and part_scale is None
         ):
             _hollow_det = await asyncio.to_thread(
@@ -2538,12 +2551,9 @@ async def run_design_loop_async(
 
         if (
             candidate_score.perfect
-            and not _screw_repair_fired
-            and not _through_repair_fired
-            and not _stack_repair_fired
-            and not _unchanged_repair_fired
+            and not _post_check_fired
             and not _hollow_repair_fired
-            and _center_warning is None
+            and _center_finding is None
         ):
             return DesignResult(
                 status="pass",
