@@ -51,8 +51,8 @@ from d33d.design_loop import (
     _gate_selection_extents,
     scad_looks_valid,
 )
-from d33d.evals.failure_capture import POST_CHECK_REASONS
 from d33d.loop_timeout import AttemptTracker, archive_deadline
+from d33d.post_check_reasons import POST_CHECK_REASONS
 from d33d.render_worker import DEFAULT_TIMEOUT_S, VIEWS, RenderResult
 
 logger = logging.getLogger(__name__)
@@ -2063,7 +2063,7 @@ async def run_design_loop_with_events(
     # by ``d33d.design_loop`` at module level, so the unchanged-mesh
     # reason constant is pulled in here instead of at the top to keep
     # the import graph acyclic.
-    from d33d.unchanged_mesh_check import MESH_UNCHANGED_REASON
+    from d33d.post_check_reasons import MESH_UNCHANGED_REASON
 
     if row is not None:
         _latest_ver = (
@@ -2786,7 +2786,7 @@ async def run_design_loop_with_events(
             # adapter-deadline path uses — version-created before the
             # error: the ticket's gate resolution).
             _kept_repair = getattr(_kept_best, "repair", None)
-            from d33d.unchanged_mesh_check import MESH_UNCHANGED_REASON
+            from d33d.post_check_reasons import MESH_UNCHANGED_REASON
 
             _kept_unchanged = (
                 isinstance(_kept_repair, dict)

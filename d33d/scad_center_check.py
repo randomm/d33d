@@ -22,7 +22,6 @@ import re
 
 __all__ = [
     "CENTER_VECTOR_RE",
-    "center_vector_calls",
     "center_vector_warning",
     "find_primitive_calls",
     "strip_comments_and_strings",
@@ -96,19 +95,6 @@ def find_primitive_calls(text: str, prim_re: re.Pattern[str]) -> list[tuple[int,
     return calls
 
 
-def center_vector_calls(scad_source: str) -> list[tuple[int, str]]:
-    """``(line_no, call_text)`` for every ``cube(`` / ``cylinder(`` call
-    whose argument list carries a vector ``center=[...]``. Empty when the
-    source is clean (``center=true``, ``center=false`` and
-    ``center=some_var`` all pass)."""
-    stripped = strip_comments_and_strings(scad_source or "")
-    return [
-        (line, " ".join(call.split()))
-        for line, call in find_primitive_calls(stripped, _CENTER_PRIM_RE)
-        if CENTER_VECTOR_RE.search(call)
-    ]
-
-
 def center_vector_warning(scad_source: str) -> tuple[str, str] | None:
     """The first wrong-typed ``center=[...]`` call as ``(call, evidence)``,
     or ``None`` when there is none.
@@ -116,10 +102,18 @@ def center_vector_warning(scad_source: str) -> tuple[str, str] | None:
     ``call`` is the offending primitive call text; ``evidence`` names the
     ``center`` argument, the primitive and the call.
     """
-    hits = center_vector_calls(scad_source)
-    if not hits:
+    stripped = strip_comments_and_strings(scad_source or "")
+    hit = next(
+        (
+            " ".join(call.split())
+            for _line, call in find_primitive_calls(stripped, _CENTER_PRIM_RE)
+            if CENTER_VECTOR_RE.search(call)
+        ),
+        None,
+    )
+    if hit is None:
         return None
-    _line, call = hits[0]
+    call = hit
     prim = call.split("(", 1)[0].strip()
     evidence = (
         f'center=[...] is a vector on {prim}(); OpenSCAD takes center as a '

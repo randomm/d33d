@@ -17,8 +17,8 @@ import logging
 import re
 from typing import Any
 
-from d33d.evals.failure_capture import HOLLOW_SOLID_REASON
-from d33d.unchanged_mesh_check import load_mesh, mesh_volume
+from d33d.mesh_io import load_mesh, mesh_volume
+from d33d.post_check_reasons import HOLLOW_SOLID_REASON
 
 logger = logging.getLogger(__name__)
 

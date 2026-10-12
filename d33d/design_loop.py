@@ -69,13 +69,6 @@ from d33d.config.catalogue import Catalogue
 from d33d.config.probes import CapabilityResult
 from d33d.config.resolve import resolve_model
 from d33d.design_llm import LLMResult, send
-from d33d.evals.failure_capture import (
-    HOLLOW_SOLID_REASON,
-    POST_CHECK_REASONS,
-    SCREW_CLEARANCE_REASON,
-    STACK_HEIGHT_REASON,
-    THROUGH_HOLE_REASON,
-)
 from d33d.failure_classes import (
     REPAIRABLE_CLASSES,
     ClassifiedFailure,
@@ -85,6 +78,14 @@ from d33d.failure_classes import (
 )
 from d33d.hollow_check import hollow_solid_check
 from d33d.identical_repair import IdenticalRepairTracker
+from d33d.post_check_reasons import (
+    HOLLOW_SOLID_REASON,
+    MESH_UNCHANGED_REASON,
+    POST_CHECK_REASONS,
+    SCREW_CLEARANCE_REASON,
+    STACK_HEIGHT_REASON,
+    THROUGH_HOLE_REASON,
+)
 from d33d.render_worker import (
     RENDER_WORKER_IMAGE,
     RenderResult,
@@ -93,7 +94,7 @@ from d33d.render_worker import (
     canonical_build_command,
 )
 from d33d.scad_center_check import center_vector_warning
-from d33d.unchanged_mesh_check import MESH_UNCHANGED_REASON, fingerprint_stl
+from d33d.unchanged_mesh_check import fingerprint_stl
 
 logger = logging.getLogger(__name__)
 
