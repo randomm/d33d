@@ -33,10 +33,12 @@ MESH_UNCHANGED_REASON = "mesh_unchanged"
 # Issue #435: the visual review (request versus render, critique role) judged
 # a gate-passing candidate not to match the request. Rides the existing
 # ``geometrically_wrong`` class; the reason is the loop-level exhaustion code
-# when the last iteration is the one judged.
+# when the last iteration is the one judged. NOT a post-check: it is absent
+# from POST_CHECK_REASONS, so the #432 identical-repair stop ignores it.
 VISUAL_REVIEW_FAILED_REASON = "visual_review_failed"
 
-#: Every post-check repair reason the loop surfaces as a terminal reason.
+#: Every post-check repair reason the loop surfaces as a terminal reason
+#: (the visual review reason is deliberately excluded; see above).
 POST_CHECK_REASONS: frozenset[str] = frozenset(
     {
         MESH_UNCHANGED_REASON,
@@ -44,6 +46,5 @@ POST_CHECK_REASONS: frozenset[str] = frozenset(
         SCREW_CLEARANCE_REASON,
         STACK_HEIGHT_REASON,
         HOLLOW_SOLID_REASON,
-        VISUAL_REVIEW_FAILED_REASON,
     }
 )

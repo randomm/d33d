@@ -25,6 +25,18 @@ export type PostCheckReason =
   | "stack_height_mismatch"
   | "hollow_solid";
 
+/** Issue #435: the closed set of checks the design loop reports in
+ *  `checks_run` (the server's CHECK_KEYS, d33d/design_loop.py). `tsc` checks
+ *  `passCard.checkWords` maps exactly these keys. */
+export type CheckKey =
+  | "size"
+  | "watertight"
+  | "screw_clearance"
+  | "through_holes"
+  | "stack_height"
+  | "change_detected"
+  | "hollow";
+
 /** "try" for one, "tries" otherwise (issue #432). */
 const triesWord = (attempts: number): string => (attempts === 1 ? "try" : "tries");
 
@@ -293,7 +305,7 @@ export const passCard = {
     stack_height: "stack height",
     change_detected: "change detected",
     hollow: "not hollow",
-  } as Record<string, string>,
+  } as const satisfies Record<CheckKey, string>,
   /** The "Checked: …" line over the words of the checks that ran. */
   checksRan: (words: readonly string[]): string => `Checked: ${words.join(", ")}`,
   /** The vision review ran and matched the request. */

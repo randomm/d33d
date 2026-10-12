@@ -42,6 +42,7 @@ def _exhausted(reason: str, iterations_used: int | None) -> object:
         status = "exhausted"
         best = record
         failure_reason = reason
+        checks_run = ()
 
     if iterations_used is not None:
         _Result.iterations_used = iterations_used

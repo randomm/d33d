@@ -582,6 +582,7 @@ def test_chat_pass_persists_source_and_followup_turn_reads_it(app_with_versions)
     class _Result:
         status = "pass"
         failure_reason = None
+        checks_run = ()
 
         class _Best:
             params: ClassVar[dict[str, float]] = {"diameter": 30.0}
@@ -595,6 +596,7 @@ def test_chat_pass_persists_source_and_followup_turn_reads_it(app_with_versions)
         class _R:
             status = "pass"
             failure_reason = None
+            checks_run = ()
             best = _Result
 
         _R.best = _Result._Best
@@ -767,6 +769,7 @@ def test_region_edit_pass_carries_current_design_source(app_with_versions):
     class _Result:
         status = "pass"
         failure_reason = None
+        checks_run = ()
 
         class _Best:
             params: ClassVar[dict[str, float]] = {"diameter": 30.0}
@@ -780,6 +783,7 @@ def test_region_edit_pass_carries_current_design_source(app_with_versions):
         class _R:
             status = "pass"
             failure_reason = None
+            checks_run = ()
 
         _R.best = _Result._Best
         return _R()

@@ -203,6 +203,7 @@ class _StubResult:
         self.status = "pass"
         self.best = best
         self.failure_reason = None
+        self.checks_run = ()
 
 
 def test_seam_c_replay_version_frame_carries_version_id(seam_c_live, app_with_versions):

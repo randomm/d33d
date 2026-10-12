@@ -154,6 +154,7 @@ def _exhausted_result(failure_reason: str, scad: str = "cube([1,1,1]);"):
         def __init__(self, scad, failure_reason):
             self.best = _Best(scad)
             self.failure_reason = failure_reason
+            self.checks_run = ()
 
     return _Result(scad, failure_reason)
 
@@ -166,6 +167,7 @@ def _passing_result():
     class _Result:
         status = "pass"
         failure_reason = None
+        checks_run = ()
 
         def __init__(self):
             self.best = _Best()
@@ -347,6 +349,7 @@ def test_hook_rejects_missing_failure_reason(tmp_path: Path):
     class _Result:
         status = "exhausted"
         failure_reason = None
+        checks_run = ()
         best = None
 
     with pytest.raises(ValueError, match="structured failure_reason"):
@@ -415,6 +418,7 @@ def test_hook_rejects_unrecognised_status(tmp_path: Path):
     class _Result:
         status = "weird"
         failure_reason = "empty_model"
+        checks_run = ()
         best = None
 
     with pytest.raises(ValueError, match="not 'pass' or 'exhausted'"):
@@ -566,6 +570,7 @@ def _exhausted_stub_result():
     class _StubResult:
         status = "exhausted"
         failure_reason = "timeout"
+        checks_run = ()
         best = IterationRecord(
             iteration=1,
             scad_source="cube();",
@@ -1106,6 +1111,7 @@ def test_app_state_hooked_loop_archives_exhausted_loop(tmp_path: Path, monkeypat
             status = "exhausted"
             best = _Best()
             failure_reason = "empty_model"
+            checks_run = ()
 
         return _Result()
 
@@ -1359,6 +1365,7 @@ def test_app_state_hooked_loop_no_archive_on_pass(tmp_path: Path, monkeypatch):
             status = "pass"
             best = _Best()
             failure_reason = None
+            checks_run = ()
 
         return _Result()
 

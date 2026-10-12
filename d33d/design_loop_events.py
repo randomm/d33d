@@ -47,6 +47,7 @@ from d33d.design_loop import (
     MODEL_UNCONFIGURED,
     RENDERER_IMAGE_STALE,
     BboxInfo,
+    DesignResult,
     _bbox_target,
     _gate_selection_extents,
     scad_looks_valid,
@@ -1784,11 +1785,11 @@ async def _resolve_version_create(
 
 
 
-def checks_run_fields(result: Any) -> dict[str, list[str]]:
+def checks_run_fields(result: DesignResult) -> dict[str, list[str]]:
     """Issue #435: the done frame's ``checks_run`` (the checks that executed on
     the kept pass, in the closed order). Omitted entirely when empty, so an
     unreviewed-and-unchecked frame stays byte-identical to today's."""
-    keys = list(getattr(result, "checks_run", ()) or ())
+    keys = list(result.checks_run)
     return {"checks_run": keys} if keys else {}
 
 

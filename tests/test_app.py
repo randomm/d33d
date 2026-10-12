@@ -989,6 +989,7 @@ def test_region_edit_empty_module_ids_composes_no_modules_request_text(app):
 
         status = "pass"
         best = None
+        checks_run = ()
 
     async def _stub_loop(app, **kwargs: Any) -> Any:
         captured.update(kwargs)
@@ -1215,6 +1216,7 @@ def test_region_edit_accepts_hit_point_and_face_normal(app):
     class _PassResult:
         status = "pass"
         best = None
+        checks_run = ()
 
     async def _stub_loop(app, **kwargs: Any) -> Any:
         captured.update(kwargs)
@@ -1253,6 +1255,7 @@ def test_region_edit_hit_point_only_still_accepted(app):
     class _PassResult:
         status = "pass"
         best = None
+        checks_run = ()
 
     async def _stub_loop(app, **kwargs: Any) -> Any:
         captured.update(kwargs)
@@ -1333,6 +1336,7 @@ def test_region_edit_face_normal_within_tolerance_accepted(app):
     class _PassResult:
         status = "pass"
         best = None
+        checks_run = ()
 
     async def _stub_loop(app, **kwargs: Any) -> Any:
         return _PassResult()

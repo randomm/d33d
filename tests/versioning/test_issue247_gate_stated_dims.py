@@ -180,6 +180,7 @@ def test_carried_axes_frame_field_bbox_only() -> None:
     class _R:
         def __init__(self, failure_reason: str) -> None:
             self.failure_reason = failure_reason
+            self.checks_run = ()
 
     assert _carried_axes(_R("bbox_out_of_tolerance"), {"D": 12.0, "W": 20.0}) == {
         "D": 12.0,
@@ -215,6 +216,7 @@ def _bbox_result(failure_reason: str, bbox: BboxInfo | None = None) -> Any:
     class _Res:
         def __init__(self, failure_reason: str, bbox: BboxInfo | None) -> None:
             self.failure_reason = failure_reason
+            self.checks_run = ()
             self.best = _Rec(bbox)
 
     return _Res(failure_reason, bbox)
@@ -594,6 +596,7 @@ async def _drive_finalize_capture(app, client, pid: int, body: dict) -> dict:
         class _R:
             status = "exhausted"
             failure_reason = "bbox_out_of_tolerance"
+            checks_run = ()
             best = None
 
         return _R()
@@ -984,6 +987,7 @@ def test_failed_turn_stated_dims_survive_into_next_version(app_with_versions):
             (),
             {
                 "status": "pass",
+                "checks_run": (),
                 "best": type(
                     "_Best",
                     (),
@@ -1067,6 +1071,7 @@ def test_failed_turn_no_stated_dims_still_abstains(app_with_versions):
             (),
             {
                 "status": "pass",
+                "checks_run": (),
                 "best": type(
                     "_Best",
                     (),
@@ -1128,7 +1133,7 @@ class _LoopPassStub:
         return type(
             "_PassResult",
             (),
-            {"status": "pass", "best": None},
+            {"status": "pass", "checks_run": (), "best": None},
         )()
 
 

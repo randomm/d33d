@@ -5408,8 +5408,9 @@ def test_review_fail_then_no_improvement_stop_keeps_visual_review_failed(tmp_pat
         RuntimeError("provider down"),
         Boom("unlisted"),
         _llm_result(content="looks fine to me"),
+        object(),
     ],
-    ids=["call-error", "unlisted-exception", "unparseable"],
+    ids=["call-error", "unlisted-exception", "unparseable", "non-reply-object"],
 )
 def test_unreviewed_candidate_still_passes_without_the_flag(tmp_path, reply):
     result, _ = _run_review_loop(tmp_path, replies=[reply])

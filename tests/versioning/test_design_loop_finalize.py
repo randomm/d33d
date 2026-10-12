@@ -52,6 +52,7 @@ class _StubResult:
             params=dict(params),
         )
         self.failure_reason = None if status == "pass" else "bbox_out_of_tolerance"
+        self.checks_run = ()
 
 
 def _default_render() -> RenderResult:
@@ -193,6 +194,7 @@ def _pass_result_with_bbox(
         status = "pass"
         best = record
         failure_reason = None
+        checks_run = ()
 
     return _Result()
 
@@ -1432,6 +1434,7 @@ def test_chat_exhausted_axis_params_mismatch_error_frame_carries_mismatches(
         ) -> None:
             self.status = "exhausted"
             self.failure_reason = "axis_params_mismatch"
+            self.checks_run = ()
             repair = None
             if with_repair:
                 repair = {
@@ -1666,6 +1669,7 @@ class _StubResult:
             params=dict(params),
         )
         self.failure_reason = None if status == "pass" else "bbox_out_of_tolerance"
+        self.checks_run = ()
 
 
 def test_chat_empty_message_is_422(app_with_versions):
@@ -2996,6 +3000,7 @@ def test_chat_pre_route_timeout_bounded(app_with_versions, monkeypatch):
         class _R:
             status = "pass"
             failure_reason = None
+            checks_run = ()
             best = None
 
         return _R()
@@ -3899,6 +3904,7 @@ def test_chat_render_runs_off_the_event_loop(app_with_versions):
         status = "pass"
         best = _StubResult("pass", {"W": 10}, scad="W = 10; cube([W]);").best
         failure_reason = None
+        checks_run = ()
 
     class _Loop:
         """The injected ``app.state.run_design_loop`` seam: mirrors the real
@@ -4569,6 +4575,7 @@ def test_preflight_failure_frame_carries_renderer_unavailable_reason(app_with_ve
         def __init__(self, r):
             self.status = r.status
             self.failure_reason = r.failure_reason
+            self.checks_run = ()
             self.best = r.best
 
     async def _loop(app, **kwargs):
@@ -5248,6 +5255,7 @@ def _exhausted_result_with_reason(reason: str) -> object:
         status = "exhausted"
         best = record
         failure_reason = reason
+        checks_run = ()
 
     return _Result()
 
@@ -5372,6 +5380,7 @@ class _MetaStubResult:
 
         self.status = "pass"
         self.failure_reason = None
+        self.checks_run = ()
         self.best = IterationRecord(
             iteration=0,
             scad_source="W = 60; cube([W, W, W]);",
@@ -5687,6 +5696,7 @@ def test_finalize_tray_triple_offer_never_targets_stated_axis(app_with_versions)
         def __init__(self) -> None:
             self.status = "pass"
             self.failure_reason = None
+            self.checks_run = ()
             self.best = IterationRecord(
                 iteration=0,
                 scad_source="W = 60; cube([W, 45, 20]);",
@@ -6162,6 +6172,7 @@ def _model_unconfigured_result(env_var=None):
         status = "exhausted"
         best = record
         failure_reason = "model_unconfigured"
+        checks_run = ()
         iterations_used = 0
         env_var = value
 
@@ -6179,6 +6190,7 @@ def _renderer_image_stale_result(renderer_detail=None):
         status = "exhausted"
         best = record
         failure_reason = "renderer_image_stale"
+        checks_run = ()
         iterations_used = 0
         env_var = None
         renderer_detail = detail
@@ -6391,6 +6403,7 @@ def test_chat_error_frame_omits_renderer_detail_for_other_reasons(
         status = "exhausted"
         best = IterationRecord(iteration=0, scad_source="", render=None, score=None)
         failure_reason = "bbox_out_of_tolerance"
+        checks_run = ()
         iterations_used = 1
         env_var = None
         renderer_detail = detail
@@ -6433,6 +6446,7 @@ def test_chat_error_frame_omits_env_var_for_other_reasons(
         status = "exhausted"
         best = IterationRecord(iteration=0, scad_source="", render=None, score=None)
         failure_reason = "bbox_out_of_tolerance"
+        checks_run = ()
         iterations_used = 0
         env_var = "TRAIL_OPENERS_LLM_KEY"
 
@@ -8070,6 +8084,7 @@ def test_timeout_version_path_skips_unchanged_kept_candidate(
         def __init__(self) -> None:
             self.status = "exhausted"
             self.failure_reason = DESIGN_LOOP_TIMED_OUT_REASON
+            self.checks_run = ()
             self.attempts_started = 2
             self.attempt_latencies = [0.3, 1.0]
             self.best = IterationRecord(

@@ -60,6 +60,7 @@ class _TimeoutStubResult:
     def __init__(self) -> None:
         self.status = "exhausted"
         self.failure_reason = DESIGN_LOOP_TIMED_OUT_REASON
+        self.checks_run = ()
         self.attempts_started = 0
         self.attempt_latencies = None
         self.best = IterationRecord(
@@ -206,6 +207,7 @@ def test_slow_progressing_run_not_cut_off_by_net(app_with_versions, monkeypatch)
         def __init__(self) -> None:
             self.status = "exhausted"
             self.failure_reason = "bbox_out_of_tolerance"
+            self.checks_run = ()
             self.attempts_started = 0
             self.attempt_latencies = None
             self.best = IterationRecord(

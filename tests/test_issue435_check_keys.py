@@ -18,7 +18,7 @@ _COPY = Path(__file__).resolve().parents[1] / "web" / "src" / "copy.ts"
 
 def _ui_check_keys() -> tuple[str, ...]:
     text = _COPY.read_text(encoding="utf-8")
-    block = re.search(r"checkWords:\s*\{(.*?)\}\s*as Record", text, re.DOTALL)
+    block = re.search(r"checkWords:\s*\{(.*?)\}\s*as const satisfies Record<CheckKey, string>", text, re.DOTALL)
     assert block is not None, "passCard.checkWords block not found in copy.ts"
     return tuple(re.findall(r"^\s*([a-z_]+):", block.group(1), re.MULTILINE))
 

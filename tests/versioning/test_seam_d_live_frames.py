@@ -68,6 +68,7 @@ def _passing_result() -> Any:
         best = record
         iterations = (record,)
         failure_reason = None
+        checks_run = ()
         iterations_used = 1
 
     return _Result()

@@ -90,6 +90,7 @@ def _passing_loop(bbox_for: Any):
         best = record
         iterations = (record,)
         failure_reason = None
+        checks_run = ()
         iterations_used = 1
 
     async def _loop(app: Any, **kwargs: Any) -> Any:
@@ -133,6 +134,7 @@ def _passing_loop_v24_shape(bbox_for: Any):
         best = record
         iterations = (record,)
         failure_reason = None
+        checks_run = ()
         iterations_used = 1
 
     async def _loop(app: Any, **kwargs: Any) -> Any:
@@ -232,6 +234,7 @@ def test_absent_measurement_persists_null_not_zero(app_with_versions) -> None:
         best = record
         iterations = (record,)
         failure_reason = None
+        checks_run = ()
         iterations_used = 1
 
     assert _version_bbox_extents(_Result()) is None
@@ -381,6 +384,7 @@ def test_multipart_persists_whole_mesh_extents_not_component() -> None:
         best = record
         iterations = (record,)
         failure_reason = None
+        checks_run = ()
         iterations_used = 1
 
     extents = _version_bbox_extents(_Result())
@@ -424,6 +428,7 @@ def test_multipart_with_free_named_params_persists_whole_mesh() -> None:
         best = record
         iterations = (record,)
         failure_reason = None
+        checks_run = ()
         iterations_used = 1
 
     extents = _version_bbox_extents(_Result())
@@ -467,6 +472,7 @@ def test_v24_shaped_single_component_persists_whole_mesh() -> None:
         best = record
         iterations = (record,)
         failure_reason = None
+        checks_run = ()
         iterations_used = 1
 
     extents = _version_bbox_extents(_Result())

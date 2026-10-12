@@ -1434,7 +1434,9 @@ export default function App({ client }: AppProps) {
                       ? {
                           visuallyReviewed: data.visually_reviewed === true,
                           checksRun: Array.isArray(data.checks_run)
-                            ? (data.checks_run as string[])
+                            ? data.checks_run.filter(
+                                (k): k is string => typeof k === "string",
+                              )
                             : undefined,
                         }
                       : {}),

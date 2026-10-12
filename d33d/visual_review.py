@@ -324,7 +324,13 @@ async def review_render(
         # CancelledError is a BaseException and still propagates.
         logger.warning("visual review call failed: %s", exc, exc_info=True)
         return ReviewVerdict.unreviewed("call_error")
-    parsed = parse_review(result)
+    # The parse runs on whatever the role edge returned; a malformed reply
+    # object must degrade to unreviewed, never abort the run (issue #435).
+    try:
+        parsed = parse_review(result)
+    except Exception as exc:
+        logger.warning("visual review reply unparseable: %s", exc, exc_info=True)
+        return ReviewVerdict.unreviewed("unparseable")
     if parsed is None:
         return ReviewVerdict.unreviewed("unparseable")
     return parsed

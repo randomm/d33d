@@ -2818,6 +2818,7 @@ def test_design_loop_message_goes_to_loop_not_answer(app_with_versions) -> None:
         class _R:
             status = "pass"
             failure_reason = None
+            checks_run = ()
             best = None
 
         return _R()
@@ -2864,6 +2865,7 @@ def test_imperative_question_goes_to_loop_not_answer(app_with_versions) -> None:
         class _R:
             status = "pass"
             failure_reason = None
+            checks_run = ()
             best = None
 
         return _R()
@@ -2910,6 +2912,7 @@ def test_unanswerable_kind_gets_no_run_reply_not_loop(app_with_versions) -> None
         class _R:
             status = "pass"
             failure_reason = None
+            checks_run = ()
             best = None
 
         return _R()
@@ -2965,6 +2968,7 @@ def test_unanswerable_valid_missing_gets_no_run_reply_not_loop(
         class _R:
             status = "pass"
             failure_reason = None
+            checks_run = ()
             best = None
 
         return _R()
@@ -3024,6 +3028,7 @@ def test_invented_number_guard_failure_gets_no_run_reply_not_loop(
         class _R:
             status = "pass"
             failure_reason = None
+            checks_run = ()
             best = None
 
         return _R()
@@ -3082,6 +3087,7 @@ def test_screw_question_guard_licenses_question_number(app_with_versions) -> Non
         class _R:
             status = "pass"
             failure_reason = None
+            checks_run = ()
             best = None
 
         return _R()
@@ -3139,6 +3145,7 @@ def test_screw_question_answer_citing_25_still_guard_failure(
         class _R:
             status = "pass"
             failure_reason = None
+            checks_run = ()
             best = None
 
         return _R()
@@ -3195,6 +3202,7 @@ def test_no_versions_question_replies_nothing_built_no_loop(app_with_versions) -
         class _R:
             status = "pass"
             failure_reason = None
+            checks_run = ()
             best = None
 
         return _R()
@@ -3248,6 +3256,7 @@ def test_no_versions_change_request_still_starts_loop(app_with_versions) -> None
         class _R:
             status = "pass"
             failure_reason = None
+            checks_run = ()
             best = None
 
         return _R()
@@ -3309,6 +3318,7 @@ def test_no_versions_request_question_routing_route_level(
         class _R:
             status = "pass"
             failure_reason = None
+            checks_run = ()
             best = None
 
         return _R()
@@ -3396,6 +3406,7 @@ def test_stage2_llm_timeout_gets_no_run_reply(app_with_versions, monkeypatch) ->
         class _R:
             status = "pass"
             failure_reason = None
+            checks_run = ()
             best = None
 
         return _R()
@@ -3505,6 +3516,7 @@ def test_stage2_call_receives_state_block(app_with_versions) -> None:
             class _R:
                 status = "pass"
                 failure_reason = None
+                checks_run = ()
                 best = None
             return _R()
         app_with_versions.state.run_design_loop = _loop
@@ -3595,6 +3607,7 @@ def test_kind_request_goes_to_loop_exactly_as_non_question(app_with_versions) ->
         class _R:
             status = "pass"
             failure_reason = None
+            checks_run = ()
             best = None
 
         return _R()
@@ -3651,6 +3664,7 @@ def test_stage2_exception_gets_no_run_reply_releases_flag(app_with_versions) -> 
         class _R:
             status = "pass"
             failure_reason = None
+            checks_run = ()
             best = None
 
         return _R()
@@ -4205,6 +4219,7 @@ class TestStage2OutcomeWarningLogs:
             class _R:
                 status = "pass"
                 failure_reason = None
+                checks_run = ()
                 best = None
 
             return _R()
@@ -4356,6 +4371,7 @@ class TestConcurrentInflightClaim:
             class _R:
                 status = "pass"
                 failure_reason = None
+                checks_run = ()
                 best = None
 
             return _R()
@@ -4408,6 +4424,7 @@ class TestConcurrentInflightClaim:
             class _R:
                 status = "pass"
                 failure_reason = None
+                checks_run = ()
                 best = None
 
             return _R()

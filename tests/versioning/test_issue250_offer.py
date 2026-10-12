@@ -303,6 +303,7 @@ class _OfferStubResult:
 
         self.status = "pass"
         self.failure_reason = None
+        self.checks_run = ()
         self.best = IterationRecord(
             iteration=0,
             scad_source="W = 10; cube([W, W, W]);",
@@ -329,6 +330,7 @@ class _V25PassStub:
 
         self.status = "pass"
         self.failure_reason = None
+        self.checks_run = ()
         self.best = IterationRecord(
             iteration=0,
             scad_source="x = 40; cube([x, x, 12]);",
@@ -353,6 +355,7 @@ class _ExhaustedStub:
 
         self.status = "exhausted"
         self.failure_reason = "bbox_out_of_tolerance"
+        self.checks_run = ()
         self.best = IterationRecord(
             iteration=0,
             scad_source="W = 10; cube([W, W, W]);",
@@ -1160,6 +1163,7 @@ class _TierStubResult:
 
         self.status = "pass"
         self.failure_reason = None
+        self.checks_run = ()
         self.best = IterationRecord(
             iteration=0,
             scad_source="W = 10; cube([W, W, W]);",
@@ -2861,6 +2865,7 @@ def test_chat_tray_triple_offer_never_targets_stated_axis(app_with_versions):
 
             self.status = "pass"
             self.failure_reason = None
+            self.checks_run = ()
             self.best = IterationRecord(
                 iteration=0,
                 scad_source="W = 60; cube([W, 45, 20]);",
@@ -2942,6 +2947,7 @@ def test_chat_block_built_once_per_resolve(app_with_versions):
 
             self.status = "pass"
             self.failure_reason = None
+            self.checks_run = ()
             self.best = IterationRecord(
                 iteration=0,
                 scad_source="W = 60; cube([W, 45, 20]);",

@@ -34,6 +34,7 @@ class _StubResult:
             params=dict(params),
         )
         self.failure_reason = None if status == "pass" else "bbox_out_of_tolerance"
+        self.checks_run = ()
 
 
 def _default_render() -> RenderResult:

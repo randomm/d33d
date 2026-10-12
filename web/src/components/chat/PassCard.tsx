@@ -34,6 +34,7 @@
 import { useState } from "react";
 import type { RenderImage } from "../../lib/renderImage";
 import copy from "../../copy";
+import type { CheckKey } from "../../copy";
 
 /** Map a view filename ("view_00_front.png") to its caption label.
  *  Unknown stems fall back to the bare stem — never an index. */
@@ -92,7 +93,10 @@ export function PassCard({
 
   const sourceLines = source ? source.split("\n").length : 0;
   const checkWords = (checksRun ?? [])
-    .filter((key) => key in copy.passCard.checkWords)
+    .filter(
+      (key): key is CheckKey =>
+        Object.prototype.hasOwnProperty.call(copy.passCard.checkWords, key),
+    )
     .map((key) => copy.passCard.checkWords[key]);
 
   return (
