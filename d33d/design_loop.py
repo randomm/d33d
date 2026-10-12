@@ -2700,7 +2700,16 @@ async def run_design_loop_async(
 
         repair = next_repair
         if consecutive_no_improvement >= NO_IMPROVEMENT_LIMIT:
-            return _exhausted(iterations, best, best_score)
+            # Issue #435: a visual-review fail on the iteration that triggered
+            # the stop keeps its reason (a gate/error_class reason still wins).
+            return _exhausted(
+                iterations,
+                best,
+                best_score,
+                fallback_reason=(
+                    VISUAL_REVIEW_FAILED_REASON if _review_failed else None
+                ),
+            )
 
     if _review_failed:
         # Issue #435: the last attempt was judged not to match the request.

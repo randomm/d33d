@@ -5382,6 +5382,22 @@ def test_review_fail_on_last_iteration_exhausts_with_visual_review_failed(tmp_pa
     assert result.best is not None
 
 
+def test_review_fail_then_no_improvement_stop_keeps_visual_review_failed(tmp_path):
+    from d33d.post_check_reasons import VISUAL_REVIEW_FAILED_REASON
+
+    # Every review fails; candidates are all perfect, so the no-improvement
+    # stop fires on the third (review-fail) iteration, well before the cap.
+    result, counts = _run_review_loop(
+        tmp_path,
+        replies=[_verdict_reply("fail", REVIEW_FAIL_REASON)],
+        max_iterations=5,
+    )
+    assert result.status == "exhausted"
+    assert result.iterations_used == NO_IMPROVEMENT_LIMIT + 1 == 3
+    assert counts["critique"] == 3
+    assert result.failure_reason == VISUAL_REVIEW_FAILED_REASON
+
+
 @pytest.mark.parametrize(
     "reply",
     [
