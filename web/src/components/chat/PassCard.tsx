@@ -64,6 +64,9 @@ interface PassCardProps {
    *  against the request. Anything else (T2, timeout, error, unknown)
    *  says "not visually reviewed" — never a confident claim. */
   visuallyReviewed?: boolean;
+  /** Issue #435: the keys of the checks that executed on this pass (the
+   *  done frame's `checks_run`). Empty or absent → no checks line. */
+  checksRun?: readonly string[];
   /** The generated source (the disclosure's content — never chat text).
    *  `undefined` or empty string = no source carried this turn
    *  (no disclosure control). */
@@ -80,6 +83,7 @@ export function PassCard({
   views,
   summary,
   visuallyReviewed,
+  checksRun,
   source,
   onBesidePhoto,
 }: PassCardProps) {
@@ -87,6 +91,9 @@ export function PassCard({
   const [sourceOpen, setSourceOpen] = useState(false);
 
   const sourceLines = source ? source.split("\n").length : 0;
+  const checkWords = (checksRun ?? [])
+    .filter((key) => key in copy.passCard.checkWords)
+    .map((key) => copy.passCard.checkWords[key]);
 
   return (
     <div
@@ -131,6 +138,11 @@ export function PassCard({
       {views.length > 0 && views.length < TOTAL_VIEWS && (
         <span className="pass-card-partial" data-testid="pass-card-partial">
           {copy.passCard.partialViews(views.length, TOTAL_VIEWS)}
+        </span>
+      )}
+      {checkWords.length > 0 && (
+        <span className="pass-card-checks" data-testid="pass-card-checks">
+          {copy.passCard.checksRan(checkWords)}
         </span>
       )}
       <span className="pass-card-review" data-testid="pass-card-review">

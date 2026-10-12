@@ -26,6 +26,7 @@ __all__ = [
     "HOLLOW_INSTRUCTION",
     "HOLLOW_RATIO",
     "HOLLOW_SOLID_REASON",
+    "hollow_check_ran",
     "hollow_solid_check",
     "is_hollow_request",
 ]
@@ -71,6 +72,16 @@ def _bbox_volume(mesh: Any) -> float | None:
         return None
     vol = extents[0] * extents[1] * extents[2]
     return vol if vol > 0 else None
+
+
+def hollow_check_ran(request: str, stl: str | None) -> bool:
+    """Issue #435: did :func:`hollow_solid_check` EXECUTE (not abstain or
+    exempt)? True when the request is not exempt and the STL loads."""
+    if is_hollow_request(request):
+        return False
+    if not stl:
+        return False
+    return load_mesh(stl) is not None
 
 
 def hollow_solid_check(request: str, stl: str | None) -> tuple[str, str] | None:

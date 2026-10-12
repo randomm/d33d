@@ -282,15 +282,20 @@ export const passCard = {
 
   checksPassed: (count: number): string => `${count} checks`,
 
-  /** Issue #435: what the pass card says was really checked. Only the lines
-   *  for checks that executed are rendered. */
-  checkLines: {
-    size: (w: number, d: number, h: number): string =>
-      `Size ${mm(w)} × ${mm(d)} × ${mm(h)}`,
-    watertight: "Watertight",
-    postChecks: (count: number): string =>
-      `${count} ${count === 1 ? "post-check" : "post-checks"} ran`,
-  },
+  /** Issue #435: the short word for each check the server reports as run
+   *  (the closed keys of d33d/pass_checks.py). Only checks that executed are
+   *  listed; a key with no word here is never shown. */
+  checkWords: {
+    size: "size",
+    watertight: "watertight",
+    screw_clearance: "screw clearance",
+    through_holes: "through-holes",
+    stack_height: "stack height",
+    change_detected: "change detected",
+    hollow: "not hollow",
+  } as Record<string, string>,
+  /** The "Checked: …" line over the words of the checks that ran. */
+  checksRan: (words: readonly string[]): string => `Checked: ${words.join(", ")}`,
   /** The vision review ran and matched the request. */
   reviewedAgainstRequest:
     "Reviewed against your request — the six views were checked by the vision model.",

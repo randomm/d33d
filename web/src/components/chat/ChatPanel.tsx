@@ -61,6 +61,8 @@ export interface ChatMessage {
   /** Issue #435: whether the vision model judged this pass's render
    *  against the request (the pass card's review line). */
   visuallyReviewed?: boolean;
+  /** Issue #435: the checks that executed on this pass (done frame). */
+  checksRun?: string[];
   /** The generated source for this turn's disclosure. Arrives on the
    *  token frame; disclosure content, never chat text (W10). */
   source?: string;
@@ -242,6 +244,7 @@ export function ChatPanel({
                   versionOrdinal={vid === null ? null : ordinalById.get(vid) ?? null}
                   views={msg.views ?? []}
                   visuallyReviewed={msg.visuallyReviewed}
+                  checksRun={msg.checksRun}
                   summary={msg.content}
                   source={msg.source}
                   onBesidePhoto={onBesidePhoto}

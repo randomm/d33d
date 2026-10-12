@@ -461,6 +461,10 @@ class DesignResult:
     #: pass (non-vision tier, call error, unparseable reply, timeout) and on
     #: every non-pass outcome — the pass card says "not visually reviewed".
     visually_reviewed: bool = False
+    #: Issue #435: the closed, ordered keys (:data:`d33d.pass_checks.CHECK_KEYS`)
+    #: of the checks that EXECUTED on the kept pass candidate. An abstaining
+    #: post-check is never listed. Empty on every non-pass outcome.
+    checks_run: tuple[str, ...] = ()
 
 
 #: Structured failure reasons for an exhausted loop, in bit order — each
@@ -1875,7 +1879,7 @@ async def run_design_loop_async(
     renderer_check: Callable[[], bool] | None = None,
     image_check: Callable[[], dict[str, str] | None] | None = None,
     attempt_timeout: float | None = DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS,
-    vision: bool = True,
+    vision: bool = False,
 ) -> DesignResult:
     """Run the bounded iterate-and-score design loop (async core).
 
@@ -2619,6 +2623,22 @@ async def run_design_loop_async(
             and _center_finding is None
             and not _review_failed
         ):
+            from d33d.pass_checks import checks_that_ran
+
+            _ran = await asyncio.to_thread(
+                checks_that_ran,
+                request=request,
+                stl=render.stl,
+                render_ok=render.error_class == "ok",
+                bbox=bbox,
+                bbox_abstained=candidate_score.bbox_abstained,
+                scad_source=scad_source,
+                params=_scad_params(scad_source),
+                param_meta=extract_param_meta(scad),
+                part_scale=part_scale,
+                parent_mesh_stl=parent_mesh_stl,
+                through_baseline_genus=through_baseline_genus,
+            )
             return DesignResult(
                 status="pass",
                 best=record,
@@ -2626,6 +2646,7 @@ async def run_design_loop_async(
                 failure_reason=None,
                 iterations_used=iteration,
                 visually_reviewed=_visually_reviewed,
+                checks_run=_ran,
             )
 
         if best is None or is_best(candidate_score, best_score):
@@ -2918,7 +2939,7 @@ def run_design_loop(
     parent_face_count: int | None = None,
     renderer_check: Callable[[], bool] | None = None,
     image_check: Callable[[], dict[str, str] | None] | None = None,
-    vision: bool = True,
+    vision: bool = False,
 ) -> DesignResult:
     """Synchronous entry point for the bounded design loop.
 

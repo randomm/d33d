@@ -46,6 +46,7 @@ __all__ = [
     "resolve_baseline_genus",
     "route_through_hole_repair",
     "through_hole_check",
+    "through_hole_check_ran",
 ]
 
 #: The hyphenated through-hole tokens that fire on their own (no hole
@@ -283,6 +284,25 @@ def resolve_baseline_genus(through_baseline_genus: BaselineGenus | None) -> Base
     if through_baseline_genus < 0:
         return None
     return through_baseline_genus
+
+
+def through_hole_check_ran(
+    request: str,
+    stl: str | None,
+    through_baseline_genus: BaselineGenus | None,
+) -> bool:
+    """Issue #435: did :func:`through_hole_check` EXECUTE (not abstain)?
+
+    Mirrors the check's abstain ladder without deciding anything: a through
+    request, a resolvable baseline, a loadable STL path and a measurable genus.
+    """
+    if not is_through_request(request):
+        return False
+    if resolve_baseline_genus(through_baseline_genus) is None:
+        return False
+    if not isinstance(stl, str) or not stl:
+        return False
+    return _rendered_genus(stl) is not None
 
 
 def route_through_hole_repair(

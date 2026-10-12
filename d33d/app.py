@@ -96,8 +96,8 @@ from d33d.config.catalogue import (
     load_catalogue,
 )
 from d33d.config.probes import CapabilityCache
-from d33d.critique_protocol import review_vision_enabled
 from d33d.config.resolve import resolve_model
+from d33d.critique_protocol import review_vision_enabled
 from d33d.design_llm import LLM_CALL_TIMEOUT_SECONDS
 from d33d.design_loop_events import (
     EMPTY_PHOTO_DATA_URI,

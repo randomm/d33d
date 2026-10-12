@@ -181,3 +181,27 @@ describe("PassCard review outcome (issue #435)", () => {
     expect(screen.getByTestId("pass-card-review").textContent).toBe(copy.passCard.notVisuallyReviewed);
   });
 });
+
+describe("PassCard checks line (issue #435)", () => {
+  it("lists the checks that ran, then the review line", () => {
+    render(
+      <PassCard
+        versionId={4}
+        versionOrdinal={4}
+        views={SIX_VIEWS}
+        summary="A box."
+        visuallyReviewed={true}
+        checksRun={["size", "watertight", "through_holes"]}
+      />,
+    );
+    expect(screen.getByTestId("pass-card-checks").textContent).toBe(
+      "Checked: size, watertight, through-holes",
+    );
+    expect(screen.getByTestId("pass-card-review").textContent).toBe(copy.passCard.reviewedAgainstRequest);
+  });
+
+  it("renders no checks line when no checks are carried", () => {
+    render(<PassCard versionId={4} versionOrdinal={4} views={SIX_VIEWS} summary="A box." />);
+    expect(screen.queryByTestId("pass-card-checks")).toBeNull();
+  });
+});

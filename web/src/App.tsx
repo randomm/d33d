@@ -1431,7 +1431,12 @@ export default function App({ client }: AppProps) {
                     // Issue #435: whether the kept render was judged against
                     // the request; absent (old server) reads as not reviewed.
                     ...(isReal && !isAnswer
-                      ? { visuallyReviewed: data.visually_reviewed === true }
+                      ? {
+                          visuallyReviewed: data.visually_reviewed === true,
+                          checksRun: Array.isArray(data.checks_run)
+                            ? (data.checks_run as string[])
+                            : undefined,
+                        }
                       : {}),
                   };
                 }),

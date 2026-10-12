@@ -5338,6 +5338,7 @@ def _run_review_loop(
         llm_fn=llm_fn,
         bbox_fn=bbox_fn,
         max_iterations=max_iterations,
+        vision=True,
     )
     return result, counts
 

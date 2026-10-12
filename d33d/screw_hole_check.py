@@ -33,6 +33,7 @@ from d33d.design_prompts import (
 __all__ = [
     "is_screw_hole_candidate",
     "mm",
+    "screw_check_ran",
     "undersize_screw_hole",
 ]
 
@@ -89,6 +90,65 @@ def is_screw_hole_candidate(
     return True
 
 
+def _screw_scope(
+    request: str,
+    params: dict[str, float],
+    param_meta: dict[str, Any],
+) -> tuple[list[str], list[tuple[str, float, dict[str, Any] | None]]] | None:
+    """The check's applicability scope (issue #435 shares it with the pass
+    card): the requested metric sizes and the candidate hole params.
+
+    ``None`` when the check does not apply (no request/params, threaded
+    wording, no metric size named). Otherwise ``(sizes, candidates)`` where
+    each candidate is ``(name, value, meta)`` for a positive numeric param that
+    reads as a screw hole (and, without metadata, the request frames a hole).
+    """
+    if not request or not params:
+        return None
+    if _THREAD_HOLE_WORD_RE.search(request):
+        return None
+    sizes: list[str] = []
+    for value in SCREW_SIZE_RE.findall(request):
+        size = f"M{value}"
+        if size in METRIC_SCREW_CLEARANCE_MM and size not in sizes:
+            sizes.append(size)
+    if not sizes:
+        return None
+    request_lower = request.lower()
+    candidates: list[tuple[str, float, dict[str, Any] | None]] = []
+    for name, value in params.items():
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            continue
+        value = float(value)
+        if value <= 0:
+            continue
+        meta = param_meta.get(name) if isinstance(param_meta, dict) else None
+        if not is_screw_hole_candidate(name, value, meta):
+            continue
+        if meta is None and "hole" not in request_lower:
+            # No metadata to confirm the param is a screw hole: the
+            # request must ALSO frame a hole for the check to fire
+            # (never guess which param a named screw sizes).
+            continue
+        candidates.append((name, value, meta))
+    return sizes, candidates
+
+
+def screw_check_ran(
+    request: str,
+    params: dict[str, float],
+    param_meta: dict[str, Any],
+) -> bool:
+    """Issue #435: did the screw-hole check EXECUTE on this candidate?
+
+    True only when the check applies AND exactly one candidate param exists
+    (the check decides on one param; zero or several abstain). Used to list
+    ``screw_clearance`` on a pass only when it actually ran.
+    """
+    scope = _screw_scope(request, params, param_meta)
+    return scope is not None and len(scope[1]) == 1
+
+
 def undersize_screw_hole(
     request: str,
     params: dict[str, float],
@@ -126,33 +186,12 @@ def undersize_screw_hole(
     0.05 mm to trigger (a hole at 4.45 mm for M4 abstains; at 4.44 mm it
     triggers).
     """
-    if not request or not params:
+    scope = _screw_scope(request, params, param_meta)
+    if scope is None:
         return None
-    if _THREAD_HOLE_WORD_RE.search(request):
-        return None
-    sizes: list[str] = []
-    for value in SCREW_SIZE_RE.findall(request):
-        size = f"M{value}"
-        if size in METRIC_SCREW_CLEARANCE_MM and size not in sizes:
-            sizes.append(size)
-    if not sizes:
-        return None
-    request_lower = request.lower()
+    sizes, candidates = scope
     undersize: list[tuple[str, float, float, str]] = []
-    for name, value in params.items():
-        if not isinstance(value, (int, float)) or isinstance(value, bool):
-            continue
-        value = float(value)
-        if value <= 0:
-            continue
-        meta = param_meta.get(name) if isinstance(param_meta, dict) else None
-        if not is_screw_hole_candidate(name, value, meta):
-            continue
-        if meta is None and "hole" not in request_lower:
-            # No metadata to confirm the param is a screw hole: the
-            # request must ALSO frame a hole for the check to fire
-            # (never guess which param a named screw sizes).
-            continue
+    for name, value, meta in candidates:
         for size in sizes:
             clearance = METRIC_SCREW_CLEARANCE_MM[size]
             if clearance - value <= UNDERSIZE_EPSILON_MM:

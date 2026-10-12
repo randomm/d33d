@@ -1784,6 +1784,14 @@ async def _resolve_version_create(
 
 
 
+def checks_run_fields(result: Any) -> dict[str, list[str]]:
+    """Issue #435: the done frame's ``checks_run`` (the checks that executed on
+    the kept pass, in the closed order). Omitted entirely when empty, so an
+    unreviewed-and-unchecked frame stays byte-identical to today's."""
+    keys = list(getattr(result, "checks_run", ()) or ())
+    return {"checks_run": keys} if keys else {}
+
+
 async def run_design_loop_with_events(
     app: Any,
     project_id: int,
@@ -2594,6 +2602,8 @@ async def run_design_loop_with_events(
             # request (the pass card's "reviewed" vs "not visually reviewed").
             "visually_reviewed": bool(getattr(result, "visually_reviewed", False)),
         }
+        # Issue #435: the checks that executed on the kept pass (omit-when-empty).
+        done_data.update(checks_run_fields(result))
         # The offer rides the done frame as ADDITIVE fields (the SPA's
         # ``App.tsx`` routes ``confirm_offer`` + ``confirm_sentence`` to a
         # separate plain assistant message after the pass card — issue
