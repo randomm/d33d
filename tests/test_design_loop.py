@@ -43,7 +43,7 @@ import trimesh
 
 from d33d.config.catalogue import load_catalogue
 from d33d.config.probes import CapabilityResult
-from d33d.design_llm import TOTAL_HEIGHT_INSTRUCTION, LLMResult, send
+from d33d.design_llm import TOTAL_HEIGHT_INSTRUCTION, LLMResult, SenderError, send
 from d33d.design_loop import (
     GATE_REASON_BITS,
     MAX_ITERATIONS,
@@ -5276,3 +5276,149 @@ def test_fingerprint_vectorised_matches_reference_on_all_fixtures():
             "— the numpy path must hash byte-identically to the old "
             "pure-Python round/sort/hash"
         )
+
+
+# ---------------------------------------------------------------------------
+# Issue #435: the design loop reviews its own gate-passing renders
+# ---------------------------------------------------------------------------
+
+REVIEW_FAIL_REASON = "the groove is a notch, not a through slot"
+
+
+def _review_render(tmp_path: Path) -> RenderResult:
+    """An ok render whose six view PNGs sit in a durable artifact dir, so
+    the visual review has the images it needs."""
+    import dataclasses
+
+    from d33d.critique_protocol import REQUIRED_VIEW_NAMES
+
+    artifact = tmp_path / "render"
+    artifact.mkdir(exist_ok=True)
+    for name in REQUIRED_VIEW_NAMES:
+        (artifact / name).write_bytes(b"png")
+    return dataclasses.replace(_render(), render_artifact_dir=str(artifact))
+
+
+def _verdict_reply(verdict: str, reason: str = "") -> LLMResult:
+    body = json.dumps({"verdict": verdict, "reason": reason})
+    return _llm_result(content=f"```json\n{body}\n```")
+
+
+def _run_review_loop(
+    tmp_path: Path,
+    *,
+    replies: Sequence[Any],
+    max_iterations: int = MAX_ITERATIONS,
+    bbox_fn: BboxFn | None = _bbox_ok,
+    design_scad: str = GOOD_SCAD,
+) -> tuple[DesignResult, dict[str, int]]:
+    """Run the loop with a role-aware stub: design calls answer with
+    ``design_scad``, critique calls answer from ``replies`` in order (an
+    ``LLMResult``, an exception to raise, or ``"hang"`` to sleep past the
+    review budget)."""
+    counts = {"design": 0, "critique": 0}
+    render = _review_render(tmp_path)
+
+    async def llm_fn(role, messages, system):
+        if role != "critique":
+            counts["design"] += 1
+            return _scad_llm(design_scad)
+        item = replies[min(counts["critique"], len(replies) - 1)]
+        counts["critique"] += 1
+        if item == "hang":
+            await asyncio.sleep(10)
+        if isinstance(item, BaseException):
+            raise item
+        return item
+
+    result = run_design_loop(
+        photo=PHOTO,
+        stated_dims=STATED,
+        render_fn=lambda scad, defines: render,
+        llm_fn=llm_fn,
+        bbox_fn=bbox_fn,
+        max_iterations=max_iterations,
+    )
+    return result, counts
+
+
+def test_review_pass_passes_and_is_marked_visually_reviewed(tmp_path):
+    result, counts = _run_review_loop(tmp_path, replies=[_verdict_reply("pass", "matches")])
+    assert result.status == "pass"
+    assert result.visually_reviewed is True
+    assert result.iterations_used == 1
+    assert counts["critique"] == 1
+
+
+def test_review_fail_routes_repair_then_next_attempt_passes(tmp_path):
+    from d33d.post_check_reasons import VISUAL_REVIEW_FAILED_REASON
+
+    result, counts = _run_review_loop(
+        tmp_path,
+        replies=[_verdict_reply("fail", REVIEW_FAIL_REASON), _verdict_reply("pass", "ok")],
+    )
+    assert result.status == "pass"
+    assert result.iterations_used == 2
+    assert counts == {"design": 2, "critique": 2}
+    first = result.iterations[0]
+    assert first.failure_class == "geometrically_wrong"
+    assert first.repair is not None
+    assert first.repair["reason"] == VISUAL_REVIEW_FAILED_REASON
+    assert first.repair["evidence"] == REVIEW_FAIL_REASON
+    assert result.visually_reviewed is True
+
+
+def test_review_fail_on_last_iteration_exhausts_with_visual_review_failed(tmp_path):
+    from d33d.post_check_reasons import VISUAL_REVIEW_FAILED_REASON
+
+    result, counts = _run_review_loop(
+        tmp_path, replies=[_verdict_reply("fail", REVIEW_FAIL_REASON)]
+    )
+    assert result.status == "exhausted"
+    assert result.failure_reason == VISUAL_REVIEW_FAILED_REASON
+    assert result.iterations_used == MAX_ITERATIONS
+    assert counts["critique"] == MAX_ITERATIONS
+    assert result.best is not None
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        RuntimeError("provider down"),
+        _llm_result(content="looks fine to me"),
+    ],
+    ids=["call-error", "unparseable"],
+)
+def test_unreviewed_candidate_still_passes_without_the_flag(tmp_path, reply):
+    result, _ = _run_review_loop(tmp_path, replies=[reply])
+    assert result.status == "pass"
+    assert result.visually_reviewed is False
+
+
+def test_review_timeout_passes_as_unreviewed(tmp_path, monkeypatch):
+    import d33d.design_loop as _dl
+
+    monkeypatch.setattr(_dl, "DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS", 0.05)
+    result, _ = _run_review_loop(tmp_path, replies=["hang"])
+    assert result.status == "pass"
+    assert result.visually_reviewed is False
+
+
+def test_non_vision_tier_skips_review_and_is_not_visually_reviewed(tmp_path):
+    result, _ = _run_review_loop(
+        tmp_path,
+        replies=[SenderError("tier T2 has no tool channel", status="no_tools_supported")],
+    )
+    assert result.status == "pass"
+    assert result.visually_reviewed is False
+
+
+def test_review_not_called_when_a_gate_fails(tmp_path):
+    result, counts = _run_review_loop(
+        tmp_path,
+        replies=[_verdict_reply("pass", "ok")],
+        max_iterations=1,
+        bbox_fn=lambda render: None,
+    )
+    assert result.status == "exhausted"
+    assert counts["critique"] == 0

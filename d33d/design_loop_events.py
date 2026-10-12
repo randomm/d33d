@@ -100,11 +100,19 @@ ADAPTER_DEADLINE_MARGIN_SECONDS = 60.0
 #: NO version kept, the exact QA failure #417 exists to fix.
 ADAPTER_RENDER_ALLOWANCE_SECONDS = DEFAULT_TIMEOUT_S
 
+#: The per-attempt visual-review allowance in the safety-net sizing (issue
+#: #435): each attempt that passes every gate also runs one review call under
+#: its own :data:`DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS` budget, so the net adds
+#: the same constant per attempt. Without it a legitimately slow attempt
+#: (LLM + render + review) would be cut off by the adapter, not the loop.
+ADAPTER_REVIEW_ALLOWANCE_SECONDS = DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS
+
 #: The adapter's OUTER SAFETY NET total deadline in seconds (issue
 #: #417): the per-attempt worst case (LLM budget + render allowance) ×
 #: ``MAX_ITERATIONS`` plus the fixed margin — (120 s + 120 s) × 3 + 60 s
-#: = 780 s. It stays below the client's ``STREAM_TOTAL_TIMEOUT_MS``
-#: (``web/src/lib/api.ts``, 840 s = 14 min) with a 60 s margin so the
+#: = 780 s before issue #435; now (120 s + 120 s review + 120 s render) × 3 +
+#: 60 s = 1140 s. It stays below the client's ``STREAM_TOTAL_TIMEOUT_MS``
+#: (``web/src/lib/api.ts``, 1200 s = 20 min) with a 60 s margin so the
 #: server's structured frame arrives before the client's generic
 #: "stream interrupted" kill. Read at call time (module-level name
 #: lookup, so tests can ``monkeypatch.setattr`` it to small values — the
@@ -2317,7 +2325,11 @@ async def run_design_loop_with_events(
             # legitimately slow run that finishes within its budget is
             # never cut off here.
             _total_deadline = (
-                (DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS + ADAPTER_RENDER_ALLOWANCE_SECONDS)
+                (
+                    DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS
+                    + ADAPTER_REVIEW_ALLOWANCE_SECONDS
+                    + ADAPTER_RENDER_ALLOWANCE_SECONDS
+                )
                 * MAX_ITERATIONS
                 + ADAPTER_DEADLINE_MARGIN_SECONDS
             )
@@ -2349,12 +2361,13 @@ async def run_design_loop_with_events(
                 logger.warning(
                     "design loop for project %s exceeded the %ss "
                     "adapter safety-net deadline (per-attempt LLM %ss + "
-                    "render %ss, × %s attempts + %ss margin; measured %r "
-                    "s per attempt) — emitting terminal design_loop_timed_out "
-                    "frame",
+                    "review %ss + render %ss, × %s attempts + %ss margin; "
+                    "measured %r s per attempt) — emitting terminal "
+                    "design_loop_timed_out frame",
                     project_id,
                     _total_deadline,
                     DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS,
+                    ADAPTER_REVIEW_ALLOWANCE_SECONDS,
                     ADAPTER_RENDER_ALLOWANCE_SECONDS,
                     MAX_ITERATIONS,
                     ADAPTER_DEADLINE_MARGIN_SECONDS,
@@ -2577,6 +2590,9 @@ async def run_design_loop_with_events(
         done_data: dict[str, Any] = {
             "message": _result_message(result),
             "bbox_abstained": abstained,
+            # Issue #435: whether the kept candidate was judged against the
+            # request (the pass card's "reviewed" vs "not visually reviewed").
+            "visually_reviewed": bool(getattr(result, "visually_reviewed", False)),
         }
         # The offer rides the done frame as ADDITIVE fields (the SPA's
         # ``App.tsx`` routes ``confirm_offer`` + ``confirm_sentence`` to a

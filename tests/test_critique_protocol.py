@@ -24,6 +24,7 @@ No Docker, no network: ``llm_fn`` / ``request_factory`` are injected (the
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from pathlib import Path
@@ -38,6 +39,7 @@ from d33d.critique_protocol import (
     REQUIRED_VIEW_NAMES,
     CritiqueVerdict,
     InsufficientViews,
+    ReviewVerdict,
     ViewMismatch,
     build_critique_messages,
     build_critique_system,
@@ -45,7 +47,10 @@ from d33d.critique_protocol import (
     deterministic_verdict,
     make_critique_llm_fn,
     parse_critique,
+    parse_review,
+    render_view_data_uris,
     required_views,
+    review_render,
     validate_views,
 )
 from d33d.design_llm import LLMResult, SenderError
@@ -567,3 +572,117 @@ class _FakeResponse:
     @property
     def is_success(self) -> bool:
         return True
+
+
+# ---------------------------------------------------------------------------
+# Issue #435: request-versus-render review (review_render)
+# ---------------------------------------------------------------------------
+
+_REVIEW_VIEWS = {name: f"data:image/png;base64,{name}" for name in REQUIRED_VIEW_NAMES}
+
+
+def _review_reply(content: str = "", tool_calls: tuple = ()) -> LLMResult:
+    return LLMResult(
+        content=content,
+        tool_calls=tool_calls,
+        prompt_hash="r" * 64,
+        tier="T1",
+        status="ok",
+        request_body={},
+    )
+
+
+def _scripted_review_llm(reply: Any):
+    """A role-aware llm_fn stub: records every (role, messages) and answers
+    with ``reply`` (an LLMResult, or an exception instance to raise)."""
+    calls: list[tuple[str, list[dict[str, Any]]]] = []
+
+    async def llm_fn(role, messages, system):
+        calls.append((role, messages))
+        if isinstance(reply, BaseException):
+            raise reply
+        return reply
+
+    return llm_fn, calls
+
+
+def test_review_render_pass_reply_passes_and_calls_critique_role():
+    llm, calls = _scripted_review_llm(
+        _review_reply('```json\n{"verdict": "pass", "reason": "matches"}\n```')
+    )
+    verdict = asyncio.run(
+        review_render(_REVIEW_VIEWS, "a 20 mm box", None, llm_fn=llm)
+    )
+    assert verdict == ReviewVerdict(status="pass")
+    assert [role for role, _ in calls] == ["critique"]
+    parts = calls[0][1][0]["content"]
+    # Six view images, the request as data, no reference photo part.
+    assert sum(1 for p in parts if p["type"] == "image_url") == 6
+    assert "a 20 mm box" in parts[0]["text"]
+
+
+def test_review_render_fail_reply_carries_the_reason():
+    llm, _ = _scripted_review_llm(
+        _review_reply(
+            '```json\n{"verdict": "fail", "reason": "the groove is a notch, not a slot"}\n```'
+        )
+    )
+    verdict = asyncio.run(review_render(_REVIEW_VIEWS, "a slot", None, llm_fn=llm))
+    assert verdict.status == "fail"
+    assert verdict.reason == "the groove is a notch, not a slot"
+
+
+def test_review_render_reference_photo_adds_an_image_part():
+    llm, calls = _scripted_review_llm(
+        _review_reply('{"verdict": "pass", "reason": "ok"}')
+    )
+    asyncio.run(
+        review_render(_REVIEW_VIEWS, "box", "data:image/png;base64,PHOTO", llm_fn=llm)
+    )
+    parts = calls[0][1][0]["content"]
+    assert sum(1 for p in parts if p["type"] == "image_url") == 7
+
+
+def test_review_render_unparseable_reply_is_unreviewed():
+    llm, _ = _scripted_review_llm(_review_reply("looks fine to me"))
+    verdict = asyncio.run(review_render(_REVIEW_VIEWS, "box", None, llm_fn=llm))
+    assert verdict == ReviewVerdict(status="unreviewed", why="unparseable")
+
+
+def test_review_render_fail_without_reason_is_unreviewed():
+    assert parse_review(_review_reply('{"verdict": "fail"}')) is None
+
+
+def test_review_render_call_error_is_unreviewed():
+    llm, _ = _scripted_review_llm(RuntimeError("boom"))
+    verdict = asyncio.run(review_render(_REVIEW_VIEWS, "box", None, llm_fn=llm))
+    assert verdict == ReviewVerdict(status="unreviewed", why="call_error")
+
+
+def test_review_render_non_vision_tier_is_unreviewed_no_vision():
+    llm, _ = _scripted_review_llm(
+        SenderError("tier T2 has no tool channel", status="no_tools_supported")
+    )
+    verdict = asyncio.run(review_render(_REVIEW_VIEWS, "box", None, llm_fn=llm))
+    assert verdict == ReviewVerdict(status="unreviewed", why="no_vision")
+
+
+def test_review_render_partial_views_never_judged():
+    llm, calls = _scripted_review_llm(_review_reply('{"verdict": "pass", "reason": "x"}'))
+    partial = dict(list(_REVIEW_VIEWS.items())[:5])
+    verdict = asyncio.run(review_render(partial, "box", None, llm_fn=llm))
+    assert verdict == ReviewVerdict(status="unreviewed", why="views_missing")
+    assert calls == []
+
+
+def test_render_view_data_uris_reads_six_pngs_or_nothing(tmp_path: Path):
+    from types import SimpleNamespace
+
+    assert render_view_data_uris(SimpleNamespace(render_artifact_dir=None)) == {}
+    for name in REQUIRED_VIEW_NAMES[:5]:
+        (tmp_path / name).write_bytes(b"png")
+    assert render_view_data_uris(SimpleNamespace(render_artifact_dir=str(tmp_path))) == {}
+    (tmp_path / REQUIRED_VIEW_NAMES[5]).write_bytes(b"png")
+    uris = render_view_data_uris(SimpleNamespace(render_artifact_dir=str(tmp_path)))
+    assert set(uris) == set(REQUIRED_VIEW_NAMES)
+    assert uris[REQUIRED_VIEW_NAMES[0]].startswith("data:image/png;base64,")

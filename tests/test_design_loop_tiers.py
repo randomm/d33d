@@ -1760,3 +1760,79 @@ def test_t1_question_role_wrong_tool_name_fails_loudly():
         )
     assert exc.value.status == "error"
     assert "tool_name_mismatch" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# Issue #435: the visual review on a non-vision tier is skipped (no request)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("capability", [_t2(), _t3()], ids=["T2", "T3"])
+def test_non_vision_review_is_skipped_without_a_request(tmp_path, capability):
+    """The real ``send`` on a T2/T3 critique role raises before any HTTP
+    call; the loop's review degrades to unreviewed (no_vision) and the
+    candidate still passes, marked not visually reviewed."""
+    from d33d.critique_protocol import REQUIRED_VIEW_NAMES
+    from d33d.design_loop import run_design_loop
+    from d33d.render_worker import RenderResult
+
+    sent: list[dict[str, Any]] = []
+
+    async def factory(request: dict[str, Any]):
+        sent.append(request)
+        raise AssertionError("a non-vision tier must not send a review request")
+
+    async def llm_fn(role, messages, system):
+        if role == "critique":
+            return await send(
+                role="critique",
+                model_id="m",
+                messages=messages,
+                request_factory=factory,
+                capability=capability,
+                system=system,
+            )
+        return _llm_result_for_design(
+            "W = 10;\nD = 10;\nH = 10;\ncube([W, D, H]);\n"
+        )
+
+    artifact = tmp_path / "render"
+    artifact.mkdir()
+    for name in REQUIRED_VIEW_NAMES:
+        (artifact / name).write_bytes(b"png")
+    render = RenderResult(
+        ok=True,
+        exit_code=0,
+        duration_ms=0,
+        error_class="ok",
+        stderr="",
+        stl=None,
+        csg=None,
+        views=tuple(REQUIRED_VIEW_NAMES),
+        render_artifact_dir=str(artifact),
+    )
+    from d33d.design_loop import BboxInfo
+
+    result = run_design_loop(
+        photo="data:image/png;base64,x",
+        stated_dims=(10.0, 10.0, 10.0),
+        render_fn=lambda scad, defines: render,
+        llm_fn=llm_fn,
+        bbox_fn=lambda r: BboxInfo(10.0, 10.0, 10.0, 1000.0),
+    )
+    assert sent == []
+    assert result.status == "pass"
+    assert result.visually_reviewed is False
+
+
+def _llm_result_for_design(scad: str):
+    from d33d.design_llm import LLMResult
+
+    return LLMResult(
+        content="",
+        tool_calls=({"name": "emit_design", "arguments": {"scad": scad}},),
+        prompt_hash="d" * 64,
+        tier="T0",
+        status="ok",
+        request_body={},
+    )

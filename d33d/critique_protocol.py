@@ -40,11 +40,17 @@ Protocol contract (from 04-design-loop.md, the spec of record):
 from __future__ import annotations
 
 import asyncio
+import base64
+import inspect
 import json
+import logging
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal
+
+import httpx
 
 from d33d.config.catalogue import Catalogue
 from d33d.config.probes import CapabilityResult
@@ -60,6 +66,7 @@ __all__ = [
     "CritiqueVerdict",
     "FeatureItem",
     "InsufficientViews",
+    "ReviewVerdict",
     "ViewMismatch",
     "build_critique_messages",
     "build_critique_system",
@@ -67,9 +74,14 @@ __all__ = [
     "deterministic_verdict",
     "make_critique_llm_fn",
     "parse_critique",
+    "parse_review",
+    "render_view_data_uris",
     "required_views",
+    "review_render",
     "validate_views",
 ]
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # The six-view contract (single source of truth: render_worker.VIEWS)
@@ -724,3 +736,201 @@ def _default_feature_items(stated_dims: tuple[float, float, float] | None) -> li
         "depth_matches",
         "height_matches",
     ]
+
+
+# ---------------------------------------------------------------------------
+# Request-versus-render review of a gate-passing candidate (issue #435)
+# ---------------------------------------------------------------------------
+#
+# Unlike the pairwise :func:`critique` (which stays unwired), this review asks
+# one question: does the rendered part match what the user asked for? It runs
+# through the role-aware ``llm_fn(role, messages, system)`` edge with role
+# ``"critique"``, so the request_logs row and the role's tool plumbing are the
+# same ones ``make_critique_llm_fn`` uses.
+
+
+@dataclass(frozen=True)
+class ReviewVerdict:
+    """The outcome of :func:`review_render`.
+
+    ``status`` is ``"pass"`` (the render matches the request), ``"fail"``
+    (``reason`` names the concrete mismatch and routes as repair evidence) or
+    ``"unreviewed"`` (``why`` names why no visual judgement was made). An
+    unreviewed candidate still passes; the pass card says it was not visually
+    reviewed.
+    """
+
+    status: Literal["pass", "fail", "unreviewed"]
+    reason: str = ""
+    why: str = ""
+
+    @classmethod
+    def passed(cls) -> ReviewVerdict:
+        return cls(status="pass")
+
+    @classmethod
+    def failed(cls, reason: str) -> ReviewVerdict:
+        return cls(status="fail", reason=reason)
+
+    @classmethod
+    def unreviewed(cls, why: str) -> ReviewVerdict:
+        return cls(status="unreviewed", why=why)
+
+
+def render_view_data_uris(render: RenderResult) -> dict[str, str]:
+    """The six view PNGs of a render as data URIs, read from its durable
+    artifact directory. ``{}`` when the directory or any of the six files is
+    missing: a review never judges a partial set (the six-view rule)."""
+    artifact = getattr(render, "render_artifact_dir", None)
+    if not isinstance(artifact, str) or not artifact:
+        return {}
+    base = Path(artifact)
+    out: dict[str, str] = {}
+    for name in REQUIRED_VIEW_NAMES:
+        try:
+            raw = (base / name).read_bytes()
+        except OSError:
+            return {}
+        out[name] = "data:image/png;base64," + base64.b64encode(raw).decode("ascii")
+    return out
+
+
+def build_review_system() -> str:
+    return (
+        "You are a 3D-printing QA reviewer. You are given SIX renders of a "
+        "candidate part (one per named view), the user's request, and "
+        "optionally a reference photo of the real object. Decide whether the "
+        "render matches the request. Answer 'fail' only for a concrete, named "
+        "mismatch; answer 'pass' when the render matches. Reply with exactly "
+        "one fenced JSON block and nothing else."
+    )
+
+
+def build_review_messages(
+    *,
+    views: dict[str, str],
+    request_text: str,
+    reference_photo: str | None,
+) -> list[dict[str, Any]]:
+    """The review-role message list: request (as data), six views, optional
+    reference photo."""
+    text_parts = [
+        "Review: does the rendered part match the user's request?",
+        "Request:",
+        _USER_DATA_OPEN,
+        request_text.strip() or "(no request text)",
+        _USER_DATA_CLOSE,
+        "Six candidate renders, one per named view (labels below each image):",
+    ]
+    for name in REQUIRED_VIEW_NAMES:
+        text_parts.append(f"View: {name}")
+    if reference_photo:
+        text_parts.append("A reference photo of the real object follows the renders.")
+    text_parts.append(
+        "Reply with exactly one fenced JSON block of the form: "
+        "```json\n"
+        '{"verdict": "<pass|fail>", "reason": "<one sentence: the concrete '
+        'mismatch for fail, or what matches for pass>"}\n'
+        "```"
+    )
+    parts: list[dict[str, Any]] = [{"type": "text", "text": "\n".join(text_parts)}]
+    for name in REQUIRED_VIEW_NAMES:
+        parts.append({"type": "image_url", "image_url": {"url": views[name]}})
+    if reference_photo:
+        parts.append({"type": "image_url", "image_url": {"url": reference_photo}})
+    return [{"role": "user", "content": parts}]
+
+
+def _review_from_payload(payload: dict[str, Any]) -> ReviewVerdict | None:
+    body = payload.get("arguments")
+    if isinstance(body, dict):
+        payload = body
+    verdict = payload.get("verdict")
+    reason = payload.get("reason")
+    reason = reason.strip() if isinstance(reason, str) else ""
+    if verdict == "pass":
+        return ReviewVerdict.passed()
+    if verdict == "fail" and reason:
+        return ReviewVerdict.failed(reason)
+    # A fail with no concrete reason, or any other verdict, is not a verdict.
+    return None
+
+
+def parse_review(result: LLMResult) -> ReviewVerdict | None:
+    """Parse a review reply into a verdict; ``None`` when the reply carries
+    no usable ``pass`` / ``fail``-with-reason (the caller maps it to
+    ``unreviewed``)."""
+    candidates: list[str] = []
+    for call in result.tool_calls:
+        args = call.get("arguments") if isinstance(call, dict) else None
+        if isinstance(args, dict) and "verdict" in args:
+            verdict = _review_from_payload(args)
+            if verdict is not None:
+                return verdict
+        elif isinstance(args, str) and args:
+            candidates.append(args)
+    if isinstance(result.content, str) and result.content:
+        candidates.append(result.content)
+    for text in candidates:
+        for obj in (_extract_fenced_json(text), _extract_json_object(text)):
+            if obj is None:
+                continue
+            try:
+                payload = json.loads(obj)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            verdict = _review_from_payload(payload)
+            if verdict is not None:
+                return verdict
+    return None
+
+
+async def review_render(
+    views: dict[str, str],
+    request_text: str,
+    reference_photo: str | None = None,
+    *,
+    llm_fn: Any,
+) -> ReviewVerdict:
+    """Review one gate-passing candidate's six renders against the request.
+
+    ``views`` maps the six view filenames to image data URIs (see
+    :func:`render_view_data_uris`). ``llm_fn(role, messages, system)`` is the
+    loop's role-aware edge (sync or async); the call is made with role
+    ``"critique"``. Never raises for a call-side failure: a non-vision tier
+    (``SenderError`` ``no_tools_supported``), any other call error, or an
+    unparseable reply returns ``unreviewed`` with the reason. The per-attempt
+    timeout is the caller's (the loop wraps this in its own ``wait_for``).
+    """
+    missing = validate_views([name for name, url in views.items() if url])
+    if missing:
+        return ReviewVerdict.unreviewed("views_missing")
+    messages = build_review_messages(
+        views=views, request_text=request_text, reference_photo=reference_photo
+    )
+    try:
+        result = llm_fn("critique", messages, build_review_system())
+        if inspect.isawaitable(result):
+            result = await result
+    except SenderError as exc:
+        if getattr(exc, "status", "") == "no_tools_supported":
+            return ReviewVerdict.unreviewed("no_vision")
+        logger.warning("visual review call failed: %s", exc)
+        return ReviewVerdict.unreviewed("call_error")
+    except (
+        httpx.HTTPError,
+        OSError,
+        RuntimeError,
+        ValueError,
+        TypeError,
+        KeyError,
+    ) as exc:
+        # The call edge's transport / parse failures degrade to unreviewed.
+        logger.warning("visual review call failed: %s", exc)
+        return ReviewVerdict.unreviewed("call_error")
+    parsed = parse_review(result)
+    if parsed is None:
+        return ReviewVerdict.unreviewed("unparseable")
+    return parsed

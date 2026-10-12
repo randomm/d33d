@@ -4003,6 +4003,9 @@ def test_design_loop_total_timeout_yields_terminal_error_frame(app_with_versions
     monkeypatch.setattr(
         "d33d.design_loop_events.ADAPTER_RENDER_ALLOWANCE_SECONDS", 0.1
     )
+    monkeypatch.setattr(
+        "d33d.design_loop_events.ADAPTER_REVIEW_ALLOWANCE_SECONDS", 0.1
+    )
 
     class _StallLoop:
         """Production-seam-shaped stub: takes ``app`` (like the real
@@ -4143,6 +4146,9 @@ def test_design_loop_deadline_fires_among_liveness_frames(app_with_versions, mon
     monkeypatch.setattr(
         "d33d.design_loop_events.ADAPTER_RENDER_ALLOWANCE_SECONDS", 0.1
     )
+    monkeypatch.setattr(
+        "d33d.design_loop_events.ADAPTER_REVIEW_ALLOWANCE_SECONDS", 0.1
+    )
 
     class _LivenessLoop:
         """Production-seam-shaped stub: takes ``app`` (like the real
@@ -4234,6 +4240,9 @@ def test_design_loop_deadline_cancels_render_task(app_with_versions, monkeypatch
     )
     monkeypatch.setattr(
         "d33d.design_loop_events.ADAPTER_RENDER_ALLOWANCE_SECONDS", 0.1
+    )
+    monkeypatch.setattr(
+        "d33d.design_loop_events.ADAPTER_REVIEW_ALLOWANCE_SECONDS", 0.1
     )
     task_state: dict[str, object] = {}
 
@@ -8046,6 +8055,9 @@ def test_timeout_version_path_skips_unchanged_kept_candidate(
     monkeypatch.setattr(
         "d33d.design_loop_events.ADAPTER_RENDER_ALLOWANCE_SECONDS", 1.0
     )
+    monkeypatch.setattr(
+        "d33d.design_loop_events.ADAPTER_REVIEW_ALLOWANCE_SECONDS", 1.0
+    )
 
     _SCAD = "W = 20;\ncube([W, 20, 20]);\n"
 
@@ -8137,3 +8149,130 @@ def test_timeout_version_path_skips_unchanged_kept_candidate(
         f"no version may be created for an unchanged kept candidate: "
         f"{versions}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Issue #435: the events adapter drives a review call (role "critique")
+# ---------------------------------------------------------------------------
+
+
+def test_events_adapter_writes_a_critique_request_log_row(
+    app_with_versions, tmp_path, monkeypatch
+) -> None:
+    """A gate-passing candidate through the events adapter makes one review
+    call: a request_logs row with role 'critique' lands next to the design
+    row, and the pass frame reports the candidate as visually reviewed."""
+    import trimesh
+
+    from d33d import app as app_mod
+    from d33d.app import _build_production_design_loop
+    from d33d.design_llm import LLMResult
+    from d33d.render_worker import VIEWS
+
+    scad = "W = 10;\nD = 10;\nH = 10;\ncube([W, D, H]);\n"
+    artifact = tmp_path / "render"
+    artifact.mkdir()
+    trimesh.creation.box(extents=(10.0, 10.0, 10.0)).export(str(artifact / "model.stl"))
+    for name, _cam in VIEWS:
+        (artifact / name).write_bytes(b"png")
+    render = RenderResult(
+        ok=True,
+        exit_code=0,
+        duration_ms=0,
+        error_class="ok",
+        stderr="",
+        stl=str(artifact / "model.stl"),
+        csg=None,
+        views=tuple(name for name, _cam in VIEWS),
+        render_artifact_dir=str(artifact),
+    )
+
+    class _LLM:
+        roles: ClassVar[list[str]] = []
+
+        async def __call__(self, role, messages, system):
+            _LLM.roles.append(role)
+            if role == "critique":
+                return LLMResult(
+                    content='```json\n{"verdict": "pass", "reason": "matches"}\n```',
+                    tool_calls=(),
+                    prompt_hash="c" * 64,
+                    tier="t0",
+                    status="ok",
+                    request_body={},
+                )
+            return LLMResult(
+                content="",
+                tool_calls=(
+                    {"name": "emit_design", "arguments": {"scad": scad}},
+                ),
+                prompt_hash="d" * 64,
+                tier="t0",
+                status="ok",
+                request_body={},
+            )
+
+    _stub_production_closure_deps(monkeypatch, app_with_versions, tmp_path, _LLM())
+    monkeypatch.setattr(app_mod, "render_for_design_loop", lambda *a, **k: render)
+    app_with_versions.state.failures_jsonl_path = str(tmp_path / "failures.jsonl")
+    app_with_versions.state.run_design_loop = _build_production_design_loop()
+
+    async def _call(client):
+        proj = await create_project(client)
+        source = run_design_loop_with_events(
+            app_with_versions,
+            proj["id"],
+            user_message="a 10 mm cube",
+            stated_dims=(10.0, 10.0, 10.0),
+            chat_history=(),
+            photo="data:image/png;base64,x",
+            request_text="a 10 mm cube",
+        )
+        frames = []
+        async for event, data in source:
+            frames.append((event, data))
+            if event in ("done", "error"):
+                break
+        return frames
+
+    frames = run_async(app_with_versions, _call)
+    done = [data for event, data in frames if event == "done"]
+    assert done, f"no done frame: {frames}"
+    assert done[0]["visually_reviewed"] is True
+    assert "critique" in _LLM.roles
+    from d33d.db import connect as _connect
+
+    rows = _connect(app_with_versions.state.db_path)._conn.execute(
+        "SELECT role FROM request_logs ORDER BY id"
+    ).fetchall()
+    roles = [r[0] for r in rows]
+    assert "critique" in roles
+    assert "design" in roles
+
+
+def test_visual_review_failed_exhaustion_archives_a_failure_event() -> None:
+    """Issue #435: a loop exhausted by the visual review carries the
+    loop-level reason ``visual_review_failed``; the failures.jsonl hook
+    admits it (the post-check reason pattern) and builds the archive event
+    with that class instead of raising."""
+    from d33d.design_loop import DesignResult, IterationRecord
+    from d33d.evals.failure_capture import _exhausted_loop_event
+    from d33d.post_check_reasons import VISUAL_REVIEW_FAILED_REASON
+
+    result = DesignResult(
+        status="exhausted",
+        best=IterationRecord(iteration=3, scad_source="cube(1);", render=None, score=None),
+        iterations=(),
+        failure_reason=VISUAL_REVIEW_FAILED_REASON,
+        iterations_used=3,
+    )
+    event = _exhausted_loop_event(
+        design_result=result,
+        photo=None,
+        region_mark=None,
+        request="a 20 mm box",
+        model="stub/design",
+        prompt_version="p" * 64,
+        output_scad="cube(1);",
+    )
+    assert event.failure_class == VISUAL_REVIEW_FAILED_REASON

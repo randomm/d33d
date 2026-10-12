@@ -1460,6 +1460,9 @@ def test_design_loop_deadline_archives_timeout_row(
     monkeypatch.setattr(
         "d33d.design_loop_events.ADAPTER_RENDER_ALLOWANCE_SECONDS", 0.1
     )
+    monkeypatch.setattr(
+        "d33d.design_loop_events.ADAPTER_REVIEW_ALLOWANCE_SECONDS", 0.1
+    )
 
     class _StallLoop:
         """Production-seam-shaped stub (takes ``app``) that never
@@ -1555,6 +1558,9 @@ def test_design_loop_deadline_row_carries_last_scad_from_frames(
     monkeypatch.setattr(
         "d33d.design_loop_events.ADAPTER_RENDER_ALLOWANCE_SECONDS", 0.1
     )
+    monkeypatch.setattr(
+        "d33d.design_loop_events.ADAPTER_REVIEW_ALLOWANCE_SECONDS", 0.1
+    )
 
     class _StallLoopWithScad:
         """A stall that emits a progress frame carrying ``scad_source``
@@ -1647,6 +1653,9 @@ def test_design_loop_deadline_archive_sees_asyncio_wait_frames(
     )
     monkeypatch.setattr(
         "d33d.design_loop_events.ADAPTER_RENDER_ALLOWANCE_SECONDS", 0.1
+    )
+    monkeypatch.setattr(
+        "d33d.design_loop_events.ADAPTER_REVIEW_ALLOWANCE_SECONDS", 0.1
     )
 
     SCAD = "W = 40; cube([W, 40, 20]);\n"
@@ -2008,6 +2017,9 @@ def test_design_loop_slow_model_timeout_no_version_on_zero_render(
     )
     monkeypatch.setattr(
         "d33d.design_loop_events.ADAPTER_RENDER_ALLOWANCE_SECONDS", 0.1
+    )
+    monkeypatch.setattr(
+        "d33d.design_loop_events.ADAPTER_REVIEW_ALLOWANCE_SECONDS", 0.1
     )
 
     class _StallLoop:

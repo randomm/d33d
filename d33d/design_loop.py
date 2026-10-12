@@ -61,7 +61,7 @@ import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import httpx
 
@@ -85,6 +85,7 @@ from d33d.post_check_reasons import (
     SCREW_CLEARANCE_REASON,
     STACK_HEIGHT_REASON,
     THROUGH_HOLE_REASON,
+    VISUAL_REVIEW_FAILED_REASON,
 )
 from d33d.render_worker import (
     RENDER_WORKER_IMAGE,
@@ -95,6 +96,9 @@ from d33d.render_worker import (
 )
 from d33d.scad_center_check import center_vector_warning
 from d33d.unchanged_mesh_check import fingerprint_stl
+
+if TYPE_CHECKING:
+    from d33d.critique_protocol import ReviewVerdict
 
 logger = logging.getLogger(__name__)
 
@@ -452,6 +456,11 @@ class DesignResult:
     env_var: str | None = None
     renderer_detail: dict[str, str] | None = None
     attempt_latencies: tuple[float, ...] | None = None
+    #: Issue #435: ``True`` when the visual review judged the kept candidate
+    #: against the request (a "pass" verdict). ``False`` on an unreviewed
+    #: pass (non-vision tier, call error, unparseable reply, timeout) and on
+    #: every non-pass outcome — the pass card says "not visually reviewed".
+    visually_reviewed: bool = False
 
 
 #: Structured failure reasons for an exhausted loop, in bit order — each
@@ -2056,6 +2065,10 @@ async def run_design_loop_async(
     for iteration in range(1, max_iterations + 1):
         _stamp_on_progress_iteration(on_progress, iteration)
         _attempt_started = time.monotonic()
+        # Issue #435: per-iteration visual-review state (reset every attempt,
+        # so a non-rendering attempt never inherits the previous verdict).
+        _review_failed = False
+        _visually_reviewed = False
         scad_co = _call(
             llm_fn,
             "design",
@@ -2523,6 +2536,48 @@ async def run_design_loop_async(
                 }
                 _hollow_repair_fired = True
 
+        # Issue #435: visual review of a candidate that passed every gate and
+        # every post-check, immediately before the pass return. The review is
+        # its own call with its own per-attempt budget. "fail" routes
+        # ``geometrically_wrong`` with the reason as evidence (the same repair
+        # path as the other post-checks), so the next attempt can fix it; the
+        # last attempt exhausts with ``visual_review_failed``. "pass" passes;
+        # "unreviewed" passes and the card says so.
+        if (
+            candidate_score.perfect
+            and next_repair is None
+            and not _post_check_fired
+            and not _hollow_repair_fired
+            and _center_finding is None
+        ):
+            _verdict = await _visual_review(
+                render, request=request, photo=photo, llm_fn=llm_fn
+            )
+            if _verdict.status == "fail":
+                _review_failed = True
+                failure_class = "geometrically_wrong"
+                _review_directive = route_repair(
+                    classified=ClassifiedFailure(
+                        failure_class="geometrically_wrong",
+                        evidence=_verdict.reason,
+                        repairable=True,
+                    ),
+                    scad_source=scad_source,
+                )
+                next_repair = (
+                    _review_directive.to_dict()
+                    if _review_directive is not None
+                    else {
+                        "failure_class": "geometrically_wrong",
+                        "instruction": _verdict.reason,
+                        "scad_source": scad_source,
+                        "evidence": _verdict.reason,
+                    }
+                )
+                next_repair["reason"] = VISUAL_REVIEW_FAILED_REASON
+            elif _verdict.status == "pass":
+                _visually_reviewed = True
+
         # Issue #432: identical-repair stop. A post-check repair whose
         # rendered mesh equals the PREVIOUS iteration's (same post-check
         # reason) cannot move — stop after this attempt instead of repairing
@@ -2555,6 +2610,7 @@ async def run_design_loop_async(
             and not _post_check_fired
             and not _hollow_repair_fired
             and _center_finding is None
+            and not _review_failed
         ):
             return DesignResult(
                 status="pass",
@@ -2562,6 +2618,7 @@ async def run_design_loop_async(
                 iterations=tuple(iterations),
                 failure_reason=None,
                 iterations_used=iteration,
+                visually_reviewed=_visually_reviewed,
             )
 
         if best is None or is_best(candidate_score, best_score):
@@ -2600,6 +2657,14 @@ async def run_design_loop_async(
         if consecutive_no_improvement >= NO_IMPROVEMENT_LIMIT:
             return _exhausted(iterations, best, best_score)
 
+    if _review_failed:
+        # Issue #435: the last attempt was judged not to match the request.
+        return _exhausted(
+            iterations,
+            best,
+            best_score,
+            failure_reason=VISUAL_REVIEW_FAILED_REASON,
+        )
     return _exhausted(iterations, best, best_score)
 
 
@@ -2945,6 +3010,42 @@ def _container_error_stop(
         failure_reason="container_error",
         iterations_used=len(iterations),
     )
+
+
+async def _visual_review(
+    render: RenderResult,
+    *,
+    request: str,
+    photo: str,
+    llm_fn: LLMFn,
+) -> ReviewVerdict:
+    """The issue #435 visual review of one candidate, under its OWN
+    per-attempt budget (``DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS``, read at call
+    time) — a slow review never eats the design attempt's budget. Returns a
+    :class:`d33d.critique_protocol.ReviewVerdict`; a timeout is ``unreviewed``.
+    """
+    # Lazy import: d33d.critique_protocol imports this module at load time.
+    from d33d.critique_protocol import (
+        ReviewVerdict,
+        render_view_data_uris,
+        review_render,
+    )
+
+    views = await asyncio.to_thread(render_view_data_uris, render)
+    if not views:
+        return ReviewVerdict.unreviewed("views_missing")
+    try:
+        return await asyncio.wait_for(
+            review_render(views, request, photo or None, llm_fn=llm_fn),
+            timeout=DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS,
+        )
+    except TimeoutError:
+        logger.warning(
+            "visual review exceeded the %ss per-attempt budget — passing the "
+            "candidate as unreviewed",
+            DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS,
+        )
+        return ReviewVerdict.unreviewed("timeout")
 
 
 async def _await_with_per_attempt_deadline(
