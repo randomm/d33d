@@ -1,0 +1,215 @@
+"""Issue #437: the fill-and-recut offer only ever offers Yes for a concrete
+measured hole (named, positional, or pointed at in the viewer).
+
+The QA v36 plate: bounds 0..120 x 0..80 (mm), holes at (8, 72), (112, 8)
+and (112, 72), all Ø4. The report carries the REAL bounds (not a legacy
+report), so no mesh load runs.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from typing import Any
+
+from httpx import ASGITransport, AsyncClient
+
+from d33d import fill_recut
+from d33d.fill_recut import FILL_RECUT_DECLINE_REPLY, FRILL_POINT_FIRST_REPLY
+from d33d.fill_recut_region import fill_recut_region_edit
+from d33d.part_http import part_public
+from tests.legacy_bounds_fixtures import _set_legacy_part
+
+PLATE_REPORT = {
+    "hole_count": 3,
+    "holes": [
+        {"center": [8.0, 72.0, 3.0], "axis": [0.0, 0.0, 1.0], "diameter_mm": 4.0},
+        {"center": [112.0, 8.0, 3.0], "axis": [0.0, 0.0, 1.0], "diameter_mm": 4.0},
+        {"center": [112.0, 72.0, 3.0], "axis": [0.0, 0.0, 1.0], "diameter_mm": 4.0},
+    ],
+    "bbox_file_units": [120.0, 80.0, 6.0],
+    "bbox_bounds_file_units": [[0.0, 0.0, 0.0], [120.0, 80.0, 6.0]],
+}
+
+POINT_AT_38 = "Point at the hole on the part and I'll fill it and cut a Ø38.0 mm one there."
+
+
+def _run_async(app: Any, coro_factory) -> Any:
+    async def _run():
+        async with app.router.lifespan_context(app):
+            client = AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
+            async with client:
+                return await coro_factory(client)
+
+    return asyncio.run(_run())
+
+
+async def _chat(app: Any, client: AsyncClient, pid: int, message: str):
+    """POST one chat turn and drive its event source to the done frame."""
+    r = await client.post(f"/api/projects/{pid}/chat", json={"message": message})
+    assert r.status_code == 202, r.text
+    source = app.state.event_sources.get(pid)
+    assert source is not None, "no event source registered"
+    frames = []
+    # Drain to the end: the in-flight flag is released when the stream
+    # finishes, so a break here would leave the next turn 409'd.
+    async for event, data in source:
+        frames.append((event, data))
+    # The SSE endpoint releases the in-flight flag when it closes the
+    # stream; the test drives the source directly, so it releases it here.
+    app.state.design_loop_inflight.discard(pid)
+    done = [d for e, d in frames if e == "done"]
+    assert done, frames
+    return done[0]
+
+
+def _new_plate_project(app: Any, client: AsyncClient):
+    async def _create():
+        r = await client.post("/api/projects", json={"name": "Plate437"})
+        pid = r.json()["id"]
+        _set_legacy_part(app, pid, PLATE_REPORT)
+        return pid
+
+    return _create()
+
+
+def test_point_at_text_reply_has_no_yes_and_no_pending_offer(app_with_projects) -> None:
+    """An ambiguous named hole ("make the hole 38 mm" — all three holes are
+    Ø4) gets the point-at reply: no Yes flag, no pending offer."""
+
+    async def _call(client):
+        pid = await _new_plate_project(app_with_projects, client)
+        done = await _chat(app_with_projects, client, pid, "make the hole 38 mm")
+        return done, app_with_projects.state.versions.get_pending_offer(pid)
+
+    done, offer = _run_async(app_with_projects, _call)
+    assert done["message"] == POINT_AT_38, done
+    assert not done.get("fill_recut_offer"), done
+    assert offer is None, offer
+
+
+def test_qa_replay_yes_after_point_at_gives_point_first_no_loop(app_with_projects) -> None:
+    """The QA replay's first half: the point-at turn, then a bare "yes" —
+    the point-first reply, no offer, no loop (no centre-less instruction)."""
+
+    async def _call(client):
+        pid = await _new_plate_project(app_with_projects, client)
+        await _chat(app_with_projects, client, pid, "make the hole 38 mm")
+        done = await _chat(app_with_projects, client, pid, "yes")
+        return done, app_with_projects.state.versions.get_pending_offer(pid)
+
+    done, offer = _run_async(app_with_projects, _call)
+    assert done["message"] == FRILL_POINT_FIRST_REPLY, done
+    assert not done.get("fill_recut_offer"), done
+    assert offer is None, offer
+
+
+def test_qa_replay_decline_then_positional_then_yes_carries_the_hole(app_with_projects) -> None:
+    """The QA replay, end to end: a declined request is dropped for good,
+    "make the top right hole 6 mm" offers Yes with the (112, 72) hole, and
+    the accepted instruction carries that centre and Ø6.0 — never the
+    declined 38, never a centre-less instruction."""
+
+    async def _call(client):
+        pid = await _new_plate_project(app_with_projects, client)
+        fresh = await _chat(app_with_projects, client, pid, "make the top left hole 38 mm")
+        declined = await _chat(app_with_projects, client, pid, "no")
+        after_decline = app_with_projects.state.versions.get_pending_offer(pid)
+        redo = await _chat(app_with_projects, client, pid, "make the top right hole 6 mm")
+        return fresh, declined, after_decline, redo, app_with_projects.state.versions.get_pending_offer(pid)
+
+    fresh, declined, after_decline, redo, offer = _run_async(app_with_projects, _call)
+    assert fresh.get("fill_recut_offer") is True, fresh
+    assert declined["message"] == FILL_RECUT_DECLINE_REPLY, declined
+    assert not declined.get("fill_recut_offer"), declined
+    assert after_decline is None, after_decline
+    assert redo.get("fill_recut_offer") is True, redo
+    assert "Ø6.0 mm" in redo["message"], redo
+    assert offer is not None
+    assert offer["center"] == [112.0, 72.0], offer
+    assert offer["size"] == 6.0, offer
+    assert offer["diameter_mm"] == 4.0, offer
+
+    instruction = fill_recut.fill_and_recut_instruction(offer)
+    assert "(112, 72)" in instruction, instruction
+    assert "Ø6.0 mm" in instruction, instruction
+    assert "38" not in instruction, instruction
+    assert "center" not in instruction.lower(), instruction
+
+
+def test_yes_on_live_positional_offer_accepts_with_the_measured_hole(app_with_projects) -> None:
+    """Accepting the live positional offer runs the loop with the measured
+    hole's numbers (the pure accept decision, no loop started)."""
+
+    async def _call(client):
+        pid = await _new_plate_project(app_with_projects, client)
+        await _chat(app_with_projects, client, pid, "make the top right hole 6 mm")
+        pending = app_with_projects.state.versions.get_pending_offer(pid)
+        return fill_recut.fill_recut_turn(app_with_projects, pid, "yes"), pending
+
+    result, pending = _run_async(app_with_projects, _call)
+    assert pending is not None, "the top-right offer was not stored"
+    assert result is not None and result["outcome"] == "accept", result
+    assert "(112, 72)" in result["instruction"], result["instruction"]
+
+
+def test_corner_one_on_symmetric_plate_is_point_at(app_with_projects) -> None:
+    """"the corner one" on the QA plate: every hole is the same distance from
+    its nearest corner → point-at, no offer."""
+
+    async def _call(client):
+        pid = await _new_plate_project(app_with_projects, client)
+        done = await _chat(app_with_projects, client, pid, "make the corner hole 6 mm")
+        return done, app_with_projects.state.versions.get_pending_offer(pid)
+
+    done, offer = _run_async(app_with_projects, _call)
+    assert "Point at the hole" in done["message"], done
+    assert not done.get("fill_recut_offer"), done
+    assert offer is None, offer
+
+
+def test_viewer_pick_offers_the_nearest_measured_hole(app_with_projects) -> None:
+    """A viewer pick of a hole offers Yes with the NEAREST measured hole's
+    centre and diameter (the hit point is next to (112, 72))."""
+
+    async def _call(client):
+        pid = await _new_plate_project(app_with_projects, client)
+        row = app_with_projects.state.conn.get_project(pid)
+        result = fill_recut_region_edit(
+            app_with_projects,
+            pid,
+            "make the big hole 6 mm",
+            face_normal=(0.0, 1.0, 0.0),
+            row=row,
+            part=part_public(row),
+            hit_point_mm=(110.0, 70.0, 3.0),
+        )
+        return result, app_with_projects.state.versions.get_pending_offer(pid)
+
+    result, offer = _run_async(app_with_projects, _call)
+    assert result is not None and result["outcome"] == "fresh_offer", result
+    assert offer is not None and offer["kind"] == "fill_recut", offer
+    assert offer["center"] == [112.0, 72.0], offer
+    assert offer["diameter_mm"] == 4.0, offer
+    assert offer["size"] == 6.0, offer
+
+
+def test_viewer_pick_between_holes_is_point_at(app_with_projects) -> None:
+    """A pick equidistant from two holes is a point-at — no Yes, no offer."""
+
+    async def _call(client):
+        pid = await _new_plate_project(app_with_projects, client)
+        row = app_with_projects.state.conn.get_project(pid)
+        result = fill_recut_region_edit(
+            app_with_projects,
+            pid,
+            "make the big hole 6 mm",
+            face_normal=(0.0, 1.0, 0.0),
+            row=row,
+            part=part_public(row),
+            hit_point_mm=(60.0, 40.0, 3.0),
+        )
+        return result, app_with_projects.state.versions.get_pending_offer(pid)
+
+    result, offer = _run_async(app_with_projects, _call)
+    assert result is not None and result["outcome"] == "point_at", result
+    assert offer is None, offer

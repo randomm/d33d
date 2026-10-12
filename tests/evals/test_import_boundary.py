@@ -80,13 +80,13 @@ def test_trigger_is_never_silent_resize_or_invented_size() -> None:
     trigger = fill_recut_trigger("make the big hole 38 mm")
     assert trigger is not None
     sentence = boundary_sentence(trigger["noun"], trigger["size"])
-    expected = FRILL_HOLE_DIAMETER_REPLY.format(noun="hole", dim="38")
+    expected = FRILL_HOLE_DIAMETER_REPLY.format(noun="hole", dim="38.0")
     assert sentence == expected
     # The user's own number is in the reply, never invented or truncated.
     assert "38" in sentence
     # And it is a fill-and-recut offer, not a resize acknowledgement.
     assert "fill it" in sentence
-    assert "Ø38 mm" in sentence
+    assert "Ø38.0 mm" in sentence
 
 
 def test_boundary_sentence_shape_for_the_hole_38mm_case() -> None:
@@ -95,7 +95,7 @@ def test_boundary_sentence_shape_for_the_hole_38mm_case() -> None:
     assert boundary_sentence("hole", 38.0) == (
         "That hole came with your file, so I can't resize it directly — "
         "the file has no parameters for me to change. What I can do: "
-        "fill it, then cut a Ø38 mm one on the same axis. It'll look "
+        "fill it, then cut a Ø38.0 mm one on the same axis. It'll look "
         "the same, and you'll see it as a change in the history."
     )
 

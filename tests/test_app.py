@@ -1361,6 +1361,27 @@ def test_region_edit_face_normal_within_tolerance_accepted(app):
     assert r.status_code == 202, r.text
 
 
+def _store_measured_holes(app: Any, pid: int) -> None:
+    """Issue #437: write a report with two measured holes (file units ==
+    mm, part_scale 1.0) and the real XY bounds 0..60 x 0..60."""
+    import json as _json
+
+    report = {
+        "hole_count": 2,
+        "holes": [
+            {"center": [10.0, 0.0, 5.0], "axis": [0.0, 1.0, 0.0], "diameter_mm": 30.0},
+            {"center": [50.0, 50.0, 5.0], "axis": [0.0, 0.0, 1.0], "diameter_mm": 8.0},
+        ],
+        "bbox_file_units": [60.0, 60.0, 10.0],
+        "bbox_bounds_file_units": [[0.0, 0.0, 0.0], [60.0, 60.0, 10.0]],
+    }
+    conn = app.state.conn
+    conn.raw.execute(
+        "UPDATE projects SET part_report=? WHERE id=?", (_json.dumps(report), pid)
+    )
+    conn.commit()
+
+
 def test_region_edit_fill_recut_trigger_no_loop(app_with_projects, monkeypatch):
     """For a project with an imported part, the region-edit route runs the
     fill_recut trigger BEFORE any loop. On trigger: no loop runs, the
@@ -1380,6 +1401,9 @@ def test_region_edit_fill_recut_trigger_no_loop(app_with_projects, monkeypatch):
         r = await client.post("/api/projects", json={"name": "Imported Part"})
         pid = r.json()["id"]
         _set_part_columns(app_with_projects, pid, unit_status="settled")
+        # Issue #437: a measured Ø30 hole at (10, 0) and a Ø8 hole far away;
+        # the pick at (12, 0, 20) is nearest the Ø30 hole.
+        _store_measured_holes(app_with_projects, pid)
         r2 = await client.post(
             f"/api/projects/{pid}/region-edits",
             json=_region_edit_body(
@@ -1407,7 +1431,7 @@ def test_region_edit_fill_recut_trigger_no_loop(app_with_projects, monkeypatch):
     assert done[0].get("kind") == "answer", done
     msg = done[0]["message"]
     assert "That hole came with your file" in msg, msg
-    assert "Ø38 mm" in msg, msg
+    assert "Ø38.0 mm" in msg, msg
     # The done frame surfaces the fresh offer (the SPA renders the
     # [Yes, do that] / [Leave it] buttons from this field).
     assert done[0].get("fill_recut_offer") is True, done
@@ -1418,6 +1442,10 @@ def test_region_edit_fill_recut_trigger_no_loop(app_with_projects, monkeypatch):
     assert offer["kind"] == "fill_recut", offer
     assert offer["noun"] == "hole", offer
     assert offer["size"] == 38.0, offer
+    # Issue #437: the viewer pick offers Yes with the nearest measured
+    # hole's centre and diameter (not a centre-less offer).
+    assert offer["center"] == [10.0, 0.0], offer
+    assert offer["diameter_mm"] == 30.0, offer
 
 
 def test_region_edit_fill_recut_no_hole_no_offer(app_with_projects, monkeypatch):
@@ -2167,7 +2195,7 @@ def test_region_edit_no_part_preroute_returns_none(app_with_projects, monkeypatc
 
     seen: dict[str, Any] = {}
 
-    def _spied(app, project_id, instruction, face_normal=None, row=None, part=None):
+    def _spied(app, project_id, instruction, face_normal=None, row=None, part=None, **_kw):
         seen["part"] = part
 
     monkeypatch.setattr(fr_mod, "fill_recut_region_edit", _spied)

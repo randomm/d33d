@@ -35,7 +35,10 @@ from d33d.fill_recut import (
     is_clean_no,
     is_clean_yes,
     own_feature_names,
+    point_at_sentence,
 )
+from d33d.hole_position import nearest_hole_to_point
+from d33d.hole_select import holes_in_mm
 from d33d.part_holes import HOLE_NOUNS, no_hole_reply, part_has_hole_evidence
 from d33d.part_units import USABLE_UNIT_STATUSES
 
@@ -109,12 +112,24 @@ class _FillNoFeature(TypedDict):
     outcome: Literal["no_feature"]
 
 
+class _FillPointAt(TypedDict):
+    kind: Literal["answer"]
+    answer: str
+    run_loop: bool
+    outcome: Literal["point_at"]
+
+
 #: The decision union: an ``accept`` member, or any of the four
 #: answer-frame members (the caller dispatches on ``outcome``; only
 #: ``fresh_offer`` surfaces the SPA's offer buttons — the decline /
 #: no-normal / no-feature replies are plain answers, never an offer).
 FillResult = (
-    _FillAccept | _FillDecline | _FillFreshOffer | _FillNoNormal | _FillNoFeature
+    _FillAccept
+    | _FillDecline
+    | _FillFreshOffer
+    | _FillNoNormal
+    | _FillNoFeature
+    | _FillPointAt
 )
 
 
@@ -125,6 +140,7 @@ def fill_recut_region_edit(
     face_normal: tuple[float, float, float] | None = None,
     row: dict[str, Any] | None = None,
     part: dict[str, Any] | None = None,
+    hit_point_mm: tuple[float, float, float] | None = None,
 ) -> FillResult | None:
     """The fill-and-recut pre-route DECISION for the REGION-EDIT seam
     (issue #338's operator decisions 5–6).
@@ -210,7 +226,25 @@ def fill_recut_region_edit(
             "run_loop": False,
             "outcome": "no_feature",
         }
-    return _handle_fresh_trigger(versions, project_id, trigger, face_normal)
+    # Issue #437: a viewer pick of a hole offers Yes with the NEAREST
+    # measured hole to the pick point (XY). A part WITH measured holes whose
+    # pick resolves to none → point-at (no Yes without a location). A part
+    # with no measured holes keeps the #351 offer (nothing to point at).
+    hole = None
+    needs_hole = False
+    if trigger["noun"] in HOLE_NOUNS and face_normal is not None:
+        report = part.get("report") if part else None
+        holes = holes_in_mm(report, part.get("scale")) if report else []
+        needs_hole = bool(holes)
+        hole = nearest_hole_to_point(holes, hit_point_mm)
+    return _handle_fresh_trigger(
+        versions,
+        project_id,
+        trigger,
+        face_normal,
+        hole=hole,
+        needs_hole=needs_hole,
+    )
 
 
 def _handle_live_offer(
@@ -256,13 +290,21 @@ def _handle_fresh_trigger(
     project_id: int,
     trigger: dict[str, Any],
     face_normal: tuple[float, float, float] | None,
+    *,
+    hole: dict[str, Any] | None = None,
+    needs_hole: bool = False,
 ) -> FillResult:
     """A fresh fill-and-recut trigger: with a face normal the boundary
     sentence is the answer and the offer is recorded server-side (the
     offer carries the pick's normal as its ``axis`` — operator decision
     5); without one the axis-dependent offer is impossible — the
     no-normal degradation copy (operator decision 6), no offer, no
-    loop."""
+    loop.
+
+    Issue #437: a hole noun (``needs_hole``) is offered ONLY with a
+    resolved measured ``hole`` — its centre, diameter and axis go into the
+    offer (the hole's own axis, not the wall's normal). No resolved hole →
+    the point-at reply, no offer, no loop."""
     if face_normal is None:
         return {
             "kind": "answer",
@@ -270,16 +312,26 @@ def _handle_fresh_trigger(
             "run_loop": False,
             "outcome": "no_normal",
         }
+    if needs_hole and hole is None:
+        versions.set_pending_offer(project_id, None)
+        return {
+            "kind": "answer",
+            "answer": point_at_sentence(trigger["noun"], trigger["size"]),
+            "run_loop": False,
+            "outcome": "point_at",
+        }
     axis = tuple(float(v) for v in face_normal)
-    versions.set_pending_offer(
-        project_id,
-        {
-            "kind": "fill_recut",
-            "noun": trigger["noun"],
-            "size": trigger["size"],
-            "axis": list(axis),
-        },
-    )
+    offer: dict[str, Any] = {
+        "kind": "fill_recut",
+        "noun": trigger["noun"],
+        "size": trigger["size"],
+        "axis": list(axis),
+    }
+    if hole is not None:
+        offer["center"] = hole.get("center")
+        offer["axis"] = hole.get("axis")
+        offer["diameter_mm"] = hole.get("diameter_mm")
+    versions.set_pending_offer(project_id, offer)
     sentence = boundary_sentence(
         trigger["noun"],
         trigger["size"],
@@ -301,6 +353,7 @@ def region_edit_preroute(
     start_loop: Callable[..., Any],
     loop_kwargs: dict[str, Any],
     inflight: set[int],
+    hit_point_mm: tuple[float, float, float] | None = None,
 ) -> JSONResponse | None:
     """The region-edit route's fill-and-recut pre-route, end to end
     (issue #338, operator decision 5).
@@ -340,6 +393,7 @@ def region_edit_preroute(
             face_normal=face_normal,
             row=row,
             part=part,
+            hit_point_mm=hit_point_mm,
         )
     except Exception:
         # Pre-route failure: the event source is NOT registered, so the

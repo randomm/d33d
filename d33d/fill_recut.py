@@ -24,6 +24,7 @@ import re
 from typing import Any
 
 from d33d.hole_select import fill_recut_instruction_with_hole
+from d33d.mm_format import fmt_mm1
 from d33d.versions import valid_axis
 
 # Issue #332 (sub-issue 3) — the unsettled-part chat reply (verbatim copy
@@ -88,6 +89,12 @@ FRILL_POINT_AT_TEMPLATE = (
 )
 FRILL_POINT_AT_NO_DIM_TEMPLATE = (
     "Point at the {noun} on the part and I'll fill it and cut a new one there."
+)
+#: The Yes-with-no-pending-offer reply (issue #437): a bare "yes" on a part
+#: with measured holes, when no offer is live — the user must point at the
+#: hole first; no loop runs. Mirrored by ``copy.ts fillRecut.pointFirst``.
+FRILL_POINT_FIRST_REPLY = (
+    "Point at the hole on the part first, then I'll fill it and cut a new one there."
 )
 
 #: The no-match reply (issue #414): the user named a hole by position
@@ -187,6 +194,16 @@ def _fmt_coord(value: float) -> str:
     return g
 
 
+def point_at_sentence(noun: str, size_mm: float | None) -> str:
+    """The point-at reply (issue #437): the user named a hole the offer
+    cannot locate, so the reply asks them to point at it. The diameter is
+    the user's own stated size, one decimal (:func:`fmt_mm1`); absent when
+    the user stated none."""
+    if size_mm is not None:
+        return FRILL_POINT_AT_TEMPLATE.format(noun=noun, dim=fmt_mm1(size_mm))
+    return FRILL_POINT_AT_NO_DIM_TEMPLATE.format(noun=noun)
+
+
 def boundary_sentence(
     noun: str,
     size_mm: float | None,
@@ -215,9 +232,9 @@ def boundary_sentence(
         return FRILL_MOVE_REPLY.format(noun=noun)
     if size_mm is None:
         return FRILL_NO_DIMENSION_REPLY.format(noun=noun)
-    dim = _fmt_size(size_mm)
     if noun in ("hole", "holes", "bore", "counterbore"):
-        return FRILL_HOLE_DIAMETER_REPLY.format(noun=noun, dim=dim)
+        return FRILL_HOLE_DIAMETER_REPLY.format(noun=noun, dim=fmt_mm1(size_mm))
+    dim = _fmt_size(size_mm)
     return FRILL_NOUN_DIMENSION_REPLY.format(noun=noun, dim=dim)
 
 def fill_recut_trigger(message: str) -> dict[str, Any] | None:
@@ -365,7 +382,7 @@ def no_match_hole_reply(
             and diameter > 0
         ):
             entries.append(
-                f"Ø{_fmt_size(float(diameter))} mm at "
+                f"Ø{fmt_mm1(float(diameter))} mm at "
                 f"({_fmt_coord(float(center[0]))}, {_fmt_coord(float(center[1]))})"
             )
     if not entries:
@@ -440,6 +457,7 @@ __all__ = [
     "FRILL_NO_MATCH_LEAD",
     "FRILL_POINT_AT_NO_DIM_TEMPLATE",
     "FRILL_POINT_AT_TEMPLATE",
+    "FRILL_POINT_FIRST_REPLY",
     "TRIGGER_MAX_INSTRUCTION_CHARS",
     "UNSETTLED_PART_REPLY",
     "boundary_sentence",
@@ -449,6 +467,7 @@ __all__ = [
     "is_clean_yes",
     "no_match_hole_reply",
     "own_feature_names",
+    "point_at_sentence",
 ]
 
 

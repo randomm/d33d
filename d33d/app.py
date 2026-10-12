@@ -1500,6 +1500,9 @@ def create_app(
             start_loop=_start_loop,  # patchable at the module seam
             loop_kwargs=loop_kwargs,
             inflight=inflight,
+            # Issue #437: the viewer pick point — a hole pick offers Yes
+            # with the measured hole nearest to it.
+            hit_point_mm=tuple(body.hit_point_mm) if body.hit_point_mm else None,
         )
         if pre_routed is not None:
             return pre_routed

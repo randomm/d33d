@@ -43,8 +43,21 @@ const triesWord = (attempts: number): string => (attempts === 1 ? "try" : "tries
 /** One decimal, always, with the unit attached. Every displayed dimension. */
 export const mm = (value: number): string => `${value.toFixed(1)}${NB}mm`;
 
-/** Diameter, for bores and shafts. */
-export const dia = (value: number): string => `Ø${value.toFixed(1)}${NB}mm`;
+/** One-decimal number, rounded half-up on the decimal the user typed
+ *  (issue #437). The TS twin of `fmt_mm1` in d33d/mm_format.py — `toFixed`
+ *  rounds binary halves down (3.25 → "3.2"), so it is not used here. */
+export const fmtMm1 = (value: number): string => {
+  const sign = value < 0 ? "-" : "";
+  const abs = Math.abs(value);
+  const str = String(abs);
+  // Shift the decimal point one place so Math.round is half-up on the
+  // shortest round-tripping digits (3.25 → 32.5 → 33 → "3.3").
+  const tenths = Math.round(str.includes("e") ? abs * 10 : Number(`${str}e1`));
+  return `${sign}${Math.floor(tenths / 10)}.${tenths % 10}`;
+};
+
+/** Diameter, for bores and shafts (one decimal, half-up — issue #437). */
+export const dia = (value: number): string => `Ø${fmtMm1(value)}${NB}mm`;
 
 /** Seconds, for elapsed time. */
 export const secs = (value: number): string => `${Math.round(value)}${NB}s`;
@@ -1178,6 +1191,13 @@ export const fillRecut = {
    *  the offer asks the user to point at the hole on the part. `dim` is
    *  the user's stated target diameter, mono-formatted (absent when the
    *  user didn't state a size). */
+  /** The Yes-with-no-pending-offer reply (issue #437): a bare "yes" on a
+   *  part with measured holes when no offer is live — point at the hole
+   *  first; no loop. The backend's FRILL_POINT_FIRST_REPLY carries the
+   *  same sentence (the parity pin in tests/test_projects.py). */
+  pointFirst:
+    "Point at the hole on the part first, then I'll fill it and cut a new one there.",
+
   pointAt: (dim: string | null): string =>
     dim
       ? `Point at the hole on the part and I'll fill it and cut a Ø${dim} mm one there.`
