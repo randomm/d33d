@@ -2646,6 +2646,11 @@ async def run_design_loop_async(
         _post_reason = (
             next_repair.get("reason") if isinstance(next_repair, dict) else None
         )
+        # Issue #435: a visual-review fail is not a post-check, so it never
+        # arms the identical-repair tracker. A repeated review fail on an
+        # identical mesh therefore does not stop early; the run stays bounded by
+        # MAX_ITERATIONS and NO_IMPROVEMENT_LIMIT (at most one extra design,
+        # render and review round).
         _post_fp: tuple[str, int] | None = None
         if _post_reason in POST_CHECK_REASONS:
             _post_fp = await asyncio.to_thread(fingerprint_stl, render.stl)
@@ -2720,23 +2725,11 @@ async def run_design_loop_async(
             # Issue #435: a visual-review fail on the iteration that triggered
             # the stop keeps its reason (a gate/error_class reason still wins).
             return _exhausted(
-                iterations,
-                best,
-                best_score,
-                fallback_reason=(
-                    VISUAL_REVIEW_FAILED_REASON if _review_failed else None
-                ),
+                iterations, best, best_score, review_fail=_review_failed
             )
 
-    if _review_failed:
-        # Issue #435: the last attempt was judged not to match the request.
-        return _exhausted(
-            iterations,
-            best,
-            best_score,
-            fallback_reason=VISUAL_REVIEW_FAILED_REASON,
-        )
-    return _exhausted(iterations, best, best_score)
+    # Issue #435: the last attempt was judged not to match the request.
+    return _exhausted(iterations, best, best_score, review_fail=_review_failed)
 
 
 def _stamp_on_progress_iteration(on_progress: Any, iteration: int) -> None:
@@ -3195,6 +3188,7 @@ def _exhausted(
     best_score: Score | None,
     failure_reason: str | None = None,
     fallback_reason: str | None = None,
+    review_fail: bool = False,
 ) -> DesignResult:
     """Build the exhaustion result: best-scoring candidate + a STRUCTURED
     failure reason (weakest gate bit of the best, never free text, never
@@ -3258,12 +3252,22 @@ def _exhausted(
         # derivation found no reason at all.
         # Issue #432: the same rule for the through-hole, screw-clearance and
         # stack-height post-checks — each carries its own reason on the repair.
+        # Issue #435: the last attempt was a visual-review fail (``review_fail``)
+        # and wins over an earlier post-check repair on the best record (ties
+        # keep the incumbent, so the best can be an earlier post-check pass).
+        if reason is None and review_fail:
+            reason = VISUAL_REVIEW_FAILED_REASON
         if reason is None:
             _repair = getattr(best, "repair", None)
             _repair_reason = (
                 _repair.get("reason") if isinstance(_repair, dict) else None
             )
-            if _repair_reason in POST_CHECK_REASONS:
+            # Issue #435: a review-fail repair on the best record keeps its
+            # reason; it is not a post-check (see post_check_reasons), so it is
+            # listed here explicitly.
+            if _repair_reason in POST_CHECK_REASONS or (
+                _repair_reason == VISUAL_REVIEW_FAILED_REASON
+            ):
                 reason = _repair_reason
     if reason is None:
         # Issue #432: the identical-repair stop's post-check reason, used only

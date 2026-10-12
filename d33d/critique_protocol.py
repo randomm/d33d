@@ -665,5 +665,3 @@ def _default_feature_items(stated_dims: tuple[float, float, float] | None) -> li
         "depth_matches",
         "height_matches",
     ]
-
-
