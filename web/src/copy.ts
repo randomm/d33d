@@ -281,6 +281,22 @@ export const passCard = {
     "Named parameters, because that is what makes the next change a change and not a rewrite. Copy it into OpenSCAD if you want — nothing here needs you to.",
 
   checksPassed: (count: number): string => `${count} checks`,
+
+  /** Issue #435: what the pass card says was really checked. Only the lines
+   *  for checks that executed are rendered. */
+  checkLines: {
+    size: (w: number, d: number, h: number): string =>
+      `Size ${mm(w)} × ${mm(d)} × ${mm(h)}`,
+    watertight: "Watertight",
+    postChecks: (count: number): string =>
+      `${count} ${count === 1 ? "post-check" : "post-checks"} ran`,
+  },
+  /** The vision review ran and matched the request. */
+  reviewedAgainstRequest:
+    "Reviewed against your request — the six views were checked by the vision model.",
+  /** The review did not run (T2/T3, timeout, error, or unparseable reply). */
+  notVisuallyReviewed:
+    "Not visually reviewed — this model can't look at images, so only the measured checks ran.",
   closeDisclosure: "Close the source",
   viewEnlargedCaption:
     "Rendered straight from the model, not a photo of the viewport. This is the picture the system itself looked at.",
@@ -567,6 +583,9 @@ export const failure = {
     stack_height_mismatch:
       "The stacked parts don't add up to the height you asked for.",
     hollow_solid: "The part is almost hollow — most of the solid is missing.",
+    /** Issue #435: the vision review judged the render wrong on the last try. */
+    visual_review_failed:
+      "The render doesn't match what you asked for — the last try still didn't look right against your request.",
     empty_model: "The design produced an empty model — there is nothing to print.",
     artifact_error: "The model file came out unreadable.",
     timeout: "The render ran out of time. A simpler shape will get through.",

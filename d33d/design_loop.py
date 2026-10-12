@@ -1875,8 +1875,14 @@ async def run_design_loop_async(
     renderer_check: Callable[[], bool] | None = None,
     image_check: Callable[[], dict[str, str] | None] | None = None,
     attempt_timeout: float | None = DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS,
+    vision: bool = True,
 ) -> DesignResult:
     """Run the bounded iterate-and-score design loop (async core).
+
+    ``vision`` (issue #435) gates the visual review of a gate-passing
+    candidate: the caller sets it from the critique role's probed capability
+    (T0/T1 vision, T2 not). ``False`` skips the review, so the pass is
+    marked not visually reviewed.
 
     ``photo`` is the reference image (data URI / URL). ``stated_dims`` is
     the ground-truth (W, D, H) triple in mm — never estimated. ``None``
@@ -2544,7 +2550,8 @@ async def run_design_loop_async(
         # last attempt exhausts with ``visual_review_failed``. "pass" passes;
         # "unreviewed" passes and the card says so.
         if (
-            candidate_score.perfect
+            vision
+            and candidate_score.perfect
             and next_repair is None
             and not _post_check_fired
             and not _hollow_repair_fired
@@ -2911,6 +2918,7 @@ def run_design_loop(
     parent_face_count: int | None = None,
     renderer_check: Callable[[], bool] | None = None,
     image_check: Callable[[], dict[str, str] | None] | None = None,
+    vision: bool = True,
 ) -> DesignResult:
     """Synchronous entry point for the bounded design loop.
 
@@ -2946,6 +2954,7 @@ def run_design_loop(
             parent_face_count=parent_face_count,
             renderer_check=renderer_check,
             image_check=image_check,
+            vision=vision,
         )
     )
 

@@ -1977,6 +1977,9 @@ def _build_production_design_loop():
             prompt_version=prompt_version,
             on_progress=on_progress,
             attempt_timeout=attempt_timeout,
+            # Issue #435: the visual review needs a vision-capable tier
+            # (T0/T1); T2/T3 skip it and the pass card says so.
+            vision=capability is not None and capability.tier in ("T0", "T1"),
         )
 
     def _wrapper(app: Any, **kwargs: Any) -> Any:

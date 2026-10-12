@@ -8213,6 +8213,16 @@ def test_events_adapter_writes_a_critique_request_log_row(
             )
 
     _stub_production_closure_deps(monkeypatch, app_with_versions, tmp_path, _LLM())
+    # A vision-capable (T0) critique role: the review runs only then.
+    from d33d.config import probes as _probes_mod
+    from d33d.config.probes import CapabilityResult
+
+    async def _t0_probe(*a, **kw):
+        return CapabilityResult(
+            tools=True, json_schema=True, vision=True, max_images=8, validated=True
+        )
+
+    monkeypatch.setattr(_probes_mod, "probe_capabilities", _t0_probe)
     monkeypatch.setattr(app_mod, "render_for_design_loop", lambda *a, **k: render)
     app_with_versions.state.failures_jsonl_path = str(tmp_path / "failures.jsonl")
     app_with_versions.state.run_design_loop = _build_production_design_loop()

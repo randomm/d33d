@@ -66,6 +66,8 @@ const LOOP_FAILURE_REASONS = [
   "stack_height_mismatch",
   // Issue #436: the near-hollow post-check.
   "hollow_solid",
+  // Issue #435: the vision review failed the candidate on the last iteration.
+  "visual_review_failed",
 ];
 
 const CLOSED_SET = [...GATE_REASON_BITS, ...ERROR_CLASSES, ...LOOP_FAILURE_REASONS];

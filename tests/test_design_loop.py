@@ -5413,6 +5413,32 @@ def test_non_vision_tier_skips_review_and_is_not_visually_reviewed(tmp_path):
     assert result.visually_reviewed is False
 
 
+def test_vision_false_skips_the_review_call_entirely(tmp_path):
+    """The caller's vision flag (set from the probed tier) gates the review:
+    ``vision=False`` never calls the critique role and the pass is marked
+    not visually reviewed."""
+    render = _review_render(tmp_path)
+    counts = {"critique": 0}
+
+    async def llm_fn(role, messages, system):
+        if role == "critique":
+            counts["critique"] += 1
+            return _verdict_reply("fail", "should not be asked")
+        return _scad_llm(GOOD_SCAD)
+
+    result = run_design_loop(
+        photo=PHOTO,
+        stated_dims=STATED,
+        render_fn=lambda scad, defines: render,
+        llm_fn=llm_fn,
+        bbox_fn=_bbox_ok,
+        vision=False,
+    )
+    assert result.status == "pass"
+    assert result.visually_reviewed is False
+    assert counts["critique"] == 0
+
+
 def test_review_not_called_when_a_gate_fails(tmp_path):
     result, counts = _run_review_loop(
         tmp_path,
