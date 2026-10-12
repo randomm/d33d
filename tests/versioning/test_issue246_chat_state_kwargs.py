@@ -65,6 +65,7 @@ class _StubResult:
             params=dict(params),
         )
         self.failure_reason = None
+        self.checks_run = ()
 
 
 class _ExhaustedResult:
@@ -78,6 +79,7 @@ class _ExhaustedResult:
             params=dict(params),
         )
         self.failure_reason = "bbox_out_of_tolerance"
+        self.checks_run = ()
 
 
 def _capturing_loop(captured: dict[str, Any]):

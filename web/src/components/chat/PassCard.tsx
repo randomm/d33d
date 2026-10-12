@@ -34,6 +34,7 @@
 import { useState } from "react";
 import type { RenderImage } from "../../lib/renderImage";
 import copy from "../../copy";
+import type { CheckKey } from "../../copy";
 
 /** Map a view filename ("view_00_front.png") to its caption label.
  *  Unknown stems fall back to the bare stem — never an index. */
@@ -60,6 +61,13 @@ interface PassCardProps {
   views: RenderImage[];
   /** The pass's summary prose (UI face, no dimensions). */
   summary?: string;
+  /** Issue #435: true only when the vision review judged the render
+   *  against the request. Anything else (T2, timeout, error, unknown)
+   *  says "not visually reviewed" — never a confident claim. */
+  visuallyReviewed?: boolean;
+  /** Issue #435: the keys of the checks that executed on this pass (the
+   *  done frame's `checks_run`). Empty or absent → no checks line. */
+  checksRun?: readonly string[];
   /** The generated source (the disclosure's content — never chat text).
    *  `undefined` or empty string = no source carried this turn
    *  (no disclosure control). */
@@ -75,6 +83,8 @@ export function PassCard({
   versionOrdinal,
   views,
   summary,
+  visuallyReviewed,
+  checksRun,
   source,
   onBesidePhoto,
 }: PassCardProps) {
@@ -82,6 +92,12 @@ export function PassCard({
   const [sourceOpen, setSourceOpen] = useState(false);
 
   const sourceLines = source ? source.split("\n").length : 0;
+  const checkWords = (checksRun ?? [])
+    .filter(
+      (key): key is CheckKey =>
+        Object.prototype.hasOwnProperty.call(copy.passCard.checkWords, key),
+    )
+    .map((key) => copy.passCard.checkWords[key]);
 
   return (
     <div
@@ -128,6 +144,16 @@ export function PassCard({
           {copy.passCard.partialViews(views.length, TOTAL_VIEWS)}
         </span>
       )}
+      {checkWords.length > 0 && (
+        <span className="pass-card-checks" data-testid="pass-card-checks">
+          {copy.passCard.checksRan(checkWords)}
+        </span>
+      )}
+      <span className="pass-card-review" data-testid="pass-card-review">
+        {visuallyReviewed === true
+          ? copy.passCard.reviewedAgainstRequest
+          : copy.passCard.notVisuallyReviewed}
+      </span>
       {source !== undefined && source !== "" && (
         <>
           <button

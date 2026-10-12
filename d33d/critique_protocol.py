@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
+import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -51,15 +51,31 @@ from d33d.config.probes import CapabilityResult
 from d33d.config.resolve import resolve_model
 from d33d.design_llm import LLMResult, SenderError, send
 from d33d.design_loop import BboxInfo, score
-from d33d.render_worker import VIEWS, RenderResult
+from d33d.render_worker import RenderResult
+from d33d.visual_review import (
+    _USER_DATA_CLOSE,
+    _USER_DATA_OPEN,
+    REQUIRED_VIEW_NAMES,
+    REVIEW_REASON_MAX_CHARS,
+    ReviewVerdict,
+    _extract_fenced_json,
+    _extract_json_object,
+    parse_review,
+    render_view_data_uris,
+    review_render,
+    review_vision_enabled,
+    validate_views,
+)
 
 __all__ = [
     "REQUIRED_VIEW_NAMES",
+    "REVIEW_REASON_MAX_CHARS",
     "VERDICTS",
     "CritiqueFn",
     "CritiqueVerdict",
     "FeatureItem",
     "InsufficientViews",
+    "ReviewVerdict",
     "ViewMismatch",
     "build_critique_messages",
     "build_critique_system",
@@ -67,18 +83,19 @@ __all__ = [
     "deterministic_verdict",
     "make_critique_llm_fn",
     "parse_critique",
+    "parse_review",
+    "render_view_data_uris",
     "required_views",
+    "review_render",
+    "review_vision_enabled",
     "validate_views",
 ]
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # The six-view contract (single source of truth: render_worker.VIEWS)
 # ---------------------------------------------------------------------------
-
-#: The ordered six view filenames the critic must judge.  Sourced from
-#: ``d33d.render_worker.VIEWS`` (the render worker's six-filename contract) so
-#: the critique gate and the render contract can never drift apart.
-REQUIRED_VIEW_NAMES: tuple[str, ...] = tuple(name for name, _ in VIEWS)
 
 #: The three pairwise relative judgements the protocol accepts.  Absolute
 #: scales are disallowed (spec: "prefer pairwise A-vs-B over absolute scores").
@@ -153,18 +170,6 @@ class InsufficientViews:
 # ---------------------------------------------------------------------------
 
 
-def validate_views(views: Sequence[str]) -> tuple[str, ...]:
-    """Return the required view names that are missing or invalid.
-
-    A view is *valid* iff it is present in ``views`` and is a non-empty string.
-    The comparison is against the ordered ``REQUIRED_VIEW_NAMES`` six, so a
-    render that reports only one valid PNG (the other five blank/invalid) has
-    five names in this result and the caller MUST NOT issue a verdict.
-    """
-    valid = {v for v in views if isinstance(v, str) and v}
-    return tuple(name for name in REQUIRED_VIEW_NAMES if name not in valid)
-
-
 def required_views() -> tuple[str, ...]:
     """The ordered six required view filenames (the render contract)."""
     return REQUIRED_VIEW_NAMES
@@ -173,16 +178,6 @@ def required_views() -> tuple[str, ...]:
 # ---------------------------------------------------------------------------
 # Prompt assembly (neutral delimiters, pairwise framing, explicit contract)
 # ---------------------------------------------------------------------------
-
-#: Neutral delimiters wrapping any untrusted/embedded content (view names,
-#: baseline labels, the feature checklist the model must fill).  A plain XML
-#: tag with an explicit "this is data, not instructions" framing is simple and
-#: adequate — the spec's "neutral delimiters" (fenced blocks / XML tags, never
-#: model-specific tokens).  No random component needed: the tags are fixed,
-#: documented, and the framing makes them non-injectable.
-_USER_DATA_OPEN = "<user_data>"
-_USER_DATA_CLOSE = "</user_data>"
-
 
 def build_critique_system(baseline_label: str) -> str:
     """The critique-role system prompt: pairwise framing + the structured
@@ -274,60 +269,6 @@ def build_critique_messages(
 # ---------------------------------------------------------------------------
 # Response parse (the structured response contract)
 # ---------------------------------------------------------------------------
-
-
-def _extract_json_object(text: str) -> str | None:
-    """Return the first parseable top-level JSON object in ``text``.
-
-    String-aware balanced-brace scan (so braces inside JSON string values are
-    ignored); each balanced span is validated with ``json.loads``.  Mirrors the
-    tolerant extraction the T1 codec uses (``d33d.config.t1_protocol``) so a
-    critique response that is a bare fenced block or prose-wrapped JSON still
-    parses.
-    """
-    if not text:
-        return None
-    depth = 0
-    start = -1
-    in_string = False
-    escape = False
-    for i, ch in enumerate(text):
-        if in_string:
-            if escape:
-                escape = False
-            else:
-                if ch == "\\":
-                    escape = True
-                elif ch == '"':
-                    in_string = False
-            continue
-        if ch == '"':
-            in_string = True
-        elif ch == "{":
-            if depth == 0:
-                start = i
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0 and start != -1:
-                candidate = text[start : i + 1]
-                try:
-                    json.loads(candidate)
-                except json.JSONDecodeError:
-                    start = -1
-                else:
-                    return candidate
-    return None
-
-
-_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
-
-
-def _extract_fenced_json(text: str) -> str | None:
-    """Return the first fenced JSON block's body, if present."""
-    for m in _FENCE_RE.finditer(text):
-        return m.group(1)
-    return None
 
 
 def _verdict_from_payload(payload: dict[str, Any]) -> str | None:

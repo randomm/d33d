@@ -34,6 +34,7 @@ from __future__ import annotations
 import logging
 import math
 import re
+from collections.abc import Callable
 
 from d33d.part_holes import HOLE_NOUNS
 
@@ -291,6 +292,8 @@ def route_through_hole_repair(
     through_baseline_genus: BaselineGenus | None,
     scad_source: str,
     through_baseline_genus_source: str | None = None,
+    *,
+    on_pass: Callable[[], None] | None = None,
 ) -> tuple[str, str] | None:
     """Run the through-hole post-check and, on a miss, route the repair.
 
@@ -315,7 +318,7 @@ def route_through_hole_repair(
 
     baseline = resolve_baseline_genus(through_baseline_genus)
     det = through_hole_check(
-        request, stl, baseline, through_baseline_genus_source
+        request, stl, baseline, through_baseline_genus_source, on_pass=on_pass
     )
     if det is None:
         return None
@@ -396,6 +399,8 @@ def through_hole_check(
     stl: str | None,
     baseline_genus: BaselineGenus | None,
     baseline_source: str | None = None,
+    *,
+    on_pass: Callable[[], None] | None = None,
 ) -> tuple[int, int] | None:
     """The through-hole post-check (issue #386, operator decision
     2026-10-05; issue #418 article rule).
@@ -472,6 +477,8 @@ def through_hole_check(
             genus, baseline_genus, _verdict, _src,
         )
         if genus >= baseline_genus:
+            if on_pass is not None:
+                on_pass()
             return None
         return (baseline_genus, genus)
     count = requested_hole_count(request)
@@ -484,5 +491,7 @@ def through_hole_check(
         count, genus, baseline_genus, _verdict, _src,
     )
     if genus >= baseline_genus + count:
+        if on_pass is not None:
+            on_pass()
         return None
     return (baseline_genus, genus)

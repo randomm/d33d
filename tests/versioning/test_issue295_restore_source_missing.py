@@ -55,6 +55,7 @@ def _stub_pass_result(params: dict, scad: str) -> Any:
         def __init__(self) -> None:
             self.status = "pass"
             self.failure_reason = None
+            self.checks_run = ()
             self.best = IterationRecord(
                 iteration=0,
                 scad_source=scad,

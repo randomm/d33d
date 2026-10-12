@@ -74,6 +74,7 @@ async def _drive_chat(app, client, pid, body):
         class _R:
             status = "pass"
             failure_reason = None
+            checks_run = ()
             best = None
 
         return _R()
@@ -846,6 +847,7 @@ def test_done_frame_carries_bbox_abstained_true(app_with_versions):
     class _R:
         status = "pass"
         failure_reason = None
+        checks_run = ()
 
         class _Best:
             params = None
@@ -893,6 +895,7 @@ def test_done_frame_carries_bbox_abstained_false(app_with_versions):
     class _R:
         status = "pass"
         failure_reason = None
+        checks_run = ()
 
         class _Best:
             params = None

@@ -71,6 +71,7 @@ from d33d.post_check_reasons import (
     SCREW_CLEARANCE_REASON,
     STACK_HEIGHT_REASON,
     THROUGH_HOLE_REASON,
+    VISUAL_REVIEW_FAILED_REASON,
 )
 
 #: The closed enum of failure classes a failures.jsonl line may carry.
@@ -176,7 +177,9 @@ _LOOP_LEVEL_BASE_REASONS: frozenset[str] = frozenset(
 )
 #: Issue #432: union only the post-check reasons not already listed above.
 LOOP_LEVEL_FAILURE_REASONS: frozenset[str] = (
-    _LOOP_LEVEL_BASE_REASONS | (POST_CHECK_REASONS - _LOOP_LEVEL_BASE_REASONS)
+    _LOOP_LEVEL_BASE_REASONS
+    | (POST_CHECK_REASONS - _LOOP_LEVEL_BASE_REASONS)
+    | {VISUAL_REVIEW_FAILED_REASON}
 )
 
 

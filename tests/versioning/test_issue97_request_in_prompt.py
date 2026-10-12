@@ -287,6 +287,7 @@ def test_production_closure_forwards_request_past_the_hook(app_with_versions, mo
     class _Result:
         status = "pass"
         failure_reason = None
+        checks_run = ()
 
         class _Best:
             scad_source = "x = 20; cube([x, x, x]);"
@@ -551,6 +552,7 @@ def test_failures_jsonl_request_field_equals_current_request(tmp_path, monkeypat
     class _Result:
         status = "exhausted"
         failure_reason = "empty_model"
+        checks_run = ()
 
         class _Best:
             scad_source = "cube([1,1,1]);"

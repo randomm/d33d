@@ -97,6 +97,7 @@ from d33d.config.catalogue import (
 )
 from d33d.config.probes import CapabilityCache
 from d33d.config.resolve import resolve_model
+from d33d.critique_protocol import review_vision_enabled
 from d33d.design_llm import LLM_CALL_TIMEOUT_SECONDS
 from d33d.design_loop_events import (
     EMPTY_PHOTO_DATA_URI,
@@ -1977,6 +1978,10 @@ def _build_production_design_loop():
             prompt_version=prompt_version,
             on_progress=on_progress,
             attempt_timeout=attempt_timeout,
+            # Issue #435: the review sends images, so it follows the probed
+            # vision flag (not the tier label); without it the pass card
+            # says "not visually reviewed".
+            vision=review_vision_enabled(capability),
         )
 
     def _wrapper(app: Any, **kwargs: Any) -> Any:

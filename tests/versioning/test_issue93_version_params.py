@@ -515,6 +515,7 @@ def _make_result(best_params):
                 params=dict(best_params),
             )
             self.failure_reason = None
+            self.checks_run = ()
 
     return _Result()
 
@@ -906,6 +907,7 @@ def test_chat_abstained_pass_creates_version_without_dims_and_next_turn_abstains
             class _R:
                 status = "pass"
                 failure_reason = None
+                checks_run = ()
                 best = None
 
             return _R()
@@ -1002,6 +1004,7 @@ def test_chat_follow_up_cueless_message_carries_forward(app_with_versions):
             class _R:
                 status = "pass"
                 failure_reason = None
+                checks_run = ()
                 best = None
 
             return _R()

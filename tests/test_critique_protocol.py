@@ -24,8 +24,10 @@ No Docker, no network: ``llm_fn`` / ``request_factory`` are injected (the
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +40,7 @@ from d33d.critique_protocol import (
     REQUIRED_VIEW_NAMES,
     CritiqueVerdict,
     InsufficientViews,
+    ReviewVerdict,
     ViewMismatch,
     build_critique_messages,
     build_critique_system,
@@ -45,7 +48,10 @@ from d33d.critique_protocol import (
     deterministic_verdict,
     make_critique_llm_fn,
     parse_critique,
+    parse_review,
+    render_view_data_uris,
     required_views,
+    review_render,
     validate_views,
 )
 from d33d.design_llm import LLMResult, SenderError
@@ -567,3 +573,202 @@ class _FakeResponse:
     @property
     def is_success(self) -> bool:
         return True
+
+
+# ---------------------------------------------------------------------------
+# Issue #435: request-versus-render review (review_render)
+# ---------------------------------------------------------------------------
+
+_REVIEW_VIEWS = {name: f"data:image/png;base64,{name}" for name in REQUIRED_VIEW_NAMES}
+
+
+def _review_reply(content: str = "", tool_calls: tuple = ()) -> LLMResult:
+    return LLMResult(
+        content=content,
+        tool_calls=tool_calls,
+        prompt_hash="r" * 64,
+        tier="T1",
+        status="ok",
+        request_body={},
+    )
+
+
+def _scripted_review_llm(reply: Any):
+    """A role-aware llm_fn stub: records every (role, messages) and answers
+    with ``reply`` (an LLMResult, or an exception instance to raise)."""
+    calls: list[tuple[str, list[dict[str, Any]]]] = []
+
+    async def llm_fn(role, messages, system):
+        calls.append((role, messages))
+        if isinstance(reply, BaseException):
+            raise reply
+        return reply
+
+    return llm_fn, calls
+
+
+def test_review_render_pass_reply_passes_and_calls_critique_role():
+    llm, calls = _scripted_review_llm(
+        _review_reply('```json\n{"verdict": "pass", "reason": "matches"}\n```')
+    )
+    verdict = asyncio.run(
+        review_render(_REVIEW_VIEWS, "a 20 mm box", None, llm_fn=llm)
+    )
+    assert verdict == ReviewVerdict(status="pass")
+    assert [role for role, _ in calls] == ["critique"]
+    parts = calls[0][1][0]["content"]
+    # Six view images, the request as data, no reference photo part.
+    assert sum(1 for p in parts if p["type"] == "image_url") == 6
+    assert "a 20 mm box" in parts[0]["text"]
+
+
+def test_review_render_fail_reply_carries_the_reason():
+    llm, _ = _scripted_review_llm(
+        _review_reply(
+            '```json\n{"verdict": "fail", "reason": "the groove is a notch, not a slot"}\n```'
+        )
+    )
+    verdict = asyncio.run(review_render(_REVIEW_VIEWS, "a slot", None, llm_fn=llm))
+    assert verdict.status == "fail"
+    assert verdict.reason == "the groove is a notch, not a slot"
+
+
+def test_review_render_reference_photo_adds_an_image_part():
+    llm, calls = _scripted_review_llm(
+        _review_reply('{"verdict": "pass", "reason": "ok"}')
+    )
+    asyncio.run(
+        review_render(_REVIEW_VIEWS, "box", "data:image/png;base64,PHOTO", llm_fn=llm)
+    )
+    parts = calls[0][1][0]["content"]
+    assert sum(1 for p in parts if p["type"] == "image_url") == 7
+
+
+def test_review_render_unparseable_reply_is_unreviewed():
+    llm, _ = _scripted_review_llm(_review_reply("looks fine to me"))
+    verdict = asyncio.run(review_render(_REVIEW_VIEWS, "box", None, llm_fn=llm))
+    assert verdict == ReviewVerdict(status="unreviewed", why="unparseable")
+
+
+def test_review_render_fail_without_reason_is_unreviewed():
+    assert parse_review(_review_reply('{"verdict": "fail"}')) is None
+
+
+def test_review_render_call_error_is_unreviewed():
+    llm, _ = _scripted_review_llm(RuntimeError("boom"))
+    verdict = asyncio.run(review_render(_REVIEW_VIEWS, "box", None, llm_fn=llm))
+    assert verdict == ReviewVerdict(status="unreviewed", why="call_error")
+
+
+def test_review_render_any_call_side_exception_is_unreviewed():
+    # The request-log write on the edge can raise a sqlite3.Error, which is
+    # not an httpx/OSError/RuntimeError/ValueError/TypeError/KeyError. The
+    # review must still degrade to unreviewed, never abort the design run.
+    import sqlite3
+
+    llm, _ = _scripted_review_llm(sqlite3.OperationalError("database is locked"))
+    verdict = asyncio.run(review_render(_REVIEW_VIEWS, "box", None, llm_fn=llm))
+    assert verdict == ReviewVerdict(status="unreviewed", why="call_error")
+
+
+class Boom(Exception):
+    """An exception outside every named edge class."""
+
+
+def test_review_render_any_exception_is_unreviewed_never_aborts():
+    # Issue #435: a failing review must never lose a passing candidate, so any
+    # Exception from the edge degrades to unreviewed (CancelledError is a
+    # BaseException and still propagates; see the next test).
+    llm, _ = _scripted_review_llm(Boom("unlisted"))
+    verdict = asyncio.run(review_render(_REVIEW_VIEWS, "box", None, llm_fn=llm))
+    assert verdict == ReviewVerdict(status="unreviewed", why="call_error")
+
+
+def test_review_render_cancellation_still_propagates():
+    llm, _ = _scripted_review_llm(asyncio.CancelledError())
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(review_render(_REVIEW_VIEWS, "box", None, llm_fn=llm))
+
+
+def test_review_render_sync_llm_fn_runs_off_loop_under_wait_for_budget():
+    # Issue #435: a sync llm_fn must not block the event loop, so the caller's
+    # wait_for budget can cut it off.
+    def slow_llm(role, messages, system):
+        time.sleep(0.5)
+        return _review_reply('{"verdict": "pass", "reason": "x"}')
+
+    async def run() -> float:
+        started = time.monotonic()
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(
+                review_render(_REVIEW_VIEWS, "box", None, llm_fn=slow_llm),
+                timeout=0.05,
+            )
+        return time.monotonic() - started
+
+    assert asyncio.run(run()) < 0.4
+
+
+def test_review_render_non_vision_tier_is_unreviewed_no_vision():
+    llm, _ = _scripted_review_llm(
+        SenderError("tier T2 has no tool channel", status="no_tools_supported")
+    )
+    verdict = asyncio.run(review_render(_REVIEW_VIEWS, "box", None, llm_fn=llm))
+    assert verdict == ReviewVerdict(status="unreviewed", why="no_vision")
+
+
+def test_review_render_partial_views_never_judged():
+    llm, calls = _scripted_review_llm(_review_reply('{"verdict": "pass", "reason": "x"}'))
+    partial = dict(list(_REVIEW_VIEWS.items())[:5])
+    verdict = asyncio.run(review_render(partial, "box", None, llm_fn=llm))
+    assert verdict == ReviewVerdict(status="unreviewed", why="views_missing")
+    assert calls == []
+
+
+def test_render_view_data_uris_reads_six_pngs_or_nothing(tmp_path: Path):
+    from types import SimpleNamespace
+
+    assert render_view_data_uris(SimpleNamespace(render_artifact_dir=None)) == {}
+    for name in REQUIRED_VIEW_NAMES[:5]:
+        (tmp_path / name).write_bytes(b"png")
+    assert render_view_data_uris(SimpleNamespace(render_artifact_dir=str(tmp_path))) == {}
+    (tmp_path / REQUIRED_VIEW_NAMES[5]).write_bytes(b"png")
+    uris = render_view_data_uris(SimpleNamespace(render_artifact_dir=str(tmp_path)))
+    assert set(uris) == set(REQUIRED_VIEW_NAMES)
+    assert uris[REQUIRED_VIEW_NAMES[0]].startswith("data:image/png;base64,")
+
+
+def test_review_render_fail_reason_is_truncated_to_300_chars():
+    # Issue #435: the model-authored reason becomes repair evidence, so it is
+    # bounded before it leaves the review.
+    from d33d.critique_protocol import REVIEW_REASON_MAX_CHARS
+
+    assert REVIEW_REASON_MAX_CHARS == 300
+    long_reason = "x" * 1000
+    llm, _ = _scripted_review_llm(
+        _review_reply('{"verdict": "fail", "reason": "' + long_reason + '"}')
+    )
+    verdict = asyncio.run(review_render(_REVIEW_VIEWS, "box", None, llm_fn=llm))
+    assert verdict.status == "fail"
+    assert verdict.reason == "x" * 300
+
+
+def test_review_vision_enabled_follows_the_probed_vision_flag():
+    # Issue #435 operator decision: gating is the probed CapabilityResult's
+    # vision flag, not the tier label (a T1 model can lack vision).
+    from d33d.config.probes import CapabilityResult
+    from d33d.critique_protocol import review_vision_enabled
+
+    def cap(tools: bool, json_schema: bool, vision: bool) -> CapabilityResult:
+        return CapabilityResult(
+            tools=tools, json_schema=json_schema, vision=vision,
+            max_images=1 if vision else 0,
+        )
+
+    # T0 with vision, and T1 (tools without json_schema) with vision.
+    assert review_vision_enabled(cap(True, True, True)) is True
+    assert review_vision_enabled(cap(True, False, True)) is True
+    # T1 without vision: the tier label alone would have enabled the review.
+    assert review_vision_enabled(cap(True, False, False)) is False
+    assert review_vision_enabled(cap(True, True, False)) is False
+    assert review_vision_enabled(None) is False

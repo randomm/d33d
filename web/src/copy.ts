@@ -25,6 +25,18 @@ export type PostCheckReason =
   | "stack_height_mismatch"
   | "hollow_solid";
 
+/** Issue #435: the closed set of checks the design loop reports in
+ *  `checks_run` (the server's CHECK_KEYS, d33d/design_loop.py). `tsc` checks
+ *  `passCard.checkWords` maps exactly these keys. */
+export type CheckKey =
+  | "size"
+  | "watertight"
+  | "screw_clearance"
+  | "through_holes"
+  | "stack_height"
+  | "change_detected"
+  | "hollow";
+
 /** "try" for one, "tries" otherwise (issue #432). */
 const triesWord = (attempts: number): string => (attempts === 1 ? "try" : "tries");
 
@@ -281,6 +293,27 @@ export const passCard = {
     "Named parameters, because that is what makes the next change a change and not a rewrite. Copy it into OpenSCAD if you want — nothing here needs you to.",
 
   checksPassed: (count: number): string => `${count} checks`,
+
+  /** Issue #435: the short word for each check the server reports as run
+   *  (the keys the design loop records in DesignResult.checks_run). Only checks that executed are
+   *  listed; a key with no word here is never shown. */
+  checkWords: {
+    size: "size",
+    watertight: "watertight",
+    screw_clearance: "screw clearance",
+    through_holes: "through-holes",
+    stack_height: "stack height",
+    change_detected: "change detected",
+    hollow: "not hollow",
+  } as const satisfies Record<CheckKey, string>,
+  /** The "Checked: …" line over the words of the checks that ran. */
+  checksRan: (words: readonly string[]): string => `Checked: ${words.join(", ")}`,
+  /** The vision review ran and matched the request. */
+  reviewedAgainstRequest:
+    "Reviewed against your request — the six views were checked by the vision model.",
+  /** The review did not run or gave no usable verdict (any cause; the cause is logged). */
+  notVisuallyReviewed:
+    "Not visually reviewed — only the measured checks ran.",
   closeDisclosure: "Close the source",
   viewEnlargedCaption:
     "Rendered straight from the model, not a photo of the viewport. This is the picture the system itself looked at.",
@@ -567,6 +600,9 @@ export const failure = {
     stack_height_mismatch:
       "The stacked parts don't add up to the height you asked for.",
     hollow_solid: "The part is almost hollow — most of the solid is missing.",
+    /** Issue #435: the vision review judged the render wrong on the last try. */
+    visual_review_failed:
+      "The render doesn't match what you asked for — the last try still didn't look right against your request.",
     empty_model: "The design produced an empty model — there is nothing to print.",
     artifact_error: "The model file came out unreadable.",
     timeout: "The render ran out of time. A simpler shape will get through.",

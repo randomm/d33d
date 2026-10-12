@@ -531,6 +531,7 @@ def test_design_loop_adapter_threads_render_artifact_dir(
         best = record
         iterations = (record,)
         failure_reason = None
+        checks_run = ()
         iterations_used = 1
 
     async def _loop(**kwargs: Any) -> Any:

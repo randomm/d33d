@@ -417,6 +417,7 @@ def _measured_stub_status_result(params: dict):
         best = record
         iterations = (record,)
         failure_reason = None
+        checks_run = ()
         iterations_used = 1
 
     return _Result()

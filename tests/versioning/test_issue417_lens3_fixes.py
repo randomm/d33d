@@ -27,6 +27,7 @@ from d33d.design_loop import IterationRecord, Score
 from d33d.design_loop_events import (
     ADAPTER_DEADLINE_MARGIN_SECONDS,
     ADAPTER_RENDER_ALLOWANCE_SECONDS,
+    ADAPTER_REVIEW_ALLOWANCE_SECONDS,
     DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS,
     DESIGN_LOOP_TIMED_OUT_REASON,
     MAX_ITERATIONS,
@@ -59,6 +60,7 @@ class _TimeoutStubResult:
     def __init__(self) -> None:
         self.status = "exhausted"
         self.failure_reason = DESIGN_LOOP_TIMED_OUT_REASON
+        self.checks_run = ()
         self.attempts_started = 0
         self.attempt_latencies = None
         self.best = IterationRecord(
@@ -92,6 +94,9 @@ def test_sync_loop_timeout_without_latencies_emits_terminal_frame(
     )
     monkeypatch.setattr(
         "d33d.design_loop_events.ADAPTER_RENDER_ALLOWANCE_SECONDS", 1.0
+    )
+    monkeypatch.setattr(
+        "d33d.design_loop_events.ADAPTER_REVIEW_ALLOWANCE_SECONDS", 1.0
     )
 
     async def _call(client):
@@ -149,16 +154,21 @@ def test_sync_loop_timeout_without_latencies_emits_terminal_frame(
 
 
 def test_adapter_net_includes_render_time():
-    """The net must cover (LLM budget + render allowance) × MAX_ITERATIONS,
-    not just the LLM budget × MAX_ITERATIONS. The render allowance is the
-    render worker's own subprocess timeout constant (120 s)."""
+    """The net must cover (LLM budget + review allowance + render allowance)
+    × MAX_ITERATIONS, not just the LLM budget × MAX_ITERATIONS. The render
+    allowance is the render worker's own subprocess timeout constant (120 s);
+    the review allowance (issue #435) is the per-attempt review budget."""
     assert ADAPTER_RENDER_ALLOWANCE_SECONDS == DEFAULT_TIMEOUT_S
     net = (
-        (DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS + ADAPTER_RENDER_ALLOWANCE_SECONDS)
+        (
+            DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS
+            + ADAPTER_REVIEW_ALLOWANCE_SECONDS
+            + ADAPTER_RENDER_ALLOWANCE_SECONDS
+        )
         * MAX_ITERATIONS
         + ADAPTER_DEADLINE_MARGIN_SECONDS
     )
-    assert net == 780.0, f"unexpected net: {net}"
+    assert net == 1140.0, f"unexpected net: {net}"
 
 
 def test_slow_progressing_run_not_cut_off_by_net(app_with_versions, monkeypatch):
@@ -183,6 +193,9 @@ def test_slow_progressing_run_not_cut_off_by_net(app_with_versions, monkeypatch)
     monkeypatch.setattr(
         "d33d.design_loop_events.ADAPTER_RENDER_ALLOWANCE_SECONDS", 1.0
     )
+    monkeypatch.setattr(
+        "d33d.design_loop_events.ADAPTER_REVIEW_ALLOWANCE_SECONDS", 1.0
+    )
 
     _per_attempt = 1.4  # 3 × 1.4 = 4.2 s > old net 3.1 s, < new net 6.1 s
 
@@ -194,6 +207,7 @@ def test_slow_progressing_run_not_cut_off_by_net(app_with_versions, monkeypatch)
         def __init__(self) -> None:
             self.status = "exhausted"
             self.failure_reason = "bbox_out_of_tolerance"
+            self.checks_run = ()
             self.attempts_started = 0
             self.attempt_latencies = None
             self.best = IterationRecord(

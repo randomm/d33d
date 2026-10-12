@@ -53,7 +53,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
@@ -202,8 +202,11 @@ def unchanged_mesh_check(
     parent_fingerprint: tuple[str, int] | None = None,
     parent_volume_mm3: float | None = None,
     parent_face_count: int | None = None,
+    on_pass: Callable[[], None] | None = None,
 ) -> tuple[str, str] | None:
-    """Issue #419: the unchanged-mesh post-check (detection).
+    """Issue #419: the unchanged-mesh post-check (detection). ``on_pass``
+    (issue #435) is called only when the check reached the comparison and
+    the geometry changed (the check passed).
 
     Module docstring: the fingerprint rationale. Returns
     ``(evidence, instruction)`` when the candidate's rendered mesh has
@@ -242,6 +245,8 @@ def unchanged_mesh_check(
     # re-hashes identically (1e-3 mm rounding absorbs the STL float
     # noise).
     if candidate_fp[0] != parent_fp[0]:
+        if on_pass is not None:
+            on_pass()
         return None  # geometry changed → the check does NOT fire
 
     # -- Leg 2 (sanity): volume within tolerance. A fingerprint match
@@ -259,6 +264,8 @@ def unchanged_mesh_check(
             _VOLUME_REL_TOL * abs(parent_volume_mm3), _VOLUME_ABS_FLOOR_MM3
         )
         if vol_delta > vol_tol:
+            if on_pass is not None:
+                on_pass()
             return None  # fingerprint matched but volume moved → not unchanged
 
     # Fingerprint match: the geometry is identical. Build the evidence

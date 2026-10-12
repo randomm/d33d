@@ -101,6 +101,8 @@ export const FAILURE_REASONS = [
   "stack_height_mismatch",
   // Issue #436: the near-hollow post-check (d33d/hollow_check.py).
   "hollow_solid",
+  // Issue #435: the vision review failed the candidate on the last iteration.
+  "visual_review_failed",
 ] as const;
 
 /** A loop-level reason code; `tsc` checks any `Record<FailureReason, …>` is total. */

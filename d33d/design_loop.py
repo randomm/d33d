@@ -85,6 +85,7 @@ from d33d.post_check_reasons import (
     SCREW_CLEARANCE_REASON,
     STACK_HEIGHT_REASON,
     THROUGH_HOLE_REASON,
+    VISUAL_REVIEW_FAILED_REASON,
 )
 from d33d.render_worker import (
     RENDER_WORKER_IMAGE,
@@ -95,6 +96,11 @@ from d33d.render_worker import (
 )
 from d33d.scad_center_check import center_vector_warning
 from d33d.unchanged_mesh_check import fingerprint_stl
+from d33d.visual_review import (
+    ReviewVerdict,
+    render_view_data_uris,
+    review_render,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -402,6 +408,21 @@ class IterationRecord:
     confirm_sentence: str | None = None
 
 
+#: Issue #435: the ordered closed set of post-checks that can appear in
+#: ``DesignResult.checks_run``, in pipeline order. The UI word map
+#: (``web/src/copy.ts`` ``passCard.checkWords``) must have exactly these keys
+#: (tests/test_issue435_check_keys.py).
+CHECK_KEYS: tuple[str, ...] = (
+    "size",
+    "watertight",
+    "screw_clearance",
+    "through_holes",
+    "stack_height",
+    "change_detected",
+    "hollow",
+)
+
+
 @dataclass(frozen=True)
 class DesignResult:
     """The loop's terminal outcome.
@@ -452,6 +473,17 @@ class DesignResult:
     env_var: str | None = None
     renderer_detail: dict[str, str] | None = None
     attempt_latencies: tuple[float, ...] | None = None
+    #: Issue #435: ``True`` when the visual review judged the kept candidate
+    #: against the request (a "pass" verdict). ``False`` on an unreviewed
+    #: pass (non-vision tier, call error, unparseable reply, timeout) and on
+    #: every non-pass outcome — the pass card says "not visually reviewed".
+    visually_reviewed: bool = False
+    #: Issue #435: the checks that EXECUTED AND PASSED on the kept pass
+    #: candidate, in execution order (size, watertight, screw_clearance,
+    #: through_holes, stack_height, change_detected, hollow). Each post-check
+    #: reports itself at its own pass point, so an abstaining check is never
+    #: listed. Empty on every non-pass outcome.
+    checks_run: tuple[str, ...] = ()
 
 
 #: Structured failure reasons for an exhausted loop, in bit order — each
@@ -1108,6 +1140,8 @@ def _through_hole_post_check(
     through_baseline_genus: int | None,
     scad_source: str,
     through_baseline_genus_source: str | None = None,
+    *,
+    on_pass: Callable[[], None] | None = None,
 ) -> tuple[str, str] | None:
     """Issue #386: the through-hole genus post-check (deferred-import
     wrapper, the #317 pattern).
@@ -1129,6 +1163,7 @@ def _through_hole_post_check(
         through_baseline_genus,
         scad_source,
         through_baseline_genus_source,
+        on_pass=on_pass,
     )
 
 
@@ -1136,6 +1171,8 @@ def _undersize_screw_hole(
     request: str,
     params: dict[str, float],
     param_meta: dict[str, Any],
+    *,
+    on_pass: Callable[[], None] | None = None,
 ) -> tuple[str, float, float, str] | None:
     """Issue #317: the deterministic screw-hole clearance post-check.
 
@@ -1148,7 +1185,7 @@ def _undersize_screw_hole(
     design_prompts → design_loop)."""
     from d33d.screw_hole_check import undersize_screw_hole
 
-    return undersize_screw_hole(request, params, param_meta)
+    return undersize_screw_hole(request, params, param_meta, on_pass=on_pass)
 
 
 def _mm(value: float) -> str:
@@ -1184,6 +1221,7 @@ def _unchanged_mesh_post_check(
     parent_fingerprint: tuple[str, int] | None = None,
     parent_volume_mm3: float | None = None,
     parent_face_count: int | None = None,
+    on_pass: Callable[[], None] | None = None,
 ) -> tuple[str, str] | None:
     """Issue #419: the unchanged-mesh post-check (deferred-import wrapper,
     the #317 pattern).
@@ -1209,12 +1247,15 @@ def _unchanged_mesh_post_check(
         parent_fingerprint=parent_fingerprint,
         parent_volume_mm3=parent_volume_mm3,
         parent_face_count=parent_face_count,
+        on_pass=on_pass,
     )
 
 
 def _stack_height_post_check(
     scad_source: str,
     measured_z: float | None,
+    *,
+    on_pass: Callable[[], None] | None = None,
 ) -> tuple[float, float] | None:
     """Issue #409: the stack-height post-check (deferred-import wrapper,
     the #317 pattern).
@@ -1228,7 +1269,7 @@ def _stack_height_post_check(
     """
     from d33d.stack_height_check import stack_height_check
 
-    return stack_height_check(scad_source, measured_z)
+    return stack_height_check(scad_source, measured_z, on_pass=on_pass)
 
 
 def _scad_params(scad_source: str) -> dict[str, float]:
@@ -1866,8 +1907,14 @@ async def run_design_loop_async(
     renderer_check: Callable[[], bool] | None = None,
     image_check: Callable[[], dict[str, str] | None] | None = None,
     attempt_timeout: float | None = DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS,
+    vision: bool = False,
 ) -> DesignResult:
     """Run the bounded iterate-and-score design loop (async core).
+
+    ``vision`` (issue #435) gates the visual review of a gate-passing
+    candidate: the caller sets it from the critique role's probed capability
+    (T0/T1 vision, T2 not). ``False`` skips the review, so the pass is
+    marked not visually reviewed.
 
     ``photo`` is the reference image (data URI / URL). ``stated_dims`` is
     the ground-truth (W, D, H) triple in mm — never estimated. ``None``
@@ -2056,6 +2103,10 @@ async def run_design_loop_async(
     for iteration in range(1, max_iterations + 1):
         _stamp_on_progress_iteration(on_progress, iteration)
         _attempt_started = time.monotonic()
+        # Issue #435: per-iteration visual-review state (reset every attempt,
+        # so a non-rendering attempt never inherits the previous verdict).
+        _review_failed = False
+        _visually_reviewed = False
         scad_co = _call(
             llm_fn,
             "design",
@@ -2177,6 +2228,16 @@ async def run_design_loop_async(
             part_bbox_mm=part_bbox_mm,
             part_scale=part_scale,
         )
+
+        # Issue #435: the checks that executed and passed on THIS candidate,
+        # in execution order. The gate bits are recorded here; each post-check
+        # appends its key from its own pass point (``on_pass``), never on an
+        # abstain. Only a pass return reads this list.
+        _checks_ran: list[str] = []
+        if bbox is not None and not candidate_score.bbox_abstained:
+            _checks_ran.append("size")
+        if render.error_class == "ok":
+            _checks_ran.append("watertight")
 
         # Failure routing: tagged, structured, NEVER terminal. Compile
         # failures are a low-scoring iteration, not a loop stop.
@@ -2319,7 +2380,10 @@ async def run_design_loop_async(
         _screw_repair_fired = False
         if render.error_class == "ok" and next_repair is None:
             _screw_det = _undersize_screw_hole(
-                request, _scad_params(scad_source), extract_param_meta(scad)
+                request,
+                _scad_params(scad_source),
+                extract_param_meta(scad),
+                on_pass=lambda _ran=_checks_ran: _ran.append("screw_clearance"),
             )
             if _screw_det is not None:
                 _size, _val, _clr, _lbl = _screw_det
@@ -2378,6 +2442,7 @@ async def run_design_loop_async(
                 through_baseline_genus,
                 scad_source,
                 through_baseline_genus_source,
+                on_pass=lambda _ran=_checks_ran: _ran.append("through_holes"),
             )
             if _through_routed is not None:
                 _evidence, _instruction = _through_routed
@@ -2412,7 +2477,11 @@ async def run_design_loop_async(
             and not _through_repair_fired
             and part_scale is None
         ):
-            _stack_det = _stack_height_post_check(scad_source, bbox.z if bbox else None)
+            _stack_det = _stack_height_post_check(
+                scad_source,
+                bbox.z if bbox else None,
+                on_pass=lambda _ran=_checks_ran: _ran.append("stack_height"),
+            )
             if _stack_det is not None:
                 _declared, _measured = _stack_det
                 _evidence = (
@@ -2471,6 +2540,7 @@ async def run_design_loop_async(
                 parent_fingerprint,
                 parent_volume_mm3,
                 parent_face_count,
+                on_pass=lambda _ran=_checks_ran: _ran.append("change_detected"),
             )
             if _unchanged_det is not None:
                 _evidence, _instruction = _unchanged_det
@@ -2509,7 +2579,10 @@ async def run_design_loop_async(
             and part_scale is None
         ):
             _hollow_det = await asyncio.to_thread(
-                hollow_solid_check, request, render.stl
+                hollow_solid_check,
+                request,
+                render.stl,
+                on_pass=lambda _ran=_checks_ran: _ran.append("hollow"),
             )
             if _hollow_det is not None:
                 _evidence, _instruction = _hollow_det
@@ -2523,6 +2596,49 @@ async def run_design_loop_async(
                 }
                 _hollow_repair_fired = True
 
+        # Issue #435: visual review of a candidate that passed every gate and
+        # every post-check, immediately before the pass return. The review is
+        # its own call with its own per-attempt budget. "fail" routes
+        # ``geometrically_wrong`` with the reason as evidence (the same repair
+        # path as the other post-checks), so the next attempt can fix it; the
+        # last attempt exhausts with ``visual_review_failed``. "pass" passes;
+        # "unreviewed" passes and the card says so.
+        if (
+            vision
+            and candidate_score.perfect
+            and next_repair is None
+            and not _post_check_fired
+            and not _hollow_repair_fired
+            and _center_finding is None
+        ):
+            _verdict = await _visual_review(
+                render, request=request, photo=photo, llm_fn=llm_fn
+            )
+            if _verdict.status == "fail":
+                _review_failed = True
+                failure_class = "geometrically_wrong"
+                _review_directive = route_repair(
+                    classified=ClassifiedFailure(
+                        failure_class="geometrically_wrong",
+                        evidence=_verdict.reason,
+                        repairable=True,
+                    ),
+                    scad_source=scad_source,
+                )
+                next_repair = (
+                    _review_directive.to_dict()
+                    if _review_directive is not None
+                    else {
+                        "failure_class": "geometrically_wrong",
+                        "instruction": _verdict.reason,
+                        "scad_source": scad_source,
+                        "evidence": _verdict.reason,
+                    }
+                )
+                next_repair["reason"] = VISUAL_REVIEW_FAILED_REASON
+            elif _verdict.status == "pass":
+                _visually_reviewed = True
+
         # Issue #432: identical-repair stop. A post-check repair whose
         # rendered mesh equals the PREVIOUS iteration's (same post-check
         # reason) cannot move — stop after this attempt instead of repairing
@@ -2530,6 +2646,11 @@ async def run_design_loop_async(
         _post_reason = (
             next_repair.get("reason") if isinstance(next_repair, dict) else None
         )
+        # Issue #435: a visual-review fail is not a post-check, so it never
+        # arms the identical-repair tracker. A repeated review fail on an
+        # identical mesh therefore does not stop early; the run stays bounded by
+        # MAX_ITERATIONS and NO_IMPROVEMENT_LIMIT (at most one extra design,
+        # render and review round).
         _post_fp: tuple[str, int] | None = None
         if _post_reason in POST_CHECK_REASONS:
             _post_fp = await asyncio.to_thread(fingerprint_stl, render.stl)
@@ -2555,6 +2676,7 @@ async def run_design_loop_async(
             and not _post_check_fired
             and not _hollow_repair_fired
             and _center_finding is None
+            and not _review_failed
         ):
             return DesignResult(
                 status="pass",
@@ -2562,6 +2684,8 @@ async def run_design_loop_async(
                 iterations=tuple(iterations),
                 failure_reason=None,
                 iterations_used=iteration,
+                visually_reviewed=_visually_reviewed,
+                checks_run=tuple(_checks_ran),
             )
 
         if best is None or is_best(candidate_score, best_score):
@@ -2598,9 +2722,14 @@ async def run_design_loop_async(
 
         repair = next_repair
         if consecutive_no_improvement >= NO_IMPROVEMENT_LIMIT:
-            return _exhausted(iterations, best, best_score)
+            # Issue #435: a visual-review fail on the iteration that triggered
+            # the stop keeps its reason (a gate/error_class reason still wins).
+            return _exhausted(
+                iterations, best, best_score, review_fail=_review_failed
+            )
 
-    return _exhausted(iterations, best, best_score)
+    # Issue #435: the last attempt was judged not to match the request.
+    return _exhausted(iterations, best, best_score, review_fail=_review_failed)
 
 
 def _stamp_on_progress_iteration(on_progress: Any, iteration: int) -> None:
@@ -2846,6 +2975,7 @@ def run_design_loop(
     parent_face_count: int | None = None,
     renderer_check: Callable[[], bool] | None = None,
     image_check: Callable[[], dict[str, str] | None] | None = None,
+    vision: bool = False,
 ) -> DesignResult:
     """Synchronous entry point for the bounded design loop.
 
@@ -2881,6 +3011,7 @@ def run_design_loop(
             parent_face_count=parent_face_count,
             renderer_check=renderer_check,
             image_check=image_check,
+            vision=vision,
         )
     )
 
@@ -2945,6 +3076,42 @@ def _container_error_stop(
         failure_reason="container_error",
         iterations_used=len(iterations),
     )
+
+
+async def _visual_review(
+    render: RenderResult,
+    *,
+    request: str,
+    photo: str,
+    llm_fn: LLMFn,
+) -> ReviewVerdict:
+    """The issue #435 visual review of one candidate, under its OWN
+    per-attempt budget (``DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS``, read at call
+    time) — a slow review never eats the design attempt's budget. Returns a
+    :class:`d33d.visual_review.ReviewVerdict`; a timeout is ``unreviewed``.
+    """
+    views = await asyncio.to_thread(render_view_data_uris, render)
+    try:
+        verdict = await asyncio.wait_for(
+            review_render(views, request, photo or None, llm_fn=llm_fn),
+            timeout=DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS,
+        )
+    except TimeoutError:
+        return _log_unreviewed(ReviewVerdict.unreviewed("timeout"))
+    if verdict.status == "unreviewed":
+        return _log_unreviewed(verdict)
+    return verdict
+
+
+def _log_unreviewed(verdict: ReviewVerdict) -> ReviewVerdict:
+    # Issue #435: the card shows one "not visually reviewed" line for every
+    # cause; the cause is logged here.
+    logger.info(
+        "visual review unreviewed (%s) — candidate passes as not visually "
+        "reviewed",
+        verdict.why,
+    )
+    return verdict
 
 
 async def _await_with_per_attempt_deadline(
@@ -3021,6 +3188,7 @@ def _exhausted(
     best_score: Score | None,
     failure_reason: str | None = None,
     fallback_reason: str | None = None,
+    review_fail: bool = False,
 ) -> DesignResult:
     """Build the exhaustion result: best-scoring candidate + a STRUCTURED
     failure reason (weakest gate bit of the best, never free text, never
@@ -3084,12 +3252,22 @@ def _exhausted(
         # derivation found no reason at all.
         # Issue #432: the same rule for the through-hole, screw-clearance and
         # stack-height post-checks — each carries its own reason on the repair.
+        # Issue #435: the last attempt was a visual-review fail (``review_fail``)
+        # and wins over an earlier post-check repair on the best record (ties
+        # keep the incumbent, so the best can be an earlier post-check pass).
+        if reason is None and review_fail:
+            reason = VISUAL_REVIEW_FAILED_REASON
         if reason is None:
             _repair = getattr(best, "repair", None)
             _repair_reason = (
                 _repair.get("reason") if isinstance(_repair, dict) else None
             )
-            if _repair_reason in POST_CHECK_REASONS:
+            # Issue #435: a review-fail repair on the best record keeps its
+            # reason; it is not a post-check (see post_check_reasons), so it is
+            # listed here explicitly.
+            if _repair_reason in POST_CHECK_REASONS or (
+                _repair_reason == VISUAL_REVIEW_FAILED_REASON
+            ):
                 reason = _repair_reason
     if reason is None:
         # Issue #432: the identical-repair stop's post-check reason, used only
