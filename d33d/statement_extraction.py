@@ -23,6 +23,7 @@ from typing import Any
 
 from d33d.axis_lexicon import (
     _FEATURE_NOUNS,
+    _PART_NOUNS,
     ABSOLUTE_WORDS,
     DIMENSION_AXES,
     FEATURE_NOUN_RE,
@@ -122,6 +123,18 @@ def feature_slot(feat: StatedFeature) -> tuple[str, str | None]:
     return (feat.noun, feat.role)
 
 
+def _true_feature_noun(text: str) -> str | None:
+    """The canonical noun of the first TRUE feature noun in ``text`` (issue
+    #433 review): a part noun (``lid`` / ``spacer``) names the whole printed
+    part, never a feature, so it is skipped. ``None`` when ``text`` names no
+    feature noun (a part-only clause states no feature size)."""
+    for m in FEATURE_NOUN_RE.finditer(text):
+        noun = _canonical_feature_noun(m.group(0).lower())
+        if noun not in _PART_NOUNS:
+            return noun
+    return None
+
+
 def _feature_size_is_bound(clause: str, start: int, end: int) -> bool:
     """Whether the mm number at ``clause[start:end]`` is the feature's own size
     (issue #433): the feature noun or a role word follows it (``6 mm hole``,
@@ -134,12 +147,12 @@ def _feature_size_is_bound(clause: str, start: int, end: int) -> bool:
         return False
     if any(t in _DISTANCE_WORDS for t in head_tokens[-2:]):
         return False
-    if any(FEATURE_NOUN_RE.search(w) or w in _FEATURE_ROLE_WORDS for w in tail_words):
+    if any(_true_feature_noun(w) or w in _FEATURE_ROLE_WORDS for w in tail_words):
         return True
     return bool(
         head_tokens
         and head_tokens[-1] in {"is", "are", "be", "was", "=", ":"}
-        and any(FEATURE_NOUN_RE.search(t) for t in head_tokens[:-1])
+        and any(_true_feature_noun(t) for t in head_tokens[:-1])
     )
 
 
@@ -436,12 +449,11 @@ def stated_features_from_messages(
         if fc_start < 0:
             continue  # no feature clause in this message — nothing stated
         for clause in all_sub_clauses[fc_start:]:
-            m = FEATURE_NOUN_RE.search(clause)
-            if m is None:
-                continue  # a feature-verb sub-clause without a noun of its
-                # own: the noun (and its value) are recorded from the
-                # clause that names the feature.
-            noun = _canonical_feature_noun(m.group(0).lower())
+            noun = _true_feature_noun(clause)
+            if noun is None:
+                continue  # a feature-verb sub-clause without a feature noun
+                # of its own (or a part-only clause, "a 7 mm lid"): nothing
+                # is recorded from it.
             # Each mm number takes the role word that follows it (up to the
             # next number); only the first number may take a role from before
             # it ("the hole's diameter is 6 mm"). Distance numbers are dropped.
