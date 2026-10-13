@@ -3294,6 +3294,28 @@ class TestFeatureRowNeverAxisMeasured:
         assert "stated_value" not in row
         assert feature_mismatches_from_block(entries) == []
 
+    def test_feature_row_named_literal_axis_not_axis_measured(self) -> None:
+        """A feature row whose param is NAMED with a literal W/D/H (``D`` for a
+        diameter, no declared axis) must not be compared to the bbox extent:
+        the literal-name branch is guarded like the declared-axis branch."""
+        from d33d.design_state import feature_mismatches_from_block
+        from d33d.statement_extraction import StatedFeature
+
+        meta = {"D": {"label": "Hole diameter", "unit": "mm"}}
+        bbox = {"x": 20.0, "y": 20.0, "z": 20.0}
+        ok = state_block_for_version(
+            {"D": 6.0}, bbox, None, meta, None, [StatedFeature("hole", None, 6.0)]
+        )
+        row = next(e for e in ok if e["kind"] == "param" and e["name"] == "D")
+        assert row["provenance"] == "stated" and row["value"] == 6.0
+        assert "stated_value" not in row
+        bad = state_block_for_version(
+            {"D": 8.0}, bbox, None, meta, None, [StatedFeature("hole", None, 6.0)]
+        )
+        row = next(e for e in bad if e["kind"] == "param" and e["name"] == "D")
+        assert row["value"] == 8.0 and row["stated_value"] == 6.0
+        assert feature_mismatches_from_block(bad)[0]["made_mm"] == 8.0
+
     def test_feature_row_not_collapsed_into_agreeing_axis(self) -> None:
         entries = state_block_for_version(
             {"hole_diameter": 5.0},
