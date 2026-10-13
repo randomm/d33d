@@ -21,6 +21,15 @@ describe("fmtMm1 / dia — one decimal, half-up (issue #437)", () => {
     expect(fmtMm1(value)).toBe(expected);
   });
 
+  it.each([
+    [1e30, "1000000000000000000000000000000.0"],
+    [1e-7, "0.0"],
+    [2.45, "2.5"],
+    [-3.25, "-3.3"],
+  ])("fmtMm1(%s) === %s (large, tiny, negative)", (value, expected) => {
+    expect(fmtMm1(value)).toBe(expected);
+  });
+
   it("dia() renders the same one-decimal value with the unit", () => {
     expect(dia(38)).toBe("Ø38.0\u202Fmm");
     expect(dia(3.25)).toBe("Ø3.3\u202Fmm");
