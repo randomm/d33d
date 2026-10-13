@@ -155,6 +155,21 @@ def test_one_decimal_copy_is_only_for_a_resolved_measured_hole() -> None:
     assert "\u00d838.0 mm" in boundary_sentence("hole", 38.0, measured=True)
 
 
+def test_holes_in_mm_omits_non_finite_diameter_and_scale() -> None:
+    """Review minor 4: an infinite stored diameter must not reach fmt_mm1
+    (Decimal('inf') cannot be quantized); the hole is omitted instead."""
+    from d33d.hole_select import holes_in_mm
+
+    report = {
+        "holes": [
+            {"center": [1.0, 2.0, 3.0], "axis": [0.0, 0.0, 1.0], "diameter_mm": float("inf")},
+            {"center": [1.0, 2.0, 3.0], "axis": [0.0, 0.0, 1.0], "diameter_mm": 4.0},
+        ]
+    }
+    assert [h["diameter_mm"] for h in holes_in_mm(report, 1.0)] == [4.0]
+    assert holes_in_mm(report, float("inf")) == []
+
+
 def test_fmt_mm1_is_half_up_on_the_typed_decimal() -> None:
     """Half-up on the decimal the user typed — never binary rounding
     (Python's own ``round(3.25, 1)`` gives 3.2)."""
