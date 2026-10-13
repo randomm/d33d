@@ -539,6 +539,41 @@ describe("displayDesignLoopError — the envelope gate (part 2)", () => {
     expect(display.message).not.toContain("earlier");
   });
 
+  it("the headline names the FAILING axis, not the largest carried one (issue #438)", () => {
+    // The gate enforced W=60 (carried) and H=12 (carried); the made
+    // values are W=60.4 (within the 1% tolerance — a passing row) and
+    // H=10 (beyond tolerance — the failing row). The headline must name
+    // the HEIGHT (the failing axis), not the width (the larger carried
+    // value — the pre-#438 behaviour). A failing height row gives
+    // "I kept the height …", never "I kept the width …".
+    const display = displayDesignLoopError({
+      message: "Design loop exhausted: bbox_out_of_tolerance",
+      reason: "bbox_out_of_tolerance",
+      carried_axes: { W: 60, H: 12 },
+      measured_axes: { W: 60.4, H: 10 },
+    });
+    expect(display.message).toBe(copy.failure.bboxCarried("H", 12));
+    expect(display.message).toContain("I kept the height");
+    expect(display.message).toContain("how tall it should be");
+    expect(display.message).not.toContain("I kept the width");
+  });
+
+  it("the headline falls back to the largest carried axis when no row fails (issue #438)", () => {
+    // No measured_axes → no failing row is established → the previous
+    // "largest carried" fallback keeps the sentence's behaviour (a value
+    // the SPA has not established is not a failing row).
+    const display = displayDesignLoopError({
+      message: "Design loop exhausted: bbox_out_of_tolerance",
+      reason: "bbox_out_of_tolerance",
+      carried_axes: { W: 60, D: 40 },
+    });
+    expect(display.message).toContain("width");
+    expect(display.message).toContain("how wide it should be");
+    expect(display.message).not.toContain("tall");
+    expect(display.message).not.toContain("height");
+    expect(display.message).not.toContain("and depth");
+  });
+
   it("a multi-axis carried_axes frame names only the FIRST axis (issue #398)", () => {
     // The gate enforced several carried axes; the sentence names the first
     // one (the largest, the same axis whose value it renders) with its own

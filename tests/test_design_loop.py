@@ -5483,3 +5483,79 @@ def test_unreviewed_cause_is_logged_not_shown(tmp_path, caplog):
     assert result.visually_reviewed is False
     assert any("unreviewed" in r.getMessage() and "unparseable" in r.getMessage()
                for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# Issue #438: the failing-axis headline data (the server's own gate
+# evidence)
+# ---------------------------------------------------------------------------
+
+
+def test_failing_height_row_yields_height_headline_data():
+    """Issue #438: the size-card headline names the FAILING axis — a
+    frame whose carried set holds {W: 60, H: 12} and whose made values
+    (measured_axes) hold {W: 60.4, H: 10} has a failing HEIGHT row (12 →
+    10 is beyond the max(1%, 0.5 mm) gate tolerance; 60 → 60.4 is
+    within). The server's own gate data (the ``carried_axes`` /
+    ``measured_axes`` frame fields) is what the SPA's
+    ``displayDesignLoopError`` re-derives the failing axis from — a
+    failing height row must yield "I kept the height …", never "I kept
+    the width …". This pins the DATA the headline derivation runs on
+    (the axis the gate enforced vs the axis the gate measured): the
+    larger carried value (W=60) is NOT the failing axis (H=12 is), so a
+    headline keyed on the largest carried value would misname the
+    failure (the #438 defect)."""
+    from d33d.design_loop import BboxInfo
+    from d33d.design_loop_events import _carried_axes, _measured_axes
+
+    class _Result:
+        failure_reason = "bbox_out_of_tolerance"
+        # A best record whose bbox the gate compared: the made (W, D, H)
+        # is (60.4, 40.0, 10.0) — H made 10 vs asked 12 (fails), W made
+        # 60.4 vs asked 60 (passes).
+        best = None
+
+    # ``best`` must be an IterationRecord whose ``bbox`` attribute is the
+    # BboxInfo the gate compared (``_measured_axes`` reads ``result.best.bbox``).
+    from d33d.design_loop import IterationRecord, Score
+    from d33d.render_worker import RenderResult
+
+    best_record = IterationRecord(
+        iteration=0,
+        scad_source="",
+        render=RenderResult(ok=True, exit_code=0, duration_ms=0,
+                            error_class="ok", stderr="", stl=None, csg=None,
+                            views=("v",) * 6),
+        score=Score(bits=(False,) * 5, rank=0, tiebreak=(False,) * 5),
+        params={},
+        bbox=BboxInfo(
+            x=60.4, y=40.0, z=10.0, volume=24160.0,
+            components=((60.4, 40.0, 10.0, 24160.0, 0.0, 0.0, 0.0),),
+        ),
+    )
+    result = _Result()
+    result.best = best_record
+    # The caller's per-axis set (the gate's confirmed input) — the
+    # carried axes the frame carries.
+    gate_axes = {"W": 60.0, "H": 12.0}
+    carried = _carried_axes(result, gate_axes)
+    assert carried == {"W": 60.0, "H": 12.0}, carried
+    measured = _measured_axes(result, gate_axes, (60.4, 40.0, 10.0))
+    assert measured is not None, "measured axes must be established"
+    assert abs(measured["W"] - 60.4) < 1e-6
+    assert abs(measured["H"] - 10.0) < 1e-6
+    # The failing-axis derivation (the same math the SPA's
+    # displayDesignLoopError applies — max(1% of asked, 0.5 mm)): the
+    # HEIGHT row fails (|10 - 12| = 2 > max(0.6, 0.5)); the WIDTH row
+    # passes (|60.4 - 60| = 0.4 < max(0.6, 0.5)). The headline must name
+    # H, not W — even though W's carried value is the larger.
+    def _fails(axis: str) -> bool:
+        asked = carried[axis]
+        made = measured[axis]
+        return abs(made - asked) > max(0.01 * asked, 0.5)
+
+    assert _fails("H"), "the height row must be the failing row"
+    assert not _fails("W"), "the width row is within tolerance"
+    # The failing axis is H — the headline names the height.
+    failing = [a for a in ("W", "D", "H") if a in carried and a in measured and _fails(a)]
+    assert failing == ["H"], f"expected only the height to fail, got {failing}"

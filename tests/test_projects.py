@@ -2795,10 +2795,14 @@ def test_fill_recut_parity_setup_failure_restores_offer(app_with_projects, monke
 
 
 def test_offer_with_measured_hole_carries_center_and_axis(app_with_projects) -> None:
-    """Issue #396: a holey part with measured holes (stored in
-    ``part_report["holes"]``) + "make the center hole 38 mm" → the
-    pending offer carries ``center``, ``axis``, and ``diameter_mm``
-    for the selected hole."""
+    """Issue #396 (re-pinned on #438): a holey part with measured holes
+    (stored in ``part_report["holes"]``) + "make the center hole 38 mm"
+    → NO offer: the #438 scaled threshold (min(30 mm, 0.25 × min(W, D))
+    = 10 mm for this 40 × 40 mm part) makes the nearest hole (22.4 mm
+    from the extents/2 centre) a NO-MATCH — QA 2026-10-09: a hole 22 mm
+    from the centre of a 40 mm part isn't "the centre". The reply is the
+    no-match list; the point-at fallback is what the user gets (a silent
+    nearest-hole pick would misfire the instruction)."""
 
     async def _call(client):
         r = await client.post("/api/projects", json={"name": "MeasuredHole"})
@@ -2832,18 +2836,15 @@ def test_offer_with_measured_hole_carries_center_and_axis(app_with_projects) -> 
     assert status == 202, status
     done = [d for e, d in frames if e == "done"]
     assert done, f"no done frame: {frames}"
-    # The offer was recorded with the measured hole's geometry.
-    assert offer is not None, "offer must be stored"
-    assert offer["kind"] == "fill_recut"
-    assert offer["noun"] == "hole"
-    assert offer["size"] == 38.0
-    # The center hole (at 0,0) was selected.
-    assert offer.get("center") is not None, f"offer missing center: {offer}"
-    assert offer.get("axis") is not None, f"offer missing axis: {offer}"
-    assert offer["axis"] == [0.0, 0.0, 1.0], offer
-    # The center hole: the one nearest the XY bbox centre (20, 20).
-    # Distances: (0,0)→28.3, (-10,0)→36.1, (10,0)→22.4. The (10,0) hole wins.
-    assert offer.get("diameter_mm") == 30.0, offer
+    # The #438 scaled threshold: extents [40, 40] → min(30, 0.25 × 40)
+    # = 10 mm; the nearest hole (the (10, 0) Ø30 one, 22.4 mm from the
+    # centre) is beyond it → NO-MATCH (no offer stored, the no-match
+    # list in the reply).
+    assert offer is None, f"scaled threshold must no-match: {offer}"
+    msg = done[0].get("message", "")
+    assert "I don't see a hole" in msg, (
+        f"expected the no-match list, got: {msg}"
+    )
 
 
 def test_offer_instruction_carries_measured_numbers(app_with_projects) -> None:

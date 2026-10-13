@@ -1013,6 +1013,26 @@ class TestOfferTierSignals:
         # prevents 5.0 from matching a non-size param.
         assert quoted == {5.0, 8.0}
 
+    def test_tier2_designed_part_quotes_current_message_only(self):
+        """Issue #438: on the DESIGNED-part path, tier 2 quotes numbers
+        from the CURRENT message only — a prior "4 mm" turn must not ride
+        back into an offer for the hole that is now "8 mm" (only 8.0 is
+        quoted, never 4.0). The import path (current_only=False) keeps
+        the full-history union."""
+        released, quoted = offer_tier_signals(
+            "make the middle hole 8 mm",
+            ["the hole was 4 mm"],
+            current_only=True,
+        )
+        assert released is None
+        assert quoted == {8.0}, f"designed-part path must quote only 8.0: {quoted}"
+        # The import path still unions across history (unchanged).
+        _, quoted_import = offer_tier_signals(
+            "make the middle hole 8 mm",
+            ["the hole was 4 mm"],
+        )
+        assert quoted_import == {8.0, 4.0}
+
     def test_tier2_superseded_value_not_in_quoted(self):
         """Issue #416, defect 1 (supersession): after "the hole was 5 mm"
         and then "make it 5 mm tall" (which maps 5.0 to H), the 5.0 is

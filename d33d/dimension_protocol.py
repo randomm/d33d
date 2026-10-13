@@ -208,7 +208,10 @@ class DimensionClarification:
 
 
 def offer_tier_signals(
-    user_message: str, chat_history: list[str] | tuple[str, ...] = ()
+    user_message: str,
+    chat_history: list[str] | tuple[str, ...] = (),
+    *,
+    current_only: bool = False,
 ) -> tuple[set[str] | None, set[float] | None]:
     """The offer's tier-1/tier-2 signals for ONE turn (issue #261 fix
     batch — ONE helper for both seams: the chat pass and the finalize
@@ -217,12 +220,18 @@ def offer_tier_signals(
     message (``chat_history``) is eligible on finalize, not only when it
     sits in the finalize message itself).
 
+    ``current_only=True`` (issue #438 — the DESIGNED-part offer path):
+    tier 2 quotes numbers from the CURRENT message only — a stale "4 mm"
+    from an earlier turn never rides back into an offer on a part the
+    user is designing (the hole is now "8 mm"). The import path keeps
+    the full-history scan (a number stated before an import is a quote
+    the user may still be pointing at).
+
     Returns ``(released_axes, quoted_mm)``:
 
     * ``released_axes`` — the axes released by THIS message's
       relative/global cue (None when the message carries no release cue);
-    * ``quoted_mm`` — the user-quoted unmapped mm numbers over
-      ``(*chat_history, user_message)`` (never None).
+    * ``quoted_mm`` — the user-quoted unmapped mm numbers (never None).
 
     Either may degrade to None on a classification failure — the offer
     falls back to tier 3 (never a hard failure).
@@ -235,7 +244,9 @@ def offer_tier_signals(
         cues = classify(user_message)
         if cues.relative or cues.global_:
             released = set(cues.relative) | ({"W", "D", "H"} if cues.global_ else set())
-        quoted = user_quoted_unmapped_mm((*chat_history, user_message))
+        quoted = user_quoted_unmapped_mm(
+            (*chat_history, user_message), current_only=current_only
+        )
         return released, quoted
     except Exception:
         logger.debug("offer tier signals unavailable", exc_info=True)

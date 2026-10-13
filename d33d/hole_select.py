@@ -50,7 +50,55 @@ _AMBIGUITY_MM = 0.1
 #:   corner holes are 61.1 mm from the centre — they MUST NOT match.
 #: 30 mm separates the two (22.4 < 30 < 61.1); no fraction of the
 #: diagonal can (8.5 < 22.4 and 28.8 < 61.1 both fail to discriminate).
-_CENTER_MATCH_MM = 30.0
+#: The fixed cap (mm) of the part-relative "nearest the centre" threshold
+#: (issue #438): the nearest hole must be within ``min(30, 0.25 × the
+#: part's smaller XY dimension)`` of the centre to be a match at all.
+_CENTER_MATCH_CAP_MM = 30.0
+
+#: The part-relative fraction of the smaller XY dimension (issue #438) —
+#: a 40 mm part gives a 10 mm threshold, a 20 mm part a 5 mm threshold
+#: (a 6 mm off-centre hole on it is no longer "the centre").
+_CENTER_MATCH_PART_FRACTION = 0.25
+
+
+def _center_match_threshold(
+    bounds_mm: list[list[float]] | None,
+    bbox_mm: list[float] | None,
+) -> float | None:
+    """The centre-match threshold in MM (issue #438):
+    ``min(30, 0.25 × min(part W, part D))`` — from the REAL bounds' XY
+    extents when they are usable, else the legacy extents (``bbox_mm``),
+    else ``None`` (the caller keeps the part-independent 30 mm cap — the
+    threshold is part-relative when the part is known, fixed otherwise).
+    """
+    dims: list[float] = []
+    if bounds_mm is not None and len(bounds_mm) == 2:
+        lo = bounds_mm[0]
+        hi = bounds_mm[1]
+        if (
+            isinstance(lo, (list, tuple))
+            and isinstance(hi, (list, tuple))
+            and len(lo) >= 2
+            and len(hi) >= 2
+        ):
+            try:
+                w = float(hi[0]) - float(lo[0])
+                d = float(hi[1]) - float(lo[1])
+            except (TypeError, ValueError):
+                dims = []
+            else:
+                dims = [w, d] if w > 0 and d > 0 else []
+    if not dims and bbox_mm is not None and len(bbox_mm) >= 2:
+        try:
+            w = float(bbox_mm[0])
+            d = float(bbox_mm[1])
+        except (TypeError, ValueError):
+            dims = []
+        else:
+            dims = [w, d] if w > 0 and d > 0 else []
+    if not dims:
+        return None
+    return min(_CENTER_MATCH_CAP_MM, _CENTER_MATCH_PART_FRACTION * min(dims))
 
 
 @dataclass(frozen=True)
@@ -199,7 +247,16 @@ def select_measured_hole(
                 # sits at (nearest candidate farther than the match
                 # threshold) is a NO-MATCH — the caller says so and
                 # lists the measured holes, and makes no recut offer.
-                if dists[0][0] > _CENTER_MATCH_MM:
+                # Issue #438: the match threshold is part-relative —
+                # min(30 mm, 0.25 × the part's smaller XY dimension),
+                # from the real bounds (or the legacy extents when the
+                # report predates the bounds blob); a 40 mm part gives 10
+                # mm, so a 22.4 mm off-centre hole on it no-matches (QA
+                # 2026-10-09: a hole 22 mm from the centre of a 40 mm
+                # part isn't "the centre"). No part size usable → the
+                # part-independent 30 mm cap.
+                threshold = _center_match_threshold(bounds_mm, bbox_mm)
+                if dists[0][0] > (_CENTER_MATCH_CAP_MM if threshold is None else threshold):
                     return _NO_MATCH
                 # Two nearest candidates within the ambiguity band → the
                 # pick is not defensible; fall back to point-at.

@@ -413,6 +413,46 @@ def test_center_rule_selects_hole_at_true_centre_of_translated_part():
     )
 
 
+def test_center_threshold_scales_with_part_size():
+    """Issue #438: the centre-match threshold is min(30 mm, 0.25 × min(
+    part W, part D)) from the part's bounds — a 20 mm part gives a 5 mm
+    threshold, so a hole 6 mm off-centre is a NO-MATCH (QA 2026-10-09:
+    a hole 22 mm from the centre of a 40 mm part isn't "the centre").
+    The same selector with a 40 mm part and a 6 mm-off-centre hole
+    matches (0.25 × 40 = 10 mm ≥ 6 mm) — the threshold is part-relative,
+    not a global constant."""
+    # A 20 × 20 mm part (bounds 0..20 × 0..20) with a hole at (10, 4) —
+    # 6 mm from the centre (10, 10) — and a corner hole at (2, 2).
+    holes_20 = [
+        {"center": [10.0, 4.0, 0.0], "axis": [0.0, 0.0, 1.0], "diameter_mm": 5.0},
+        {"center": [2.0, 2.0, 0.0], "axis": [0.0, 0.0, 1.0], "diameter_mm": 4.0},
+    ]
+    bounds_20 = [[0.0, 0.0, 0.0], [20.0, 20.0, 10.0]]
+    selected = select_measured_hole(
+        holes_20, "make the center hole 38 mm", None,
+        trigger_size=38.0, bounds_mm=bounds_20,
+    )
+    # 0.25 × min(20, 20) = 5 mm < 6 mm → no measured hole matches.
+    assert isinstance(selected, NoMatchHole), (
+        f"a 6 mm off-centre hole on a 20 mm part must no-match, got {selected!r}"
+    )
+    # The same geometry on a 40 mm part (0.25 × 40 = 10 mm threshold,
+    # 6 mm is within) → the off-centre hole is picked.
+    holes_40 = [
+        {"center": [20.0, 14.0, 0.0], "axis": [0.0, 0.0, 1.0], "diameter_mm": 5.0},
+        {"center": [4.0, 4.0, 0.0], "axis": [0.0, 0.0, 1.0], "diameter_mm": 4.0},
+    ]
+    bounds_40 = [[0.0, 0.0, 0.0], [40.0, 40.0, 10.0]]
+    selected_40 = select_measured_hole(
+        holes_40, "make the center hole 38 mm", None,
+        trigger_size=38.0, bounds_mm=bounds_40,
+    )
+    assert isinstance(selected_40, dict), (
+        f"a 6 mm off-centre hole on a 40 mm part must match, got {selected_40!r}"
+    )
+    assert abs(selected_40["diameter_mm"] - 5.0) < 1e-6
+
+
 def test_center_rule_translated_part_corner_only_holes_no_match():
     """Issue #414: the same translated part (bounds [100..220] ×
     [50..130]) with ONLY corner holes (none at the true centre) +

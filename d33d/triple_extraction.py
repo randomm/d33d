@@ -527,14 +527,27 @@ def _mm_cue_values(message: str) -> set[float]:
     return values
 
 
-def user_quoted_unmapped_mm(messages: list[str] | tuple[str, ...]) -> set[float]:
+def user_quoted_unmapped_mm(
+    messages: list[str] | tuple[str, ...],
+    *,
+    current_only: bool = False,
+) -> set[float]:
     """The user-quoted explicit-mm numbers no axis was ever assigned to
     (issue #261's tier-2 offer scan — the "user-quoted number the lexicon
     did not map is offered first" rule) — the tier-2 helper.
 
     Scans the project's recent user messages (the LAST
     ``QUOTED_UNMAPPED_MAX_MESSAGES`` — 50 — not just this turn; the window
-    boundary is :func:`history_window_start`). Only
+    boundary is :func:`history_window_start`). With ``current_only=True``
+    (issue #438 — the DESIGNED-part offer path) only the LAST message is
+    scanned: a number the user quoted in an EARLIER message must not ride
+    back into an offer on a part the user is designing — a stale "4 mm" is
+    never re-offered for the hole that is now "8 mm". The import path
+    keeps the full-history scan (a number stated before an import is a
+    quote the user may still be pointing at).
+    Supersession (issue #416, defect 1) applies to every message in the
+    scanned window: a number a NEWER scanned message assigned to an axis
+    is excluded. Only
     numbers written with an explicit ``mm`` unit count ("12 mm", "12mm",
     "12.5 mm" — no cm/in conversion, no bare numbers). A number is MAPPED
     — and excluded — when the closed axis lexicon
@@ -559,7 +572,11 @@ def user_quoted_unmapped_mm(messages: list[str] | tuple[str, ...]) -> set[float]
     """
     from d33d.axis_lexicon import classify
 
-    window = list(messages)[history_window_start(len(messages)) :]
+    all_msgs = list(messages)
+    if current_only:
+        window = all_msgs[-1:] if all_msgs else []
+    else:
+        window = all_msgs[history_window_start(len(all_msgs)) :]
     # Issue #416 (defect 1) — the per-message mapped sets, precomputed so
     # the supersession pass below can ask of any older message "did a
     # NEWER message assign this value to an axis?". The per-message

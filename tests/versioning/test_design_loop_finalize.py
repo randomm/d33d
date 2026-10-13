@@ -649,6 +649,80 @@ def test_resolve_version_name_no_title_uses_param_diff_name():
     assert name == "H 10 → 20"
 
 
+def test_resolve_version_name_strips_version_artifacts():
+    """Issue #438: the version-name cleanup strips the model's
+    bookkeeping words — a parenthetical change tag ("(fixed)" / "(updated)"
+    / "(v2)") and the trailing as-of words ("now" / "then" / "to" — "to"
+    ONLY in terminal position, so "Tower to base" is unchanged) — so a
+    title like "Middle hole now" lands as "Middle hole", never "Middle
+    hole now". A name that WAS the artifact ("(v2)") falls through to
+    the param-diff phrase, never an empty or 1-letter name."""
+    from d33d.versions import resolve_version_name
+
+    # Trailing "now" stripped.
+    assert (
+        resolve_version_name(
+            "Middle hole now", None, measured_bbox=None,
+            prev_params=None, new_params={},
+        )
+        == "Middle hole"
+    )
+    # Parenthetical tags stripped.
+    assert (
+        resolve_version_name(
+            "Part (fixed)", None, measured_bbox=None,
+            prev_params=None, new_params={},
+        )
+        == "Part"
+    )
+    assert (
+        resolve_version_name(
+            "Part (updated)", None, measured_bbox=None,
+            prev_params=None, new_params={},
+        )
+        == "Part"
+    )
+    assert (
+        resolve_version_name(
+            "Part (v2)", None, measured_bbox=None,
+            prev_params=None, new_params={},
+        )
+        == "Part"
+    )
+    # Trailing "then" and "to" stripped ("to" terminal only).
+    assert (
+        resolve_version_name(
+            "Hole then", None, measured_bbox=None,
+            prev_params=None, new_params={},
+        )
+        == "Hole"
+    )
+    assert (
+        resolve_version_name(
+            "Hole now to", None, measured_bbox=None,
+            prev_params=None, new_params={},
+        )
+        == "Hole"
+    )
+    # "Tower to base" — "to" with an object is a PREPOSITION, never
+    # stripped (the pin).
+    assert (
+        resolve_version_name(
+            "Tower to base", None, measured_bbox=None,
+            prev_params=None, new_params={},
+        )
+        == "Tower to base"
+    )
+    # A name that WAS the artifact → the param-diff phrase, never empty.
+    assert (
+        resolve_version_name(
+            "(v2)", None, measured_bbox=None,
+            prev_params=None, new_params={"H": 20.0},
+        )
+        == "First design"
+    )
+
+
 def test_resolve_version_name_none_bbox_abstains():
     """No measurement → the title is used as-is (an absent measurement
     abstains — never a strip based on a fabricated extent)."""
@@ -4800,11 +4874,32 @@ def test_finalize_tier2_offer_from_chat_history(app_with_versions):
     ("lift it 12 mm") and a passing loop whose assumed param's value is
     12 → the done-offer resolution names that param with the tier-2
     sentence (the chat-history scan, not the finalize message, supplies
-    the 12)."""
+    the 12).
+
+    Issue #438: the tier-2 quote scan is CURRENT-MESSAGE-ONLY on a
+    DESIGNED part (no imported part — a stale "4 mm" from an earlier turn
+    never rides back into an offer on a part the user is designing).
+    This finalize seam IS the import path's analogue: it passes an
+    explicit ``chat_history`` (the finalize route's contract), so the
+    full-history scan stays (a number the user quoted earlier is a
+    quote the user may still be pointing at on an import). To keep the
+    pin on the full-history path, the project carries an imported part
+    (the ``part_filename`` set — the discriminator ``_resolve_offer``
+    reads) so the quote scan sees the whole history."""
 
     async def _call(client):
         proj = await create_project(client)
         pid = proj["id"]
+        # Issue #438: mark the project as an IMPORT (a part the user
+        # brought) so the tier-2 quote scan keeps the full-history union
+        # (the designed-part path is current-message-only).
+        conn = app_with_versions.state.conn
+        conn.raw.execute(
+            "UPDATE projects SET part_filename='part.stl', part_format='stl', "
+            "part_unit='mm', part_unit_status='settled', part_scale=1.0 WHERE id=?",
+            (pid,),
+        )
+        conn.commit()
         app_with_versions.state.run_design_loop = lambda: _StubResult(
             "pass", {"lift_gap": 12.0}
         )
