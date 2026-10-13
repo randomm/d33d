@@ -2512,3 +2512,26 @@ class TestStatedFeaturePhrasings:
         assert ("groove", None, 10.0) in keys
         assert ("hole", None, 6.0) in keys
         assert ("hole", None, 5.0) not in keys
+
+
+class TestPartNounIsNotAFeature:
+    """Issue #433 (review fix): a part noun (``lid``, ``spacer``) names the
+    whole printed part, so its mm size is never a feature size. A feature
+    noun in the same clause still records its own size."""
+
+    def test_part_noun_size_is_not_a_feature(self) -> None:
+        for text in (
+            "a 7 mm lid",
+            "a 55 x 40 mm lid that fits a 60 x 45 mm box",
+        ):
+            assert stated_features_from_messages(text) == [], text
+
+    def test_feature_beside_part_noun_keeps_only_the_feature(self) -> None:
+        assert stated_features_from_messages("a 5 mm hole and a 2 mm lid") == [
+            StatedFeature(noun="hole", role=None, value=5.0)
+        ]
+
+    def test_part_noun_size_inside_feature_clause_is_not_recorded(self) -> None:
+        assert stated_features_from_messages("a 5 mm hole in a 40 mm lid") == [
+            StatedFeature(noun="hole", role=None, value=5.0)
+        ]
