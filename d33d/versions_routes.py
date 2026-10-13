@@ -913,37 +913,14 @@ def _finalize_loop_kwargs(
     # the 201), so the version the finalize creates and the next chat
     # turn both read the same carried set. ``[]`` when nothing was stated
     # (the prompt line and the design-state comparison both no-op).
-    from d33d.stated_carry import (
-        carried_stated_features,
-        effective_stated_features,
-    )
+    # The persist helper is shared with the chat turn (``stated_carry``): a
+    # failed write is a WARNING, never a failed finalize. The call stays in
+    # this builder (the finalize seam's kwargs need the merged set); the
+    # helper is the only writer.
+    from d33d.stated_carry import carry_stated_features_for_turn
 
-    stated_features: list = []
-    try:
-        _msg = (body.request or body.message or "") if hasattr(body, "request") else ""
-        _carried_feats = carried_stated_features(row)
-        stated_features = effective_stated_features(_carried_feats, _msg)
-        app.state.conn.raw.execute(
-            "UPDATE projects SET carried_stated_features = ? WHERE id = ?",
-            (
-                json.dumps(
-                    [
-                        {"noun": f.noun, "role": f.role, "value": f.value}
-                        for f in stated_features
-                    ]
-                )
-                if stated_features
-                else None,
-                project_id,
-            ),
-        )
-        app.state.conn.commit()
-    except Exception:
-        logger.debug(
-            "carried_stated_features write failed for finalize project %s",
-            project_id,
-            exc_info=True,
-        )
+    _msg = getattr(body, "request", None) or getattr(body, "message", None) or ""
+    stated_features = carry_stated_features_for_turn(app.state.conn, project_id, _msg)
 
     def _render_fn(scad_source: str, defines: dict[str, str]) -> Any:
         # Project-scoped persistence (issue #72): bind the per-project
@@ -1062,7 +1039,7 @@ def _finalize_loop_kwargs(
         } or None
         current_axes = effective_stated_dims(_carried_gate, _explicit)
     else:
-        _msg = body.request or body.message or ""
+        _msg = getattr(body, "request", None) or getattr(body, "message", None) or ""
         current_axes = resolve_stated_cues(
             _carried_gate, _msg, label="gate", project_id=project_id
         )
@@ -1209,7 +1186,7 @@ def _finalize_loop_kwargs(
     # ``request`` must be non-empty: the hook builds a FailureEvent from
     # it (``min_length=1``) and an empty string would silently drop the
     # failures.jsonl line for an exhausted loop.
-    request_text = body.request or body.message
+    request_text = getattr(body, "request", None) or getattr(body, "message", None)
     if not request_text:
         request_text = f"finalize project {project_id}"
 

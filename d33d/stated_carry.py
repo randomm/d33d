@@ -29,7 +29,13 @@ import json
 import logging
 from typing import Any
 
-from d33d.axis_lexicon import DIMENSION_AXES, Cues, classify
+from d33d.axis_lexicon import (
+    _FEATURE_NOUNS,
+    DIMENSION_AXES,
+    FEATURE_ROLE_TOKENS,
+    Cues,
+    classify,
+)
 from d33d.statement_extraction import (
     StatedFeature,
     _coerce,
@@ -43,11 +49,18 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "carried_stated_features",
     "carried_stated_set",
+    "carry_stated_features_for_turn",
     "effective_stated_dims",
     "effective_stated_features",
     "latest_stated_dims_dict",
+    "persist_carried_stated_features",
     "resolve_stated_cues",
 ]
+
+#: The most carried feature records one project keeps (issue #433 review):
+#: a stored set larger than this is truncated on read — the carry is a
+#: handful of stated sizes, never an unbounded list.
+MAX_CARRIED_FEATURES: int = 32
 
 
 def carried_stated_features(row: Any) -> list[StatedFeature]:
@@ -74,18 +87,87 @@ def carried_stated_features(row: Any) -> list[StatedFeature]:
         return []
     out: list[StatedFeature] = []
     for item in loaded:
+        if len(out) >= MAX_CARRIED_FEATURES:
+            break
         if not isinstance(item, dict):
             continue
         value = _coerce(item.get("value"))
         if value is None:
             continue
+        # A stored row is re-validated on read: the noun must be a known
+        # feature noun and the role either absent or in the closed role
+        # vocabulary — a tampered or stale row never reaches the matcher.
         noun = item.get("noun")
-        if not isinstance(noun, str) or not noun:
+        if not isinstance(noun, str) or noun not in _FEATURE_NOUNS:
             continue
         role = item.get("role")
-        role = role if isinstance(role, str) and role else None
+        if role is not None and (not isinstance(role, str) or role not in FEATURE_ROLE_TOKENS):
+            continue
         out.append(StatedFeature(noun=noun, role=role, value=value))
     return out
+
+
+def persist_carried_stated_features(
+    conn: Any, project_id: int, features: list[StatedFeature]
+) -> None:
+    """Write the project's carried stated-feature set (issue #433) — the ONE
+    persist helper for both the chat turn and the finalize turn.
+
+    A failed write never fails the turn (the 202 / the loop still runs with
+    the merged features in memory), but it is LOUD: a WARNING with the
+    traceback, naming the project and the operation. The next turn then
+    re-derives from the stored set it still has.
+    """
+    try:
+        conn.raw.execute(
+            "UPDATE projects SET carried_stated_features = ? WHERE id = ?",
+            (
+                json.dumps(
+                    [{"noun": f.noun, "role": f.role, "value": f.value} for f in features]
+                )
+                if features
+                else None,
+                project_id,
+            ),
+        )
+        conn.commit()
+    except Exception:
+        logger.warning(
+            "carried_stated_features WRITE failed for project %s "
+            "(operation: persist carried stated features); the turn continues "
+            "with the merged features in memory",
+            project_id,
+            exc_info=True,
+        )
+
+
+def carry_stated_features_for_turn(
+    conn: Any, project_id: int, message: str
+) -> list[StatedFeature]:
+    """The per-turn feature carry (issue #433): read the stored set, merge the
+    message's features over it, persist the result, and return the merged set
+    the turn uses (the loop's ``stated_features`` and the design-state
+    comparison).
+
+    A failed READ degrades without losing the current message: the message's
+    own features are still merged (over an empty carry) and returned, and NO
+    write happens — the stored set is kept rather than overwritten with a
+    guess. A failed READ is a WARNING naming the project and the operation.
+    """
+    try:
+        carried = carried_stated_features(conn.get_project(project_id))
+    except Exception:
+        logger.warning(
+            "carried_stated_features READ failed for project %s "
+            "(operation: read carried stated features); merging the message's "
+            "features only, stored set left unchanged",
+            project_id,
+            exc_info=True,
+        )
+        return effective_stated_features([], message)
+    fresh = effective_stated_features(carried, message)
+    persist_carried_stated_features(conn, project_id, fresh)
+    return fresh
 
 
 def effective_stated_features(

@@ -135,7 +135,7 @@ able to tell user-set values from its own guesses.
 
 from __future__ import annotations
 
-from typing import Any, Literal, NotRequired, TypedDict
+from typing import TYPE_CHECKING, Any, Literal, NotRequired, TypedDict
 
 #: The row-kind discriminator: ``"param"`` (a row built from the version's
 #: params snapshot — the model emitted the value) vs ``"axis"`` (a row
@@ -151,10 +151,14 @@ RowKind = Literal["param", "axis"]
 #: (``copy.brief.axisLabel``) for its own display.
 AXIS_LABELS: dict[str, str] = {"W": "Width", "D": "Depth", "H": "Height"}
 
+from d33d.axis_lexicon import FEATURE_ROLE_TOKENS, SIZE_PARAM_TOKENS
 from d33d.design_loop import (
     BBOX_TOLERANCE_MIN_MM,
     BBOX_TOLERANCE_REL,
 )
+
+if TYPE_CHECKING:
+    from d33d.statement_extraction import StatedFeature
 
 #: The threshold above which a model-source disagreement is "major" (issue #274).
 #: A model-source disagrees row (``disagrees_source == "model"``) is
@@ -537,25 +541,11 @@ FEATURE_MISMATCH_TOLERANCE_MM: float = 0.05
 #: word) matches a noun-only param (``hole`` alone, or ``hole_diameter``
 #: via the noun) — the noun is the binding, the role refines when
 #: present.
-_SIZE_TOKENS: frozenset[str] = frozenset({"diameter", "dia", "d", "size"})
-
-#: Every role word the extraction can emit (``statement_extraction``) maps to
-#: the param token(s) that carry that dimension. An UNKNOWN role maps to no
-#: entry and the matcher skips the feature (never a guessed binding).
-_FEATURE_ROLE_TOKENS: dict[str, frozenset[str]] = {
-    "diameter": _SIZE_TOKENS,
-    "dia": _SIZE_TOKENS,
-    "d": _SIZE_TOKENS,
-    "size": _SIZE_TOKENS,
-    "depth": frozenset({"depth"}),
-    "deep": frozenset({"depth"}),
-    "width": frozenset({"width"}),
-    "wide": frozenset({"width"}),
-    "length": frozenset({"length"}),
-    "long": frozenset({"length"}),
-    "height": frozenset({"height"}),
-    "tall": frozenset({"height"}),
-}
+#: The size param tokens and the closed role vocabulary are defined ONCE in
+#: ``d.axis_lexicon`` (issue #433) — the extraction's role words derive from
+#: the same map, so the matcher and the extraction cannot drift apart.
+_SIZE_TOKENS: frozenset[str] = SIZE_PARAM_TOKENS
+_FEATURE_ROLE_TOKENS: dict[str, frozenset[str]] = FEATURE_ROLE_TOKENS
 
 #: Dimension tokens that name a NON-size role: a role-less feature size never
 #: binds a param carrying one of these (``a 5 mm hole`` must not flag
@@ -579,8 +569,8 @@ def _param_tokens(name: str, label: str | None) -> set[str]:
 def _match_stated_features(
     entries: list[dict[str, Any]],
     param_meta: dict[str, Any] | None,
-    stated_features: Any,
-) -> dict[str, Any]:
+    stated_features: list[StatedFeature] | None,
+) -> dict[str, StatedFeature]:
     """The param-keyed stated feature values (issue #433).
 
     Matches each stated feature to the param(s) its noun + role name via
@@ -594,21 +584,22 @@ def _match_stated_features(
     ``{param_name: stated_value}`` for the params that matched; an empty
     dict when nothing matched (the caller keeps the params as-is).
     Non-numeric / zero param values are never matched (the comparison
-    needs a positive made value).
+    needs a positive made value). Returns ``{param_name: StatedFeature}``
+    — the matched record itself, so the caller reads its noun and value.
     """
     if not stated_features:
         return {}
     meta = param_meta if isinstance(param_meta, dict) else {}
-    out: dict[str, Any] = {}
+    out: dict[str, StatedFeature] = {}
     ambiguous: set[str] = set()
     for f in stated_features:
-        value = getattr(f, "value", None)
+        value = f.value
         if not isinstance(value, (int, float)) or isinstance(value, bool):
             continue
         if float(value) <= 0:
             continue
-        noun = getattr(f, "noun", "")
-        role = getattr(f, "role", None)
+        noun = f.noun
+        role = f.role
         if role is not None and role not in _FEATURE_ROLE_TOKENS:
             continue  # an unknown role binds nothing (never a guess)
         role_tokens = _FEATURE_ROLE_TOKENS.get(role) if role else None
@@ -732,7 +723,7 @@ def state_block_for_version(
     stated: dict[str, Any] | None = None,
     param_meta: dict[str, Any] | None = None,
     confirmed_params: dict[str, Any] | None = None,
-    stated_features: Any = None,
+    stated_features: list[StatedFeature] | None = None,
 ) -> list[dict[str, Any]]:
     """The design-state block for ONE version: the version's params
     snapshot (``state_block_from_params`` — every model-emitted parameter
@@ -1225,7 +1216,7 @@ def _maybe_promote_params(
 def _apply_stated_features(
     entries: list[dict[str, Any]],
     param_meta: dict[str, Any] | None,
-    stated_features: Any,
+    stated_features: list[StatedFeature] | None,
 ) -> None:
     """The stated-feature promotion + mismatch flag (issue #433).
 

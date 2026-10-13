@@ -26,8 +26,10 @@ from d33d.axis_lexicon import (
     ABSOLUTE_WORDS,
     DIMENSION_AXES,
     FEATURE_NOUN_RE,
+    FEATURE_ROLE_TOKENS,
     MM_UNIT_ALTERNATION,
     RELATIVE_WORDS,
+    SIZE_PARAM_TOKENS,
     Cues,
     classify,
     split_clauses,
@@ -47,19 +49,11 @@ __all__ = [
 ]
 
 #: The role words a stated feature clause names the size with (issue #433):
-#: the closed role-token vocabulary that maps a feature size to a
-#: parameter. ``_FEATURE_NOUNS`` (``d33d.axis_lexicon``) names the feature;
-#: this set names the ROLE of the stated size (a hole's diameter, a
-#: groove's depth). Closed and small on purpose: an unmatched clause
-#: records ``role=None`` and the matching in :mod:`d33d.design_state`
-#: falls through (a stated value the param matcher cannot attribute is
-#: kept in state, never flagged).
-_FEATURE_ROLE_WORDS: frozenset[str] = frozenset(
-    {
-        "diameter", "dia", "wide", "deep", "long", "width", "depth",
-        "tall", "height", "length",
-    }
-)
+#: derived from the ONE closed role vocabulary ``FEATURE_ROLE_TOKENS``
+#: (``d.axis_lexicon``), which the design-state matcher also reads. A word
+#: outside it records ``role=None`` (a stated value the matcher cannot
+#: attribute is kept in state, never flagged).
+_FEATURE_ROLE_WORDS: frozenset[str] = frozenset(FEATURE_ROLE_TOKENS)
 
 
 def _canonical_feature_noun(noun: str) -> str:
@@ -92,7 +86,9 @@ _DISTANCE_WORDS: frozenset[str] = frozenset(
 
 #: The size roles that name the same slot as a role-less size (a hole's
 #: diameter IS its default size) — supersession keys them together.
-_SIZE_SLOT_ROLES: frozenset[str] = frozenset({"diameter", "dia"})
+_SIZE_SLOT_ROLES: frozenset[str] = frozenset(
+    role for role, tokens in FEATURE_ROLE_TOKENS.items() if tokens == SIZE_PARAM_TOKENS
+)
 
 
 @dataclass(frozen=True)

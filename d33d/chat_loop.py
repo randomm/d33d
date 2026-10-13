@@ -29,10 +29,9 @@ from d33d.design_loop_events import (
     run_design_loop_with_events,
 )
 from d33d.stated_carry import (
-    carried_stated_features,
     carried_stated_set,
+    carry_stated_features_for_turn,
     effective_stated_dims,
-    effective_stated_features,
     resolve_stated_cues,
 )
 
@@ -265,32 +264,7 @@ async def run_design_loop(
     # stated-vs-made comparison (``d33d.design_state``) both read it.
     # Best-effort: a failure degrades to no stated features (the honest
     # empty set) and never fails the 202.
-    stated_features: list = []
-    try:
-        _row_cf = app.state.conn.get_project(project_id)
-        _carried_feats = carried_stated_features(_row_cf)
-        stated_features = effective_stated_features(_carried_feats, message)
-        app.state.conn.raw.execute(
-            "UPDATE projects SET carried_stated_features = ? WHERE id = ?",
-            (
-                json.dumps(
-                    [
-                        {"noun": f.noun, "role": f.role, "value": f.value}
-                        for f in stated_features
-                    ]
-                )
-                if stated_features
-                else None,
-                project_id,
-            ),
-        )
-        app.state.conn.commit()
-    except Exception:
-        logger.debug(
-            "carried_stated_features write failed for project %s",
-            project_id,
-            exc_info=True,
-        )
+    stated_features = carry_stated_features_for_turn(app.state.conn, project_id, message)
 
     # Photo: read the project's stored photo NOW (synchronously, before
     # the 202 response) — the background task runs via asyncio and the

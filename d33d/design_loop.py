@@ -61,7 +61,7 @@ import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import httpx
 
@@ -101,6 +101,9 @@ from d33d.visual_review import (
     render_view_data_uris,
     review_render,
 )
+
+if TYPE_CHECKING:
+    from d33d.statement_extraction import StatedFeature
 
 logger = logging.getLogger(__name__)
 
@@ -1347,7 +1350,7 @@ def _design_system(
     return system
 
 
-def _stated_feature_lines(stated_features: Any) -> list[str]:
+def _stated_feature_lines(stated_features: list[StatedFeature] | None) -> list[str]:
     """The stated FEATURE lines for the design prompt (issue #433).
 
     The feature-side sibling of the design-state block: one line per
@@ -1365,13 +1368,13 @@ def _stated_feature_lines(stated_features: Any) -> list[str]:
         return []
     lines: list[str] = []
     for f in stated_features:
-        value = getattr(f, "value", None)
+        value = f.value
         if not isinstance(value, (int, float)) or isinstance(value, bool):
             continue
         if float(value) <= 0:
             continue
-        noun = getattr(f, "noun", "")
-        role = getattr(f, "role", None)
+        noun = f.noun
+        role = f.role
         if role:
             lines.append(f"Stated feature: {noun} ({role}) = {float(value):g} mm")
         else:
@@ -1386,7 +1389,7 @@ def _design_state_lines(
     state_stated: dict[str, float] | None = None,
     state_meta: dict[str, Any] | None = None,
     state_confirmed: dict[str, Any] | None = None,
-    stated_features: Any = None,
+    stated_features: list[StatedFeature] | None = None,
 ) -> list[str]:
     """The design-state block's prompt lines (issue #120).
 
@@ -1531,7 +1534,7 @@ def _design_messages(
     state_confirmed: dict[str, Any] | None = None,
     design_source: str | None = None,
     part_scale: float | None = None,
-    stated_features: Any = None,
+    stated_features: list[StatedFeature] | None = None,
 ) -> list[dict[str, Any]]:
     """The design-role message list: the current user's REQUEST as the
     first line of the user text (issue #97: the current message used to be
@@ -1940,7 +1943,7 @@ async def run_design_loop_async(
     state_stated: dict[str, float] | None = None,
     state_meta: dict[str, Any] | None = None,
     state_confirmed: dict[str, Any] | None = None,
-    stated_features: Any = None,
+    stated_features: list[StatedFeature] | None = None,
     on_progress: OnProgressFn | None = None,
     design_source: str | None = None,
     part_scale: float | None = None,
@@ -3013,7 +3016,7 @@ def run_design_loop(
     state_stated: dict[str, float] | None = None,
     state_meta: dict[str, Any] | None = None,
     state_confirmed: dict[str, Any] | None = None,
-    stated_features: Any = None,
+    stated_features: list[StatedFeature] | None = None,
     design_source: str | None = None,
     part_scale: float | None = None,
     part_bbox_mm: tuple[float, float, float] | None = None,
