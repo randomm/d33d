@@ -366,6 +366,51 @@ class TestUnmappedMmNumbers:
         assert result.unmapped_mm_numbers == [5.0]
 
 
+class TestCommaClosesFeatureClause:
+    """Issue #438: a comma CLOSES the feature clause — a bare measurement
+    in a LATER top-level clause describes the PART, not the feature."""
+
+    def test_hook_with_screw_hole_states_width(self) -> None:
+        """'a hook 40 mm tall with a 6 mm screw hole, 30 mm wide' — the
+        40 is the hook's height (H), the 6 the hole's (feature, unmapped),
+        the 30 is the hook's WIDTH (W): the comma after "hole" ended the
+        feature clause, so the trailing bare measurement states W."""
+        result = classify("a hook 40 mm tall with a 6 mm screw hole, 30 mm wide")
+        assert result.absolute == {"H": 40.0, "W": 30.0}
+        assert 6.0 in result.unmapped_mm_numbers
+
+    def test_tall_vase_with_opening_states_height_only(self) -> None:
+        """'a 70 mm tall vase with a 20 mm wide opening' — the 70 is the
+        vase's height; the 20 is the OPENING's width ("opening" is a
+        feature noun — issue #438 widened the set)."""
+        result = classify("a 70 mm tall vase with a 20 mm wide opening")
+        assert result.absolute == {"H": 70.0}
+        assert 20.0 in result.unmapped_mm_numbers
+
+    def test_window_is_a_feature_noun(self) -> None:
+        """'a 20 mm wide window' — "window" names a feature, not the part:
+        nothing is stated, the 20 is unmapped."""
+        result = classify("a 20 mm wide window")
+        assert result.absolute == {}
+        assert result.unmapped_mm_numbers == [20.0]
+
+    def test_feature_clause_still_continues_within_its_own_comma_clause(self) -> None:
+        """'add a 10 mm wide slot across the top, 5 mm deep' — the 5 is
+        the SLOT's depth (the bare measurement continues the feature
+        within the same top-level clause), not the part's: nothing is
+        stated (unchanged by #438)."""
+        result = classify("add a 10 mm wide slot across the top, 5 mm deep")
+        assert result.absolute == {}
+
+    def test_part_clauses_before_feature_clause_still_state(self) -> None:
+        """'a 40 mm wide box, 12 mm tall, with a 5 mm hole' — both part
+        clauses precede the feature clause; both state (unchanged by
+        #438 — the comma after "tall" does not reopen anything, and the
+        "with a 5 mm hole" feature clause starts after them)."""
+        result = classify("a 40 mm wide box, 12 mm tall, with a 5 mm hole")
+        assert result.absolute == {"W": 40.0, "H": 12.0}
+
+
 # ---------------------------------------------------------------------------
 # axis_for_question_word
 # ---------------------------------------------------------------------------
@@ -446,13 +491,15 @@ class TestFeatureNounAbstain:
         # operator decision): they live in _PART_NOUNS only.
         words = {
             "hole", "holes", "groove", "slot", "pocket", "bore", "recess",
-            "notch", "channel", "cutout", "cut-out", "counterbore",
+            "recesses", "notch", "notches", "channel", "channels",
+            "cutout", "cutouts", "cut-out", "counterbore",
             "countersink", "foot", "feet", "leg", "legs", "post", "tab",
             "lip", "rim", "rib", "boss", "peg", "pin", "screw", "bolt",
             "bolts",
             "magnet", "magnets", "grid", "grids",
             "lid", "wall", "walls", "chamfer", "fillet", "text",
             "label", "logo",
+            "opening", "openings", "window", "windows",
         }
         assert words == _FEATURE_NOUNS, (
             f"set drifted: extra={words - _FEATURE_NOUNS}, "

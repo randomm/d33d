@@ -201,9 +201,12 @@ def test_legacy_report_empty_mesh_degrades_to_extents_fallback(
     degrade to the extents/2 fallback — NOT crash the chat turn with an
     uncaught ``TypeError`` from the ``lo, hi = mesh.bounds`` unpack.
 
-    The origin-anchored #396 shape (bbox 0..40 × 0..40, centre (20, 20))
-    keeps its extents/2 pick: the (10, 0) hole at 22.4 mm from the centre,
-    within the 30 mm match threshold."""
+    Issue #438: the extents/2 fallback now feeds the SCALED threshold
+    (min(30 mm, 0.25 × min(extent W, extent D))): the origin-anchored #396
+    shape (bbox 0..40 × 0..40) gives a 10 mm threshold, so the (10, 0)
+    hole at 22.4 mm from the centre is a NO-MATCH (QA 2026-10-09: a hole
+    22 mm from the centre of a 40 mm part isn't "the centre") — the
+    reply is the no-match list, not a silent pick."""
     import struct
 
     from d33d import part_mesh
@@ -232,7 +235,9 @@ def test_legacy_report_empty_mesh_degrades_to_extents_fallback(
 def _legacy_extents_fallback_case(app: Any, part_stl: Path):
     """Shared body for the extents/2-fallback legacy cases: legacy report
     (origin-anchored #396 shape) + committed part.stl → the extents/2
-    pick (the (10, 0) Ø30 hole, 22.4 mm from centre)."""
+    centre (20, 20) is used, but the #438 scaled threshold (10 mm for a
+    40 mm part) makes the (10, 0) hole (22.4 mm away) a NO-MATCH — the
+    reply is the no-match list, never a silent pick."""
 
     async def _call(client):
         r = await client.post("/api/projects", json={"name": "LegacyEmptyMesh"})
@@ -263,22 +268,27 @@ def _legacy_extents_fallback_case(app: Any, part_stl: Path):
 
     status, frames, offer = _run_async(app, _call)
     assert status == 202, status
-    # extents/2 (20, 20): the (10, 0) Ø30 hole is nearest (22.4 mm) —
-    # the extents/2 fallback pick must be made, not a crash or a
-    # no-match.
-    assert offer is not None, f"extents/2 fallback must still pick: {frames}"
-    assert list(offer.get("center", [])[:2]) == [10.0, 0.0], (
-        f"expected the extents/2 pick (10, 0), got: {offer}"
+    # extents/2 (20, 20): distances (0,0)→28.3, (-10,0)→36.1, (10,0)→22.4 —
+    # the nearest is 22.4 mm from the centre, beyond the #438 scaled
+    # threshold (10 mm for a 40 mm part) → NO-MATCH (the list of
+    # measured holes), not a silent pick.
+    assert offer is None, f"scaled threshold must no-match: {frames}"
+    done = [d for e, d in frames if e == "done"]
+    assert done, f"no done frame: {frames}"
+    assert "I don't see a hole" in done[0].get("message", ""), (
+        f"expected the no-match list, got: {done[0]}"
     )
-    assert offer.get("diameter_mm") == 30.0, offer
 
 
 def test_legacy_report_missing_mesh_keeps_extents_fallback(app_with_projects) -> None:
     """Issue #414: a legacy report whose stored mesh is UNAVAILABLE (no
     part.stl on disk — e.g. a 3MF import's committed part.3mf is not
-    loadable by this fallback) keeps the old extents/2 behaviour: the
-    origin-anchored #396 shape (bbox 0..40 x 0..40, centre (20, 20))
-    selects the nearest hole (22.4 mm from centre, within threshold)."""
+    loadable by this fallback) keeps the extents/2 CENTRE behaviour:
+    the origin-anchored #396 shape (bbox 0..40 x 0..40) uses centre
+    (20, 20) — but issue #438 scales the match threshold with the part
+    (0.25 × 40 = 10 mm), so the nearest hole (22.4 mm from centre) is a
+    NO-MATCH (QA 2026-10-09: a hole 22 mm from the centre of a 40 mm
+    part isn't "the centre")."""
 
     async def _call(client):
         r = await client.post("/api/projects", json={"name": "LegacyNoMesh"})
@@ -310,9 +320,12 @@ def test_legacy_report_missing_mesh_keeps_extents_fallback(app_with_projects) ->
     status, frames, offer = _run_async(app_with_projects, _call)
     assert status == 202, status
     # extents/2 (20, 20): distances (0,0)→28.3, (-10,0)→36.1, (10,0)→22.4 —
-    # the (10, 0) Ø30 hole wins (within the 30 mm threshold).
-    assert offer is not None, f"extents/2 fallback must still pick: {frames}"
-    assert list(offer.get("center", [])[:2]) == [10.0, 0.0], (
-        f"expected the extents/2 pick (10, 0), got: {offer}"
+    # the nearest is 22.4 mm from the centre, beyond the #438 scaled
+    # threshold (10 mm for a 40 mm part) → NO-MATCH (the list of
+    # measured holes), not a silent pick.
+    assert offer is None, f"scaled threshold must no-match: {frames}"
+    done = [d for e, d in frames if e == "done"]
+    assert done, f"no done frame: {frames}"
+    assert "I don't see a hole" in done[0].get("message", ""), (
+        f"expected the no-match list, got: {done[0]}"
     )
-    assert offer.get("diameter_mm") == 30.0, offer

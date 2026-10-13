@@ -825,6 +825,20 @@ def test_tier2_user_quoted_unmapped_mm_helper():
         user_quoted_unmapped_mm(["make it 12 mm tall", "and lift it 12 mm"])
         == {12.0}
     )
+    # Issue #438 (designed-part path): a prior "4 mm" turn followed by
+    # "make the middle hole 8 mm" quotes ONLY the current message's 8 —
+    # the stale 4 never rides back into an offer. The import path
+    # (default) keeps the full-history union.
+    assert (
+        user_quoted_unmapped_mm(
+            ["the hole was 4 mm", "make the middle hole 8 mm"], current_only=True
+        )
+        == {8.0}
+    )
+    assert (
+        user_quoted_unmapped_mm(["the hole was 4 mm", "make the middle hole 8 mm"])
+        == {8.0, 4.0}
+    )
     # An explicit protocol cue in the message consumes the number.
     assert user_quoted_unmapped_mm(["H: 12 mm"]) == set()
 

@@ -1212,7 +1212,18 @@ async def _resolve_offer(
     # is eligible, not only when it sits in the finalize message).
     from d33d.dimension_protocol import offer_tier_signals
 
-    released_axes, quoted = offer_tier_signals(user_message, chat_history)
+    # Issue #438: on a DESIGNED part (no imported part), tier-2 offers
+    # quote numbers from the CURRENT message only — a stale "4 mm" from an
+    # earlier turn never rides back into an offer (the hole is now "8 mm").
+    # The import path (a part the user brought) keeps the full-history
+    # scan (a number stated before the import is a quote the user may
+    # still be pointing at).
+    _row = app.state.conn.get_project(project_id)
+    _part_row = _row.get("part_filename") if _row else None
+    _is_imported = _part_row is not None and str(_part_row) != ""
+    released_axes, quoted = offer_tier_signals(
+        user_message, chat_history, current_only=not _is_imported
+    )
     # The tier-1 honesty gate (issue #312, task-b): the "You asked for
     # {cue} — I made {label} {value}. Right?" sentence claims a CHANGE,
     # so a released-axis param whose value is UNCHANGED is not a tier-1

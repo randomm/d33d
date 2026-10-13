@@ -97,10 +97,18 @@ _FEATURE_NOUNS: frozenset[str] = frozenset(
         "pocket",
         "bore",
         "recess",
+        "recesses",
         "notch",
+        "notches",
         "channel",
+        "channels",
         "cutout",
+        "cutouts",
         "cut-out",
+        "opening",
+        "openings",
+        "window",
+        "windows",
         "counterbore",
         "countersink",
         "foot",
@@ -390,13 +398,16 @@ def _classify_clause(
     *,
     sub_clause_index: int = 0,
     feature_clause_start: int = -1,
+    top_level_starts: list[int] | None = None,
 ) -> tuple[dict[str, float], set[str], bool, list[str]]:
     """Classify one clause. Returns (absolute, relative, global_, cue_words).
 
     ``sub_clause_index`` (issue #413) is the 0-based index of this
     sub-clause in the message's full sub-clause list. ``feature_clause_start``
     is the 0-based index where the feature clause begins (``-1`` when
-    there is no feature clause). See ``d33d.feature_clause``.
+    there is no feature clause). ``top_level_starts`` (issue #438) is the
+    top-level clause start indices — a comma closes the feature clause.
+    See ``d33d.feature_clause``.
     """
     relative: set[str] = set()
     global_: bool = False
@@ -459,6 +470,7 @@ def _classify_clause(
         numbers_in=_numbers_in,
         feature_verb_re=_word_re,
         feature_noun_re=FEATURE_NOUN_RE,
+        top_level_starts=top_level_starts,
     ):
         return ({}, relative, global_, cue_words)
 
@@ -579,6 +591,11 @@ def classify(message: str) -> Cues:
     fc_start = feature_clause.feature_clause_start(
         all_sub_clauses, FEATURE_NOUN_RE, _numbers_in, _word_re
     )
+    # Issue #438: the top-level clause start indices (a comma CLOSES the
+    # feature clause — a bare measurement in a later top-level clause is
+    # the part's own dimension, not the feature's). Computed once over
+    # the full message; shared coordinate space with ``fc_start``.
+    top_starts = feature_clause.top_level_clause_start_indices(message, all_sub_clauses)
 
     all_absolute: dict[str, float] = {}
     all_relative: set[str] = set()
@@ -596,6 +613,7 @@ def classify(message: str) -> Cues:
             clause,
             sub_clause_index=global_sub_idx,
             feature_clause_start=fc_start,
+            top_level_starts=top_starts,
         )
         for axis, val in abs_c.items():
             all_absolute[axis] = val

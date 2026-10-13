@@ -392,30 +392,49 @@ export function displayDesignLoopError(
     // which value was held, in the axis's own words — the value is the
     // user's own number, safe to render; `mm` decides the formatting.
     let carriedAxes: DisplayError["carriedAxes"];
-    if (reason === "bbox_out_of_tolerance") {
-      const parsedCarried = parsePositiveAxes(data.carried_axes);
-      if (parsedCarried !== undefined) {
-        carriedAxes = parsedCarried;
-        // The sentence names ONE axis: the largest carried one (the same
-        // axis whose value it renders) — a joined multi-axis label would
-        // fall through to the wrong adjective (issue #398).
-        const [firstAxis, firstValue] = ([
-          ["W", parsedCarried.W],
-          ["D", parsedCarried.D],
-          ["H", parsedCarried.H],
-        ] as Array<["W" | "D" | "H", number | undefined]>)
-          .filter((entry): entry is ["W" | "D" | "H", number] => typeof entry[1] === "number" && entry[1] > 0)
-          .sort((a, b) => b[1] - a[1])[0];
-        message = copy.failure.bboxCarried(firstAxis, firstValue);
-      }
-    }
-    // The measured-axis data (issue #367): the frame's `measured_axes`
-    // carries the extents the bbox gate actually compared (the MADE side
-    // of the size card's "asked → made" rows). Validated the same way —
-    // a malformed shape is dropped, never rendered half-established.
     let measuredAxes: DisplayError["measuredAxes"];
     if (reason === "bbox_out_of_tolerance") {
-      measuredAxes = parsePositiveAxes(data.measured_axes);
+      const parsedCarried = parsePositiveAxes(data.carried_axes);
+      const parsedMeasured = parsePositiveAxes(data.measured_axes);
+      measuredAxes = parsedMeasured;
+      // Issue #438: the headline names the FAILING axis — the carried
+      // axis whose made value (measured_axes) diverges from the asked
+      // value (carried_axes) beyond the gate tolerance (max(1%, 0.5 mm)
+      // — the same math the size card uses for its failing row, re-derived
+      // from the frame's own numbers; the server marks no per-axis
+      // tolerance). No made value established for a carried axis → not a
+      // failing row (an unmeasured carried axis cannot fail the gate here
+      // — it was not compared). No failing axis (no measured_axes, or all
+      // carried rows within tolerance) → the previous "largest carried"
+      // axis keeps the sentence's fallback behaviour.
+      let failingAxis: ["W" | "D" | "H", number] | undefined;
+      if (parsedCarried !== undefined && parsedMeasured !== undefined) {
+        for (const a of ["W", "D", "H"] as const) {
+          const asked = parsedCarried[a];
+          const made = parsedMeasured[a];
+          if (typeof asked !== "number" || asked <= 0) continue;
+          if (typeof made !== "number" || made <= 0) continue;
+          if (Math.abs(made - asked) > Math.max(0.01 * asked, 0.5)) {
+            failingAxis = [a, asked];
+            break;
+          }
+        }
+      }
+      if (parsedCarried !== undefined) {
+        carriedAxes = parsedCarried;
+        // The sentence names ONE axis: the first FAILING axis (issue
+        // #438) — its own value and its own adjective; the fallback is
+        // the largest carried one (the same axis whose value it renders)
+        // — a joined multi-axis label would fall through to the wrong
+        // adjective (issue #398).
+        const [firstAxis, firstValue] =
+          failingAxis ??
+          ((["W", "D", "H"] as const)
+            .map((a) => [a, parsedCarried[a]] as ["W" | "D" | "H", number | undefined])
+            .filter((entry): entry is ["W" | "D" | "H", number] => typeof entry[1] === "number" && entry[1] > 0)
+            .sort((a, b) => b[1] - a[1])[0]);
+        message = copy.failure.bboxCarried(firstAxis, firstValue);
+      }
     }
     // The axis_params_mismatch detail (issue #276): the per-param numbers
     // arrive STRUCTURED as `mismatches` (one entry per mismatching param —

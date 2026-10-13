@@ -305,6 +305,34 @@ def sanitize_dimension_phrase(
     return result
 
 
+def _strip_version_artifacts(name: str) -> str:
+    """Strip the version "bookkeeping" words a model leaks into titles
+    (issue #438): a parenthetical change tag ("(fixed)", "(updated)",
+    "(v2)", "(rev 3)") and the trailing as-of words "now" / "then" /
+    "to" ("Middle hole now" → "Middle hole"). "to" is stripped ONLY in
+    terminal position ("Tower to base" is unchanged), never inside the
+    name ("to" as a preposition with an object is kept — the existing
+    dangling-preposition pass already handles the case where the object
+    was a dimension phrase the strip removed).
+
+    Returns ``""`` when the name WAS only artifacts (the caller falls
+    back to the param-diff phrase — never an empty or 1-letter name).
+    Idempotent: a second pass changes nothing.
+    """
+    result = re.sub(r"\s*\(\s*(?:v|rev\.?|revision)\s*\d*\s*\)", " ", name, flags=re.IGNORECASE)
+    # A parenthetical of lowercase words — "(fixed)" / "(updated)" —
+    # with BOTH flanks (the strip never glues two words together: a
+    # dangling space is the price of the "Tower to base" safety).
+    result = re.sub(r"\s*\(\s*[a-z]+(?:\s+[a-z]+)*\)\s*", " ", result, flags=re.IGNORECASE)
+    # Trailing as-of words, one per pass ("Middle hole now to" → "Middle hole").
+    for _ in range(4):
+        stripped = re.sub(r"\s+(?:now|then|to)$", "", result, flags=re.IGNORECASE).strip()
+        if stripped == result:
+            break
+        result = stripped
+    return result
+
+
 def resolve_version_name(
     client_name: str | None,
     scad_source: str | None,
@@ -348,7 +376,17 @@ def resolve_version_name(
     if source:
         sanitized = sanitize_dimension_phrase(source, measured_bbox)
         if sanitized:
-            return clean_name(sanitized, existing_names)
+            # Issue #438: strip the version-artifact words ("(fixed)",
+            # "(updated)", "(v2)", trailing "now"/"then"/"to") — but only
+            # when the result still carries a real name (2+ letters);
+            # a name that WAS the artifact ("(v2)") → the param-diff
+            # phrase, never an empty or 1-letter name.
+            cleaned_artifacts = _strip_version_artifacts(sanitized)
+            if sum(c.isalpha() for c in cleaned_artifacts) >= 2:
+                return clean_name(cleaned_artifacts, existing_names)
+            if cleaned_artifacts:
+                return clean_name(cleaned_artifacts, existing_names)
+            return clean_name(param_diff_name(prev_params, new_params), existing_names)
     return clean_name(param_diff_name(prev_params, new_params), existing_names)
 
 

@@ -41,6 +41,7 @@ __all__ = [
     "feature_clause_start",
     "feature_clause_suppresses",
     "in_clause_feature_noun_guard",
+    "top_level_clause_start_indices",
 ]
 
 #: The feature verbs (closed set, issue #398): verbs that create or modify
@@ -86,6 +87,45 @@ def _is_bare_measurement(clause: str) -> bool:
     refers to the feature's top, not a new subject).
     """
     return _SUBJECT_INTRODUCER_RE.search(clause) is None
+
+
+def top_level_clause_start_indices(message: str, sub_clauses: list[str]) -> list[int]:
+    """The 0-based indices in ``sub_clauses`` where a TOP-LEVEL clause
+    begins (issue #438: a comma CLOSES the feature clause).
+
+    ``message`` is the raw user message; ``sub_clauses`` the flattened
+    sub-clause list the caller already built (top-level clauses split on
+    sentence punctuation / "," / ";", then "and"/"with" sub-clauses).
+    A sub-clause starts a top-level clause iff the raw text between the
+    PREVIOUS sub-clause's end and this one holds only a top-level
+    separator ("," / ";" / sentence punctuation) and whitespace — the
+    "and"/"with" joiner is a WORD in the gap, so an "and"/"with"-split
+    sub-clause never starts a top-level clause.
+
+    Used by :func:`feature_clause_suppresses`'s bare-measurement gate:
+    a bare measurement ("30 mm wide") in a LATER top-level clause
+    describes the PART, not the feature the earlier clause names ("a
+    hook 40 mm tall with a 6 mm screw hole, 30 mm wide" → the 30 is the
+    hook's width, the 6 the hole's); a bare measurement in the SAME
+    top-level clause (joined only by an "and"/"with" sub-clause split)
+    still continues the feature ("add a 10 mm wide slot across the top,
+    5 mm deep" — the 5 is the slot's depth).
+    """
+    starts: list[int] = []
+    pos = 0
+    for i, sub in enumerate(sub_clauses):
+        found = message.find(sub, pos)
+        if found < 0:
+            # Defensive: sub-clauses are derived from the message, so this
+            # should not happen — treat as a top-level start to stay safe.
+            found = pos
+        gap = message[pos:found].strip()
+        if i == 0 or re.fullmatch(r"[;,]|\.!?", gap) is not None:
+            starts.append(i)
+        end = found + len(sub)
+        m = re.match(r"\s*(?:[;,]|\.!?\s)", message[end:])
+        pos = end + (m.end() if m else 0)
+    return starts
 
 
 def feature_clause_start(
@@ -212,9 +252,10 @@ def feature_clause_suppresses(
     numbers_in: Callable[[str], list[float]],
     feature_verb_re: Callable[[str], re.Pattern[str]],
     feature_noun_re: re.Pattern[str],
+    top_level_starts: list[int] | None = None,
 ) -> bool:
     """Feature-clause cross-clause suppression (issue #398, narrowed on
-    #413).
+    #413; a comma CLOSES the feature clause on #438).
 
     A sub-clause that contains an axis word + number but NO feature noun
     of its own is describing a feature when the message has a feature
@@ -266,25 +307,54 @@ def feature_clause_suppresses(
     # "add this 10 mm wide slot" → the "slot" feature noun makes it a
     # feature clause (states nothing — the 10 is the slot's width).
     if has_feature_verb and not has_feature_noun:
-        for v in _FEATURE_VERBS:
-            m = feature_verb_re(v).search(clause)
+        verb = _first_feature_verb(clause, feature_verb_re)
+        if verb is not None:
+            m = feature_verb_re(verb).search(clause)
             if m:
                 after_verb = clause[m.end():].strip()
                 if after_verb:
                     first_word_after = after_verb.split()[0].lower()
                     if first_word_after in ("it", "this", "that"):
                         return False  # part-level statement, not a feature
-    return (
-        feature_clause_start >= 0
-        and (
-            sub_clause_index >= feature_clause_start
-            or has_feature_verb
+    if not (has_feature_verb or not has_feature_noun):
+        return False
+    # Common requirements: a feature clause exists, the clause holds an
+    # absolute axis word and a number.
+    if feature_clause_start < 0:
+        return False
+    if not (set(cue_words) & set(absolute_words)):
+        return False
+    if not numbers_in(clause):
+        return False
+    if has_feature_verb:
+        # A feature-verb sub-clause always describes the feature.
+        return True
+    # A BARE MEASUREMENT belongs to the feature clause only inside the
+    # feature clause's OWN top-level clause (issue #438): a comma (a
+    # top-level clause boundary) CLOSES the feature clause — "a hook 40
+    # mm tall with a 6 mm screw hole, 30 mm wide" → the 30 mm clause is
+    # the part's width, the 6 mm is the hole's. ``top_level_starts``
+    # (the caller's precomputed :func:`top_level_clause_start_indices`)
+    # is authoritative when present; without it the message-wide
+    # at-or-after gate (pre-#438 behaviour) keeps legacy callers intact.
+    if top_level_starts is None:
+        gate = sub_clause_index >= feature_clause_start
+    else:
+        gate = feature_clause_start in top_level_starts and (
+            sub_clause_index in top_level_starts or sub_clause_index > feature_clause_start
         )
-        and set(cue_words) & set(absolute_words)
-        and numbers_in(clause)
-        and (
-            has_feature_verb
-            or _is_bare_measurement(clause)
-        )
-        and (has_feature_verb or not has_feature_noun)
-    )
+    return gate and _is_bare_measurement(clause)
+
+
+def _first_feature_verb(
+    clause: str, feature_verb_re: Callable[[str], re.Pattern[str]]
+) -> str | None:
+    """The EARLIEST feature verb (``_FEATURE_VERBS``) in ``clause``, or
+    ``None`` when no feature verb appears (issue #438: the pronoun check
+    and the verb-existence check share one scan)."""
+    best: tuple[int, str] | None = None
+    for v in _FEATURE_VERBS:
+        m = feature_verb_re(v).search(clause)
+        if m is not None and (best is None or m.start() < best[0]):
+            best = (m.start(), v)
+    return best[1] if best is not None else None
