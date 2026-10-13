@@ -210,6 +210,7 @@ def boundary_sentence(
     move: bool = False,
     move_distance_mm: float | None = None,
     move_direction: str | None = None,
+    measured: bool = False,
 ) -> str:
     """The spec's boundary sentence, templated (issue #332's operator
     decision: a CLOSED set of templates with the user's noun and
@@ -233,7 +234,10 @@ def boundary_sentence(
     if size_mm is None:
         return FRILL_NO_DIMENSION_REPLY.format(noun=noun)
     if noun in ("hole", "holes", "bore", "counterbore"):
-        return FRILL_HOLE_DIAMETER_REPLY.format(noun=noun, dim=fmt_mm1(size_mm))
+        # Issue #437: the one-decimal diameter is for a RESOLVED measured
+        # hole only; the #351 unknown-count offer keeps its copy.
+        dim = fmt_mm1(size_mm) if measured else _fmt_size(size_mm)
+        return FRILL_HOLE_DIAMETER_REPLY.format(noun=noun, dim=dim)
     dim = _fmt_size(size_mm)
     return FRILL_NOUN_DIMENSION_REPLY.format(noun=noun, dim=dim)
 

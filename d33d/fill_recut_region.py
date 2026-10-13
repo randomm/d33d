@@ -338,6 +338,7 @@ def _handle_fresh_trigger(
         move=trigger["move"],
         move_distance_mm=trigger.get("move_distance"),
         move_direction=trigger.get("direction"),
+        measured=hole is not None,
     )
     return {"kind": "answer", "answer": sentence, "run_loop": False, "outcome": "fresh_offer"}
 

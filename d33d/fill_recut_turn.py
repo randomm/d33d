@@ -348,13 +348,6 @@ def _fill_recut_turn_body(
                     "noun": trigger["noun"],
                     "size": trigger["size"],
                 }
-                sentence = boundary_sentence(
-                    trigger["noun"],
-                    trigger["size"],
-                    move=trigger["move"],
-                    move_distance_mm=trigger.get("move_distance"),
-                    move_direction=trigger.get("direction"),
-                )
                 point_at_fallback = False
                 no_match = False
 
@@ -468,6 +461,16 @@ def _fill_recut_turn_body(
                         "outcome": "no_match",
                     }
 
+                # Issue #437: the one-decimal copy only for a resolved
+                # measured hole (``center`` is set only on that path).
+                sentence = boundary_sentence(
+                    trigger["noun"],
+                    trigger["size"],
+                    move=trigger["move"],
+                    move_distance_mm=trigger.get("move_distance"),
+                    move_direction=trigger.get("direction"),
+                    measured="center" in offer_dict,
+                )
                 versions.set_pending_offer(project_id, offer_dict)
                 return {
                     "kind": "answer",
