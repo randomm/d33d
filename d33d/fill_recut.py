@@ -343,7 +343,8 @@ def is_clean_yes(message: str) -> bool:
 #
 #: The set is the BARE affirmative words plus the acknowledgement words the
 #: old #349 clean-affirmation predicate caught ("yes thanks", "ok cool",
-#: "correct", … — an acknowledgement with no instruction content) and the
+#: "correct", "that is fine", "sure thing", "got it", … — an acknowledgement
+#: with no instruction content) and the
 #: NEGATION/stop words (no, nope, nah, …) the old predicate disqualified.
 #: The negation tokens are in the set so an acknowledgement like "nope,
 #: thanks" tokenises fully, but ``is_bare_affirmation`` rejects ANY turn
@@ -366,8 +367,20 @@ _BARE_AFFIRMATION_TOKENS = frozenset(
         "it",
         "go",
         "ahead",
+        # "right" is also a POSITIONAL word ("the right hole"); it is safe
+        # in the set because every bare-affirmation guard (the chat seam
+        # ``fill_recut_turn`` and the region-edit seam) requires the trigger
+        # to be None — a resize/move instruction sets the trigger, so a
+        # positional "right" never reaches the point-first or #349 reply.
         "right",
         "accept",
+        # Lens round 1: the acknowledgement tokens that common acknowledgements
+        # need ("yes that is fine", "that is great", "sure thing", "all good",
+        # "got it") — still within the 6-token cap, still no-"?" only.
+        "is",
+        "thing",
+        "got",
+        "all",
         # Acknowledgement words (the #349 no-offer guard's catch net):
         "thanks",
         "thank",

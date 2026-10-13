@@ -615,9 +615,10 @@ def create_projects_router() -> APIRouter:
         # ``version_id != latest`` check the offer pre-route applies.
         # A fresh read is correct here: the offer pre-route's read ran
         # first in this turn and no route in between creates versions.
-        if _is_bare_affirmation_no_offer(
-            app, project_id, body.message, app.state.versions.latest_version(project_id)
-        ):
+        # Reused for the guard and the loop's ``own_feature_names`` below
+        # (issue #437 lens round 1: one ``latest_version`` read per request).
+        _latest = app.state.versions.latest_version(project_id)
+        if _is_bare_affirmation_no_offer(app, project_id, body.message, _latest):
             logger.info(
                 "chat for project %s: bare affirmation with no live "
                 "offer — replying with the no-offer notice, no design "
@@ -636,11 +637,11 @@ def create_projects_router() -> APIRouter:
         # under the 500-line split threshold (AGENTS.md).
         # Issue #437: the fill-and-recut requests the pre-route answered
         # (a declined size included) never reach the loop's history.
+        # Issue #437 (lens round 1): the ``_latest`` read above is reused
+        # here (one ``latest_version`` read per request, not two).
         chat_history = fill_recut_history.loop_chat_history(
             body.chat_history,
-            own_names=fill_recut.own_feature_names(
-                app.state.versions.latest_version(project_id)
-            ),
+            own_names=fill_recut.own_feature_names(_latest),
             part_usable=_part is not None,
         )
         try:

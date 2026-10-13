@@ -502,6 +502,13 @@ BARE_AFFIRMATIONS = [
     "confirmed",
     "right, sounds good",
     "yes, go for it",
+    # Issue #437 (lens round 1): common acknowledgements the widened set
+    # must also keep bare (the #349 guard's catch net).
+    "yes that is fine",
+    "that is great",
+    "sure thing",
+    "all good",
+    "got it",
 ]
 
 
@@ -524,8 +531,47 @@ def test_is_bare_affirmation_accepts_only_closed_set() -> None:
         "",
         "maybe",
         "yes?",
+        # A yes/got/all prefix + an instruction is NOT a bare affirmation
+        # (it carries real work and must reach the design loop).
+        "yes, add a chamfer here",
+        "got it, now add a tab",
+        "all holes 5 mm",
     ]:
         assert not is_bare_affirmation(text), text
+
+
+def test_bare_affirmation_parity_with_349_guard(app_with_projects) -> None:
+    """Issue #437 (lens round 1) parity pin: for the shared sample list, the
+    #349 no-offer guard (``_is_bare_affirmation_no_offer`` — the chat route's
+    no-live-offer predicate) and the point-first predicate
+    (``fill_recut.is_bare_affirmation``) classify identically. They are the
+    same underlying function (the guard applies ``is_bare_affirmation`` after
+    its own no-offer check, which holds for an offer-less project) — pin that
+    so a future split of the two call sites cannot drift."""
+    from d33d.projects import _is_bare_affirmation_no_offer
+
+    samples = list(BARE_AFFIRMATIONS) + [
+        "yes, add a chamfer here",
+        "got it, now add a tab",
+        "all holes 5 mm",
+        "nope, thanks",
+        "maybe",
+    ]
+
+    async def _probe(client):
+        r = await client.post("/api/projects", json={"name": "Parity"})
+        pid = r.json()["id"]
+        results = []
+        for text in samples:
+            guard = _is_bare_affirmation_no_offer(
+                app_with_projects, pid, text, app_with_projects.state.versions.latest_version(pid)
+            )
+            results.append((text, guard, fill_recut.is_bare_affirmation(text)))
+        return results
+
+    rows = _run_async(app_with_projects, _probe)
+    for text, guard, point_first in rows:
+        assert guard == point_first, (text, guard, point_first)
 
 
 def test_is_bare_affirmation_rejects_negation() -> None:
