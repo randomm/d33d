@@ -1282,17 +1282,55 @@ class TestStatedFeatureExtraction:
         )
         assert feats == [StatedFeature(noun="hole", role=None, value=5.0)]
 
-    def test_explicit_role_never_matches_bare_restatement(self) -> None:
-        """A restatement with an EXPLICIT role does not supersede a
-        role-less earlier value (and vice versa): 'a 5 mm hole' then
-        'the hole's diameter is 6 mm' → both records (the diameter-role
-        6 and the bare 5 are distinct features by key)."""
+    def test_size_role_restatement_supersedes_bare_size(self) -> None:
+        """A restatement with the SIZE role (diameter) supersedes a role-less
+        earlier size of the same hole: 'a 5 mm hole' then 'the hole's diameter
+        is 6 mm' → only the diameter 6 (both bind hole_diameter — keeping both
+        made the design-state match ambiguous and dropped the flag)."""
         feats = stated_features_from_messages(
             ["a 40 mm wide box with a 5 mm hole", "the hole's diameter is 6 mm"]
         )
+        assert feats == [StatedFeature(noun="hole", role="diameter", value=6.0)]
+
+    def test_depth_restatement_leaves_size_value(self) -> None:
+        """A depth restatement is a different slot: 'a 5 mm hole' then 'the
+        hole depth is 6 mm' keeps the 5 mm size AND adds the depth 6."""
+        feats = stated_features_from_messages(
+            ["a 40 mm wide box with a 5 mm hole", "the hole depth is 6 mm"]
+        )
         keys = {(f.noun, f.role, f.value) for f in feats}
         assert ("hole", None, 5.0) in keys
-        assert ("hole", "diameter", 6.0) in keys
+        assert ("hole", "depth", 6.0) in keys
+
+    def test_carried_bare_size_superseded_by_diameter_restatement(self) -> None:
+        """The carry merge applies the same size-slot rule across turns."""
+        from d33d.stated_carry import effective_stated_features
+
+        out = effective_stated_features(
+            [StatedFeature(noun="hole", role=None, value=5.0)],
+            "the hole diameter is 6 mm",
+        )
+        assert out == [StatedFeature(noun="hole", role="diameter", value=6.0)]
+
+    def test_distance_number_is_not_a_feature_size(self) -> None:
+        """A mm number that is a distance, spacing or wall thickness is never
+        the feature's size (it would flag a wrong hole diameter)."""
+        for text in (
+            "put a hole 5 mm from the edge",
+            "add a hole spaced 10 mm apart",
+            "a hole with 3 mm wall thickness",
+            "holes are 4 mm apart",
+            "the hole center is 12 mm from the wall",
+        ):
+            assert stated_features_from_messages(text) == [], text
+
+    def test_each_size_takes_its_own_role(self) -> None:
+        """A role word binds only the number it follows: '6 mm hole 20 mm
+        deep' → the 6 is role-less, the 20 is the depth (never 6 deep)."""
+        assert stated_features_from_messages("a 6 mm hole 20 mm deep") == [
+            StatedFeature(noun="hole", role=None, value=6.0),
+            StatedFeature(noun="hole", role="deep", value=20.0),
+        ]
 
     def test_non_mm_feature_size_not_extracted(self) -> None:
         """A non-mm feature size (cm, unitless) is out of scope (the

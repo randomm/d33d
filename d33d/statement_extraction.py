@@ -80,6 +80,20 @@ _FEATURE_ROLE_RE = re.compile(
     re.IGNORECASE,
 )
 
+#: Words that make a mm number a DISTANCE, spacing or thickness rather than
+#: the feature's size (issue #433): ``5 mm from the edge`` is not a 5 mm hole.
+_DISTANCE_WORDS: frozenset[str] = frozenset(
+    {
+        "from", "apart", "away", "between", "spaced", "spacing", "center",
+        "centre", "offset", "inset", "off", "wall", "thickness", "edge",
+        "pitch", "clearance", "gap", "distance", "along",
+    }
+)
+
+#: The size roles that name the same slot as a role-less size (a hole's
+#: diameter IS its default size) — supersession keys them together.
+_SIZE_SLOT_ROLES: frozenset[str] = frozenset({"diameter", "dia"})
+
 
 @dataclass(frozen=True)
 class StatedFeature:
@@ -100,6 +114,45 @@ class StatedFeature:
     noun: str
     role: str | None
     value: float
+
+
+def feature_slot(feat: StatedFeature) -> tuple[str, str | None]:
+    """The supersession key of a stated feature (issue #433): a role-less size
+    and a diameter/dia size of the same noun share the ``size`` slot (they bind
+    the same param), so a restatement in either form replaces the other. Any
+    other role (depth, width, height, ...) is its own slot."""
+    if feat.role is None or feat.role in _SIZE_SLOT_ROLES:
+        return (feat.noun, "size")
+    return (feat.noun, feat.role)
+
+
+def _feature_size_is_bound(clause: str, start: int, end: int) -> bool:
+    """Whether the mm number at ``clause[start:end]`` is the feature's own size
+    (issue #433): the feature noun or a role word follows it (``6 mm hole``,
+    ``holes 4 mm deep``, ``boss 10 mm tall``), or a noun + copula precedes it
+    (``the hole is 6 mm``). A distance, spacing or wall-thickness number is
+    rejected even when a noun is near it."""
+    tail_words = [w.lower() for w in re.findall(r"[A-Za-z]+", clause[end:])[:2]]
+    head_tokens = [t.lower() for t in re.findall(r"[A-Za-z]+|[=:]", clause[:start])[-5:]]
+    if tail_words and tail_words[0] in _DISTANCE_WORDS:
+        return False
+    if any(t in _DISTANCE_WORDS for t in head_tokens[-2:]):
+        return False
+    if any(FEATURE_NOUN_RE.search(w) or w in _FEATURE_ROLE_WORDS for w in tail_words):
+        return True
+    return bool(
+        head_tokens
+        and head_tokens[-1] in {"is", "are", "be", "was", "=", ":"}
+        and any(FEATURE_NOUN_RE.search(t) for t in head_tokens[:-1])
+    )
+
+
+def _role_word(segment: str, *, last: bool = False) -> str | None:
+    """The first (or last) feature role word in ``segment``, lowercased."""
+    found = [m.group(0).lower() for m in _FEATURE_ROLE_RE.finditer(segment)]
+    if not found:
+        return None
+    return found[-1] if last else found[0]
 
 
 #: The lexicon's explicit-mm number token, anchored for span matching:
@@ -325,7 +378,7 @@ def _unmapped_value_for_axis(cues: Cues, clauses: list[str]) -> float | None:
 
 
 def stated_features_from_messages(
-    messages: list[str] | tuple[str, ...],
+    messages: str | list[str] | tuple[str, ...],
 ) -> list[StatedFeature]:
     """The stated feature sizes in a run of user messages (issue #433).
 
@@ -362,11 +415,11 @@ def stated_features_from_messages(
     current: dict[tuple[str, str | None], tuple[int, list[StatedFeature]]] = {}
 
     def _record(idx: int, feat: StatedFeature) -> None:
-        key = (feat.noun, feat.role)
+        key = feature_slot(feat)
         existing = current.get(key)
         if existing is not None and existing[0] == idx:
             # Same message: keep one record per (noun, role, value).
-            if not any(r.value == feat.value for r in existing[1]):
+            if not any(r.value == feat.value and r.role == feat.role for r in existing[1]):
                 existing[1].append(feat)
             return
         current[key] = (idx, [feat])  # a later message supersedes
@@ -374,9 +427,8 @@ def stated_features_from_messages(
     #: A single message arrives as a bare ``str`` (the per-message seam);
     #: a list/tuple is the multi-message carry (one element per user
     #: message, in order).
-    if isinstance(messages, str):
-        messages: list[str] | tuple[str, ...] = [messages]
-    for idx, msg in enumerate(messages):
+    msgs: list[str] | tuple[str, ...] = [messages] if isinstance(messages, str) else messages
+    for idx, msg in enumerate(msgs):
         text = str(msg)
         clauses = split_clauses(text)
         all_sub_clauses: list[str] = []
@@ -394,12 +446,20 @@ def stated_features_from_messages(
                 # own: the noun (and its value) are recorded from the
                 # clause that names the feature.
             noun = _canonical_feature_noun(m.group(0).lower())
-            rm = _FEATURE_ROLE_RE.search(clause)
-            role = rm.group(0).lower() if rm else None
-            for nm in _mm_number_occurrences(clause):
+            # Each mm number takes the role word that follows it (up to the
+            # next number); only the first number may take a role from before
+            # it ("the hole's diameter is 6 mm"). Distance numbers are dropped.
+            nums = _mm_number_occurrences(clause)
+            for i, nm in enumerate(nums):
                 value = float(nm.group(1))
                 if value <= 0:
                     continue
+                if not _feature_size_is_bound(clause, nm.start(), nm.end()):
+                    continue
+                nxt = nums[i + 1].start() if i + 1 < len(nums) else len(clause)
+                role = _role_word(clause[nm.end() : nxt])
+                if role is None and i == 0:
+                    role = _role_word(clause[: nm.start()], last=True)
                 _record(idx, StatedFeature(noun=noun, role=role, value=value))
     return [r for key in current for r in current[key][1]]
 

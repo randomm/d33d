@@ -2987,10 +2987,11 @@ class TestStatedFeatureDesignState:
         assert row["value"] == 5.0
         assert "stated_value" not in row
 
-    def test_stated_feature_boundary_exactly_005_no_flag(self) -> None:
-        """|stated − made| == 0.05 EXACTLY is NOT a mismatch (the
+    def test_stated_feature_within_tolerance_near_005_no_flag(self) -> None:
+        """A made value 0.05 above the stated one is NOT a mismatch (the
         operator decision — the flag fires only STRICTLY above the
-        tolerance) → ``stated``."""
+        tolerance). 5.05 - 5.0 is 0.0499... in float, so this is the
+        just-inside case; the just-above case is the next test."""
         feats = self._feats(5.0)
         entries = state_block_for_version(
             {"hole_diameter": 5.05}, None, None, None, None, feats

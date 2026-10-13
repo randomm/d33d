@@ -875,7 +875,11 @@ export const confirmOffer = {
     madeMm: number,
   ): string => {
     const article = /^[aeiou]/i.test(noun) ? "an" : "a";
-    return `You asked for ${article} ${noun} ${mm(statedMm)}; I made it ${label} ${mm(madeMm)}.`;
+    // A capitalised label reads mid-sentence in lower case; an acronym stays.
+    const subject = /^[A-Z][a-z]/.test(label)
+      ? label.charAt(0).toLowerCase() + label.slice(1)
+      : label;
+    return `You asked for ${article} ${noun} ${mm(statedMm)}; I made it ${subject} ${mm(madeMm)}.`;
   },
 } as const;
 

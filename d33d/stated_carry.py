@@ -33,6 +33,7 @@ from d33d.axis_lexicon import DIMENSION_AXES, Cues, classify
 from d33d.statement_extraction import (
     StatedFeature,
     _coerce,
+    feature_slot,
     stated_axes_from_message,
     stated_features_from_messages,
 )
@@ -120,11 +121,12 @@ def effective_stated_features(
         return list(carried)
     if not fresh:
         return list(carried)
-    # A restated key (noun, role) replaces its carried group AS A WHOLE, so
-    # every value the message stated for that key survives ("a 5 mm hole
-    # and a 8 mm hole" keeps both) — a per-key dict would collapse them.
-    fresh_keys = {(f.noun, f.role) for f in fresh}
-    kept = [f for f in carried if (f.noun, f.role) not in fresh_keys]
+    # A restated SLOT (noun + size/role, see ``feature_slot``) replaces its
+    # carried group AS A WHOLE, so every value the message stated for that slot
+    # survives ("a 5 mm hole and a 8 mm hole" keeps both) — a per-key dict
+    # would collapse them.
+    fresh_keys = {feature_slot(f) for f in fresh}
+    kept = [f for f in carried if feature_slot(f) not in fresh_keys]
     return kept + list(dict.fromkeys(fresh))
 
 

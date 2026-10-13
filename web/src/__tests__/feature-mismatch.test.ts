@@ -16,6 +16,17 @@ describe("featureMismatchSentences (issue #433)", () => {
     expect(out[0].endsWith(".")).toBe(true);
   });
 
+  it("lowercases a capitalised label mid-sentence, keeping acronyms", () => {
+    const [sentence] = featureMismatchSentences([
+      { noun: "hole", stated_mm: 5, made_mm: 8, label: "Hole diameter" },
+    ]);
+    expect(sentence).toContain("I made it hole diameter");
+    const [acronym] = featureMismatchSentences([
+      { noun: "hole", stated_mm: 5, made_mm: 8, label: "CAD hole size" },
+    ]);
+    expect(acronym).toContain("I made it CAD hole size");
+  });
+
   it("uses 'an' before a vowel-initial feature noun", () => {
     const [sentence] = featureMismatchSentences([
       { noun: "opening", stated_mm: 4, made_mm: 6, label: "Opening width" },
