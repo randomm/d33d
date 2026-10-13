@@ -972,7 +972,7 @@ def state_block_for_version(
         axis = entry.get("axis")
         if extents is not None and entry.get("kind") == "param":
             value = entry.get("value")
-            if entry.get("provenance") == "stated":
+            if entry.get("provenance") == "stated" and "stated_feature" not in entry:
                 # Measurement honesty (issue #264): a param promoted to
                 # ``stated`` (rule (a) or (b)) that declared an axis is
                 # compared against that axis's measured extent — the
@@ -1087,6 +1087,10 @@ def _dedupe_agreeing_param_rows(
         # A disagreeing param keeps its own row (the #264 display is
         # unchanged) — the de-dup collapses only AGREEING params.
         if e.get("provenance") == "disagrees":
+            continue
+        # A stated-FEATURE row (issue #433) is a feature size (a hole's
+        # diameter), never a part extent: it is never collapsed into an axis.
+        if "stated_feature" in e:
             continue
         axis_row = by_axis.get(axis)
         if axis_row is None:
