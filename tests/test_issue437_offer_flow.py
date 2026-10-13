@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from typing import Any
 
 from httpx import ASGITransport, AsyncClient
@@ -538,6 +539,26 @@ def test_is_bare_affirmation_accepts_only_closed_set() -> None:
         "all holes 5 mm",
     ]:
         assert not is_bare_affirmation(text), text
+
+
+def test_is_bare_affirmation_pins_six_token_cap() -> None:
+    """Issue #437 (lens round 2): the 6-token cap boundary. Exactly 6
+    closed-set tokens is still a bare affirmation; 7 is not — longer
+    all-acknowledgement turns go to the design loop, not the point-first
+    or #349 reply."""
+    from d33d.fill_recut import _BARE_AFFIRMATION_TOKENS, is_bare_affirmation
+
+    exactly_six = "yes that is all good thanks"
+    tokens_six = re.findall(r"[a-z']+", exactly_six)
+    assert len(tokens_six) == 6
+    assert all(t in _BARE_AFFIRMATION_TOKENS for t in tokens_six)
+    assert is_bare_affirmation(exactly_six)
+
+    seven = "yes, that is all good, thanks, yes"
+    tokens_seven = re.findall(r"[a-z']+", seven)
+    assert len(tokens_seven) == 7
+    assert all(t in _BARE_AFFIRMATION_TOKENS for t in tokens_seven)
+    assert not is_bare_affirmation(seven)
 
 
 def test_bare_affirmation_parity_with_349_guard(app_with_projects) -> None:

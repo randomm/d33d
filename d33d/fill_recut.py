@@ -368,10 +368,13 @@ _BARE_AFFIRMATION_TOKENS = frozenset(
         "go",
         "ahead",
         # "right" is also a POSITIONAL word ("the right hole"); it is safe
-        # in the set because every bare-affirmation guard (the chat seam
-        # ``fill_recut_turn`` and the region-edit seam) requires the trigger
-        # to be None — a resize/move instruction sets the trigger, so a
-        # positional "right" never reaches the point-first or #349 reply.
+        # in the set because the two POINT-FIRST guards (the chat seam
+        # ``fill_recut_turn`` and the region-edit seam
+        # ``fill_recut_region_edit``) require the trigger to be None — a
+        # resize/move instruction sets the trigger, so a positional "right"
+        # never reaches the point-first reply. The #349 no-offer guard in
+        # projects.py has no trigger check: it accepts a bare "right" as an
+        # acknowledgement, exactly as the old heuristic did.
         "right",
         "accept",
         # Lens round 1: the acknowledgement tokens that common acknowledgements
@@ -431,6 +434,9 @@ def is_bare_affirmation(text: str) -> bool:
     if "?" in text:
         return False
     tokens = re.findall(r"[a-z']+", text.lower().replace("-", " "))
+    # 6-token cap: a turn that is entirely acknowledgements beyond ~6 words
+    # is rare — the cap keeps longer turns flowing to the design loop
+    # instead of being swallowed as bare affirmations.
     if not tokens or len(tokens) > 6:
         return False
     if set(tokens) & _BARE_NEGATION_TOKENS:
