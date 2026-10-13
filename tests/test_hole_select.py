@@ -304,7 +304,7 @@ def test_no_match_reply_valid_holes_still_uses_no_match_lead():
     assert "Here are the holes I did find" in reply, (
         f"valid holes must use the no-match lead, got: {reply!r}"
     )
-    assert "Ø4 mm at (8, 72)" in reply, f"valid hole must be listed: {reply!r}"
+    assert "Ø4.0 mm at (8, 72)" in reply, f"valid hole must be listed: {reply!r}"
 
 
 def test_snap_axis_single_definition_no_duplicate():

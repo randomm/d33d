@@ -1361,6 +1361,27 @@ def test_region_edit_face_normal_within_tolerance_accepted(app):
     assert r.status_code == 202, r.text
 
 
+def _store_measured_holes(app: Any, pid: int) -> None:
+    """Issue #437: write a report with two measured holes (file units ==
+    mm, part_scale 1.0) and the real XY bounds 0..60 x 0..60."""
+    import json as _json
+
+    report = {
+        "hole_count": 2,
+        "holes": [
+            {"center": [10.0, 0.0, 5.0], "axis": [0.0, 1.0, 0.0], "diameter_mm": 30.0},
+            {"center": [50.0, 50.0, 5.0], "axis": [0.0, 0.0, 1.0], "diameter_mm": 8.0},
+        ],
+        "bbox_file_units": [60.0, 60.0, 10.0],
+        "bbox_bounds_file_units": [[0.0, 0.0, 0.0], [60.0, 60.0, 10.0]],
+    }
+    conn = app.state.conn
+    conn.raw.execute(
+        "UPDATE projects SET part_report=? WHERE id=?", (_json.dumps(report), pid)
+    )
+    conn.commit()
+
+
 def test_region_edit_fill_recut_trigger_no_loop(app_with_projects, monkeypatch):
     """For a project with an imported part, the region-edit route runs the
     fill_recut trigger BEFORE any loop. On trigger: no loop runs, the
@@ -1418,6 +1439,51 @@ def test_region_edit_fill_recut_trigger_no_loop(app_with_projects, monkeypatch):
     assert offer["kind"] == "fill_recut", offer
     assert offer["noun"] == "hole", offer
     assert offer["size"] == 38.0, offer
+
+
+def test_region_edit_far_pick_from_any_hole_is_point_at(app_with_projects, monkeypatch):
+    """Issue #437 (review): a viewer pick nowhere near a measured hole
+    names no hole — point-at, no Yes, no pending offer, no loop. The
+    holes are (10, 0) Ø30 and (50, 50) Ø8; the pick at (60, 10) is ~41 mm
+    from the nearer one, far outside the hole's radius."""
+    import d33d.design_loop_events as dle_mod
+    loop_calls: list[dict[str, Any]] = []
+
+    async def _fake_loop(app, pid, **kwargs):
+        loop_calls.append(kwargs)
+        yield ("done", {"message": "ok", "kind": "loop_done"})
+
+    monkeypatch.setattr(dle_mod, "run_design_loop_with_events", _fake_loop)
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "Imported Part"})
+        pid = r.json()["id"]
+        _set_part_columns(app_with_projects, pid, unit_status="settled")
+        _store_measured_holes(app_with_projects, pid)
+        r2 = await client.post(
+            f"/api/projects/{pid}/region-edits",
+            json=_region_edit_body(
+                instruction="make the big hole 38 mm",
+                hit_point_mm=[60.0, 10.0, 20.0],
+                face_normal=[0.0, 1.0, 0.0],
+            ),
+        )
+        source = app_with_projects.state.event_sources.get(pid)
+        frames = []
+        if source is not None:
+            async for event, data in source:
+                frames.append((event, data))
+                if event in ("done", "error"):
+                    break
+        return pid, r2.status_code, frames
+
+    pid, status, frames = _run_async(app_with_projects, _call)
+    assert status == 202, status
+    assert not loop_calls, f"the design loop was called: {loop_calls}"
+    done = [d for e, d in frames if e == "done"]
+    assert done, f"no done frame: {frames}"
+    assert done[0].get("fill_recut_offer") is not True, done
+    assert _svc(app_with_projects).get_pending_offer(pid) is None
 
 
 def test_region_edit_fill_recut_no_hole_no_offer(app_with_projects, monkeypatch):
@@ -1632,6 +1698,99 @@ def test_region_edit_fill_recut_decline_clears_offer(app_with_projects, monkeypa
     # The offer was cleared
     svc = _svc(app_with_projects)
     assert svc.get_pending_offer(pid) is None, "offer not cleared"
+
+
+def test_region_edit_bare_yes_measured_part_point_first(app_with_projects, monkeypatch):
+    """Issue #437: a bare "yes" via the REGION-EDIT seam (the SPA's
+    [Yes, do that] button) with NO live fill-recut offer, on a part with
+    MEASURED holes, is the point-first reply — the user must point at the
+    hole first. No offer is stored, no design loop runs (never a
+    centre-less "…: yes Pick hit point…" instruction). The chat seam has
+    this guard (fill_recut_turn); the region seam needed the twin."""
+    import d33d.design_loop_events as dle_mod
+    loop_calls: list[dict[str, Any]] = []
+
+    async def _fake_loop(app, pid, **kwargs):
+        loop_calls.append(kwargs)
+        yield ("progress", {"step": "design-loop-start"})
+        yield ("done", {"message": "ok", "kind": "loop_done"})
+
+    monkeypatch.setattr(dle_mod, "run_design_loop_with_events", _fake_loop)
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "Meas Yes"})
+        pid = r.json()["id"]
+        _set_part_columns(app_with_projects, pid, unit_status="settled")
+        _store_measured_holes(app_with_projects, pid)
+        r2 = await client.post(
+            f"/api/projects/{pid}/region-edits",
+            json=_region_edit_body(instruction="yes"),
+        )
+        source = app_with_projects.state.event_sources.get(pid)
+        frames = []
+        if source is not None:
+            async for event, data in source:
+                frames.append((event, data))
+                if event in ("done", "error"):
+                    break
+        return pid, r2.status_code, frames
+
+    pid, status, frames = _run_async(app_with_projects, _call)
+    assert status == 202, status
+    # The loop was NOT called (no centre-less instruction).
+    assert not loop_calls, f"the design loop was called: {loop_calls}"
+    done = [d for e, d in frames if e == "done"]
+    assert done, f"no done frame: {frames}"
+    # The point-first copy — point at the hole first.
+    assert done[0].get("kind") == "answer", done
+    msg = done[0]["message"]
+    assert "Point at the hole on the part first" in msg, msg
+    # No offer buttons — no offer exists to accept.
+    assert "fill_recut_offer" not in done[0], done
+    # No pending offer.
+    assert _svc(app_with_projects).get_pending_offer(pid) is None
+
+
+def test_region_edit_bare_yes_unknown_count_part_falls_through(app_with_projects, monkeypatch):
+    """Issue #437 operator decision: the point-first rule applies ONLY to
+    parts whose holes were measured. A part with UNKNOWN hole count (no
+    report / legacy row) keeps the #351 behaviour — a bare "yes" via region
+    edit is not a resize trigger, so it falls through to the design loop
+    exactly as before."""
+    import d33d.design_loop_events as dle_mod
+    loop_calls: list[dict[str, Any]] = []
+
+    async def _fake_loop(app, pid, **kwargs):
+        loop_calls.append(kwargs)
+        yield ("progress", {"step": "design-loop-start"})
+        yield ("done", {"message": "ok", "kind": "loop_done"})
+
+    monkeypatch.setattr(dle_mod, "run_design_loop_with_events", _fake_loop)
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "Unk Yes"})
+        pid = r.json()["id"]
+        # Unknown count: the part row has no hole report (report is NULL).
+        _set_part_columns(app_with_projects, pid, unit_status="settled")
+        r2 = await client.post(
+            f"/api/projects/{pid}/region-edits",
+            json=_region_edit_body(instruction="yes"),
+        )
+        source = app_with_projects.state.event_sources.get(pid)
+        frames = []
+        if source is not None:
+            async for event, data in source:
+                frames.append((event, data))
+                if event in ("done", "error"):
+                    break
+        return pid, r2.status_code, frames
+
+    _pid, status, _frames = _run_async(app_with_projects, _call)
+    assert status == 202, status
+    # The loop WAS called via the patched seam (the #351 fall-through).
+    assert loop_calls, "the design loop was not called"
+    rt = loop_calls[0].get("request_text", "")
+    assert "yes" in rt, rt
 
 
 def test_region_edit_no_part_fallthrough_runs_loop(app_with_projects, monkeypatch):
@@ -2167,7 +2326,7 @@ def test_region_edit_no_part_preroute_returns_none(app_with_projects, monkeypatc
 
     seen: dict[str, Any] = {}
 
-    def _spied(app, project_id, instruction, face_normal=None, row=None, part=None):
+    def _spied(app, project_id, instruction, face_normal=None, row=None, part=None, **_kw):
         seen["part"] = part
 
     monkeypatch.setattr(fr_mod, "fill_recut_region_edit", _spied)

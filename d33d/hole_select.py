@@ -24,6 +24,9 @@ import math
 from dataclasses import dataclass
 from typing import Any
 
+from d33d.hole_position import positional_words, select_positional_hole
+from d33d.mm_format import fmt_mm1
+
 #: The ambiguity threshold (mm) for the "nearest the centre" rule: two
 #: candidate holes whose distances from the bbox centre differ by less
 #: than this are treated as equally near (the point-at fallback fires
@@ -110,6 +113,10 @@ def select_measured_hole(
        candidates are within :data:`_AMBIGUITY_MM` of each other the
        pick is ambiguous and ``None`` is returned (the point-at
        fallback).
+    2b. A positional phrase ("top right", "bottom", "the corner one")
+       picks the hole nearest the matching corner/edge of the XY bounds
+       (issue #437, :mod:`d33d.hole_position`); a tie within 1 mm, or no
+       usable bounds, is ``None`` (the point-at fallback).
     3. Otherwise, when the user stated a diameter, the hole with the
        CLOSEST diameter is picked (a unique minimum within the 0.1 mm
        ambiguity band — "the closest diameter", never a 5% band that
@@ -205,6 +212,14 @@ def select_measured_hole(
         # not "the hole of this diameter").
         return None
 
+    # Rule 2b (issue #437): a positional phrase ("top right", "bottom",
+    # "the corner one") names the hole by its place on the part's XY
+    # bounds — it takes precedence over the diameter rule ("the top right
+    # hole 6 mm" is the top-right hole). Ambiguous or unusable → ``None``
+    # (the point-at fallback). The #414 centre threshold does not apply.
+    if positional_words(message) is not None:
+        return select_positional_hole(holes, message, bounds_mm)
+
     # Rule 3: no centre qualifier but a stated diameter — the CLOSEST
     # diameter (a unique minimum within the ambiguity band).
     if trigger_size is not None and trigger_size > 0:
@@ -234,7 +249,7 @@ def fill_recut_instruction_with_hole(
 ) -> str:
     """The fill-and-recut instruction for an offer that carries a MEASURED
     hole (issue #396): the instruction names the specific hole with its
-    numbers — "fill the Ø30.0 mm hole at (60.0, 40.0), axis Z, then cut a
+    numbers — "fill the Ø30.0 mm hole at (60, 40), axis Z, then cut a
     Ø38.0 mm hole on the same axis" — so the loop knows exactly which hole
     to fill and what to cut in its place.
 
@@ -251,12 +266,12 @@ def fill_recut_instruction_with_hole(
     cx = float(center[0])
     cy = float(center[1])
     dia_str = (
-        f"Ø{diameter_mm:g} mm "
+        f"Ø{fmt_mm1(diameter_mm)} mm "
         if isinstance(diameter_mm, (int, float)) and not isinstance(diameter_mm, bool) and diameter_mm > 0
         else ""
     )
     size_str = (
-        f"Ø{size:g} mm "
+        f"Ø{fmt_mm1(size)} mm "
         if isinstance(size, (int, float)) and not isinstance(size, bool) and size > 0
         else ""
     )
@@ -339,6 +354,21 @@ def _numeric_vec(values: Any, length: int) -> list[float] | None:
     return out
 
 
+def has_measured_holes(report: Any) -> bool:
+    """True when the stored report carries a MEASURED hole list (issue #437).
+
+    This is the raw list, independent of its mm conversion: a part whose
+    list is known but whose scale is unusable has measured holes that
+    resolve to no location, so the offer must point at them rather than
+    offer a centre-less Yes. :func:`holes_in_mm` is the mm view.
+    """
+    return (
+        isinstance(report, dict)
+        and isinstance(report.get("holes"), list)
+        and len(report["holes"]) > 0
+    )
+
+
 def holes_in_mm(report: dict[str, Any] | None, scale: float | None) -> list[dict[str, Any]]:
     """The stored ``part_report["holes"]`` list converted to MM (issue
     #396).
@@ -372,7 +402,7 @@ def holes_in_mm(report: dict[str, Any] | None, scale: float | None) -> list[dict
         factor = float(scale) if scale is not None else 0.0
     except (TypeError, ValueError):
         factor = 0.0
-    if factor <= 0:
+    if factor <= 0 or not math.isfinite(factor):
         # A missing, non-numeric, or non-positive scale means the holes
         # are in unknown units — returning them unscaled would report
         # file-unit values as mm (a lie). No measured holes instead.
@@ -386,6 +416,7 @@ def holes_in_mm(report: dict[str, Any] | None, scale: float | None) -> list[dict
             isinstance(diameter, (int, float))
             and not isinstance(diameter, bool)
             and diameter > 0
+            and math.isfinite(diameter)
         ):
             continue
         center_mm = _numeric_vec(center, 2)

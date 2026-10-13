@@ -43,8 +43,34 @@ const triesWord = (attempts: number): string => (attempts === 1 ? "try" : "tries
 /** One decimal, always, with the unit attached. Every displayed dimension. */
 export const mm = (value: number): string => `${value.toFixed(1)}${NB}mm`;
 
-/** Diameter, for bores and shafts. */
-export const dia = (value: number): string => `Ø${value.toFixed(1)}${NB}mm`;
+/** One-decimal number, rounded half-up on the decimal the user typed
+ *  (issue #437). The TS twin of `fmt_mm1` in d33d/mm_format.py. Works on
+ *  the shortest round-tripping digits of `String(value)` as a digit string
+ *  (no float arithmetic): 3.35 is stored as 3.3499…, so `toFixed` and
+ *  `Math.round(x * 10)` both give the wrong answer; the digits give "3.4". */
+export const fmtMm1 = (value: number): string => {
+  if (!Number.isFinite(value)) {
+    return Number.isNaN(value) ? "nan" : value < 0 ? "-inf" : "inf";
+  }
+  const sign = value < 0 ? "-" : "";
+  const [mantissa, expPart] = String(Math.abs(value)).split("e");
+  const [intPart, fracPart = ""] = mantissa.split(".");
+  // value = digits / 10^scale, with the exponent folded into the scale.
+  let scale = fracPart.length - (expPart === undefined ? 0 : Number(expPart));
+  let digits = intPart + fracPart;
+  if (scale < 0) {
+    digits += "0".repeat(-scale);
+    scale = 0;
+  }
+  const n = BigInt(digits);
+  const scaleTen = 10n ** BigInt(scale);
+  // Half-up to one decimal: tenths = floor(value * 10 + 1/2).
+  const tenths = (20n * n + scaleTen) / (2n * scaleTen);
+  return `${sign}${tenths / 10n}.${tenths % 10n}`;
+};
+
+/** Diameter, for bores and shafts (one decimal, half-up — issue #437). */
+export const dia = (value: number): string => `Ø${fmtMm1(value)}${NB}mm`;
 
 /** Seconds, for elapsed time. */
 export const secs = (value: number): string => `${Math.round(value)}${NB}s`;
@@ -1172,6 +1198,13 @@ export const fillRecut = {
    *  tests/test_projects.py). */
   noHole: (noun: string): string =>
     `I don't see a ${noun} on the part you brought — want me to drill one?`,
+
+  /** The Yes-with-no-pending-offer reply (issue #437): a bare "yes" on a
+   *  part with measured holes when no offer is live — point at the hole
+   *  first; no loop. The backend's FRILL_POINT_FIRST_REPLY carries the
+   *  same sentence (the parity pin in tests/test_projects.py). */
+  pointFirst:
+    "Point at the hole on the part first, then I'll fill it and cut a new one there.",
 
   /** The point-at fallback (issue #396): the measured-hole selection is
    *  ambiguous (two equally-near candidates, or no qualifier matched) —

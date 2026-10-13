@@ -30,12 +30,11 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, field_validator
 
 from d33d import db as db_mod
-from d33d import fill_recut
+from d33d import fill_recut, fill_recut_history
 from d33d.chat_frames import answered_frames as _answered_frames
 from d33d.chat_loop import run_design_loop as chat_loop_run_design_loop
 from d33d.design_frames import PHOTO_MISSING_NOTICE, SAVED_DESIGN_MISSING_REPLY
 from d33d.design_loop_events import photo_storage_signal
-from d33d.dimension_protocol import _is_clean_affirmation
 from d33d.part_units import USABLE_UNIT_STATUSES
 from d33d.photo_upload import photo_upload_route
 from d33d.project_git import (
@@ -136,9 +135,9 @@ def _is_bare_affirmation_no_offer(
     message: str,
     latest: dict[str, Any] | None = None,
 ) -> bool:
-    """True iff ``message`` is a CLEAN AFFIRMATION (the issue #249
-    heuristic — ``_is_clean_affirmation`` — "yes" yes; "yes but make it
-    2 mm" no) and NO live offer is pending (the guard checks
+    """True iff ``message`` is a BARE AFFIRMATION (the issue #437
+    closed-set ``is_bare_affirmation`` — "yes" yes; "yes, add a chamfer
+    here" no) and NO live offer is pending (the guard checks
     ``versions.get_pending_offer`` itself — issue #349: the guard is
     self-sufficient, the caller no longer has to establish the no-offer
     state upstream). ``latest`` is the caller's existing
@@ -148,11 +147,15 @@ def _is_bare_affirmation_no_offer(
     the fill-recut path nor the offer pre-route creates versions, so it
     is the correct "is this #250 offer live" check.
 
-    The predicate itself is the EXISTING clean-affirmation heuristic,
-    unchanged (operator decision 1, issue #349) — the SAME predicate
-    ``is_pending_offer_acceptance`` uses. The "no live offer" condition
-    is the guard's OWN: a LIVE offer of either shape suppresses the
-    guard (a bare "yes" must never steal an acceptance that the
+    The predicate is the BARE-affirmation closed-set
+    (``fill_recut.is_bare_affirmation``), narrowed from the old
+    clean-affirmation heuristic (issue #437 adversarial review): a yes
+    plus an instruction ("yes, add a chamfer here") is real work and
+    must flow to the design loop, never the no-offer notice; a pure
+    acknowledgement ("yes thanks", "ok cool", "correct") is bare and
+    gets the no-offer reply. The "no live offer" condition is the
+    guard's OWN: a LIVE offer of either shape suppresses the guard (a
+    bare "yes" must never steal an acceptance that the
     offer pre-routes handle); everything else — no pending offer at
     all, a fill-recut offer that was already declined/cleared, or a
     stale #250 param offer whose version is no longer the latest
@@ -174,7 +177,11 @@ def _is_bare_affirmation_no_offer(
         # A live offer of either shape (param or fill-recut) — its own
         # pre-route handles it; the guard never steals that acceptance.
         return False
-    return _is_clean_affirmation(message)
+    # Issue #437 (adversarial review): the narrow BARE-affirmation
+    # predicate, not the clean-affirmation heuristic — a yes plus an
+    # instruction ("yes, add a chamfer here") carries real work and must
+    # flow to the design loop, never the no-offer notice.
+    return fill_recut.is_bare_affirmation(message)
 
 
 async def _confirm_offer_route(app: Any, project_id: int, message: str):
@@ -608,9 +615,10 @@ def create_projects_router() -> APIRouter:
         # ``version_id != latest`` check the offer pre-route applies.
         # A fresh read is correct here: the offer pre-route's read ran
         # first in this turn and no route in between creates versions.
-        if _is_bare_affirmation_no_offer(
-            app, project_id, body.message, app.state.versions.latest_version(project_id)
-        ):
+        # Reused for the guard and the loop's ``own_feature_names`` below
+        # (issue #437 lens round 1: one ``latest_version`` read per request).
+        _latest = app.state.versions.latest_version(project_id)
+        if _is_bare_affirmation_no_offer(app, project_id, body.message, _latest):
             logger.info(
                 "chat for project %s: bare affirmation with no live "
                 "offer — replying with the no-offer notice, no design "
@@ -627,7 +635,15 @@ def create_projects_router() -> APIRouter:
         # the photo capture, and the loop's event-source registration) lives
         # in ``d33d.chat_loop`` — the thin entry point keeps this router file
         # under the 500-line split threshold (AGENTS.md).
-        chat_history = tuple(body.chat_history or ())
+        # Issue #437: the fill-and-recut requests the pre-route answered
+        # (a declined size included) never reach the loop's history.
+        # Issue #437 (lens round 1): the ``_latest`` read above is reused
+        # here (one ``latest_version`` read per request, not two).
+        chat_history = fill_recut_history.loop_chat_history(
+            body.chat_history,
+            own_names=fill_recut.own_feature_names(_latest),
+            part_usable=_part is not None,
+        )
         try:
             return await chat_loop_run_design_loop(
                 app,

@@ -24,6 +24,7 @@ import re
 from typing import Any
 
 from d33d.hole_select import fill_recut_instruction_with_hole
+from d33d.mm_format import fmt_mm1
 from d33d.versions import valid_axis
 
 # Issue #332 (sub-issue 3) — the unsettled-part chat reply (verbatim copy
@@ -88,6 +89,12 @@ FRILL_POINT_AT_TEMPLATE = (
 )
 FRILL_POINT_AT_NO_DIM_TEMPLATE = (
     "Point at the {noun} on the part and I'll fill it and cut a new one there."
+)
+#: The Yes-with-no-pending-offer reply (issue #437): a bare "yes" on a part
+#: with measured holes, when no offer is live — the user must point at the
+#: hole first; no loop runs. Mirrored by ``copy.ts fillRecut.pointFirst``.
+FRILL_POINT_FIRST_REPLY = (
+    "Point at the hole on the part first, then I'll fill it and cut a new one there."
 )
 
 #: The no-match reply (issue #414): the user named a hole by position
@@ -187,12 +194,23 @@ def _fmt_coord(value: float) -> str:
     return g
 
 
+def point_at_sentence(noun: str, size_mm: float | None) -> str:
+    """The point-at reply (issue #437): the user named a hole the offer
+    cannot locate, so the reply asks them to point at it. The diameter is
+    the user's own stated size, one decimal (:func:`fmt_mm1`); absent when
+    the user stated none."""
+    if size_mm is not None:
+        return FRILL_POINT_AT_TEMPLATE.format(noun=noun, dim=fmt_mm1(size_mm))
+    return FRILL_POINT_AT_NO_DIM_TEMPLATE.format(noun=noun)
+
+
 def boundary_sentence(
     noun: str,
     size_mm: float | None,
     move: bool = False,
     move_distance_mm: float | None = None,
     move_direction: str | None = None,
+    measured: bool = False,
 ) -> str:
     """The spec's boundary sentence, templated (issue #332's operator
     decision: a CLOSED set of templates with the user's noun and
@@ -215,9 +233,12 @@ def boundary_sentence(
         return FRILL_MOVE_REPLY.format(noun=noun)
     if size_mm is None:
         return FRILL_NO_DIMENSION_REPLY.format(noun=noun)
-    dim = _fmt_size(size_mm)
     if noun in ("hole", "holes", "bore", "counterbore"):
+        # Issue #437: the one-decimal diameter is for a RESOLVED measured
+        # hole only; the #351 unknown-count offer keeps its copy.
+        dim = fmt_mm1(size_mm) if measured else _fmt_size(size_mm)
         return FRILL_HOLE_DIAMETER_REPLY.format(noun=noun, dim=dim)
+    dim = _fmt_size(size_mm)
     return FRILL_NOUN_DIMENSION_REPLY.format(noun=noun, dim=dim)
 
 def fill_recut_trigger(message: str) -> dict[str, Any] | None:
@@ -249,9 +270,12 @@ def fill_recut_trigger(message: str) -> dict[str, Any] | None:
         return None
     m = _FRILL_RESIZE_RE.search(message)
     if m is not None:
+        size = float(m.group("size"))
         return {
             "noun": m.group("noun").lower(),
-            "size": float(m.group("size")),
+            # Review round 2: a 400-digit typed size parses to inf; it is
+            # no size at all (the one-decimal copy has nothing to format).
+            "size": size if math.isfinite(size) else None,
             "move": False,
             "move_distance": None,
             "direction": None,
@@ -311,6 +335,116 @@ def is_clean_yes(message: str) -> bool:
 
     return _is_clean_affirmation(message)
 
+#: The closed bare-affirmation token set (issue #437, adversarial review):
+#: a point-first reply is warranted ONLY for an acceptance with nothing
+#: else in the turn — every token in this set. A yes plus an instruction
+#: ("yes, add a chamfer here") carries real work and must not be swallowed
+#: by the point-first guard. Punctuation is stripped before tokenising.
+#
+#: The set is the BARE affirmative words plus the acknowledgement words the
+#: old #349 clean-affirmation predicate caught ("yes thanks", "ok cool",
+#: "correct", "that is fine", "sure thing", "got it", … — an acknowledgement
+#: with no instruction content) and the
+#: NEGATION/stop words (no, nope, nah, …) the old predicate disqualified.
+#: The negation tokens are in the set so an acknowledgement like "nope,
+#: thanks" tokenises fully, but ``is_bare_affirmation`` rejects ANY turn
+#: carrying one (a decline is never a bare yes — it is handled by
+#: ``is_clean_no``, never by the point-first or #349 guard). Instruction
+#: verbs and nouns (add, make, hole, chamfer, mm, …) stay OUT, so a
+#: yes-plus-instruction still reaches the design loop.
+_BARE_AFFIRMATION_TOKENS = frozenset(
+    {
+        "yes",
+        "yeah",
+        "yep",
+        "ok",
+        "okay",
+        "sure",
+        "please",
+        "do",
+        "that",
+        "that's",
+        "it",
+        "go",
+        "ahead",
+        # "right" is also a POSITIONAL word ("the right hole"); it is safe
+        # in the set because the two POINT-FIRST guards (the chat seam
+        # ``fill_recut_turn`` and the region-edit seam
+        # ``fill_recut_region_edit``) require the trigger to be None — a
+        # resize/move instruction sets the trigger, so a positional "right"
+        # never reaches the point-first reply. The #349 no-offer guard in
+        # projects.py has no trigger check: it accepts a bare "right" as an
+        # acknowledgement, exactly as the old heuristic did.
+        "right",
+        "accept",
+        # Lens round 1: the acknowledgement tokens that common acknowledgements
+        # need ("yes that is fine", "that is great", "sure thing", "all good",
+        # "got it") — still within the 6-token cap, still no-"?" only.
+        "is",
+        "thing",
+        "got",
+        "all",
+        # Acknowledgement words (the #349 no-offer guard's catch net):
+        "thanks",
+        "thank",
+        "you",
+        "great",
+        "good",
+        "sounds",
+        "perfect",
+        "cool",
+        "fine",
+        "looks",
+        "lgtm",
+        "for",
+        "correct",
+        "confirmed",
+        "correctly",
+        # Negation / stop words — in the set so "nope, thanks" tokenises
+        # fully, but they DISQUALIFY bare-affirmation status (see
+        # _BARE_NEGATION_TOKENS): a decline is never a bare yes.
+        "no",
+        "not",
+        "nope",
+        "nah",
+        "wrong",
+        "incorrect",
+        "never",
+        "reconsider",
+    }
+)
+
+#: The subset of :data:`_BARE_AFFIRMATION_TOKENS` that DISQUALIFIES
+#: bare-affirmation status: a turn carrying any of these is a decline or
+#: a hedge, never a bare yes (the old clean-affirmation predicate rejected
+#: the same tokens). ``is_clean_no`` handles the declines.
+_BARE_NEGATION_TOKENS = frozenset(
+    {"no", "not", "nope", "nah", "wrong", "incorrect", "never", "reconsider"}
+)
+
+
+def is_bare_affirmation(text: str) -> bool:
+    """True if ``text`` is a BARE affirmation — short, no question mark,
+    and every token in :data:`_BARE_AFFIRMATION_TOKENS`. The point-first
+    guards (the chat seam ``fill_recut_turn`` and the region-edit seam
+    ``fill_recut_region_edit``) use this instead of :func:`is_clean_yes`:
+    ``is_clean_yes`` accepts any short turn containing a yes/right/ok token
+    ("yes, add a chamfer here"), which must proceed as a normal turn, not
+    get the point-first reply."""
+    if "?" in text:
+        return False
+    tokens = re.findall(r"[a-z']+", text.lower().replace("-", " "))
+    # 6-token cap: a turn that is entirely acknowledgements beyond ~6 words
+    # is rare — the cap keeps longer turns flowing to the design loop
+    # instead of being swallowed as bare affirmations.
+    if not tokens or len(tokens) > 6:
+        return False
+    if set(tokens) & _BARE_NEGATION_TOKENS:
+        # A decline or hedge ("nope, thanks", "not sure") — never a bare
+        # yes; ``is_clean_no`` owns the declines.
+        return False
+    return all(t in _BARE_AFFIRMATION_TOKENS for t in tokens)
+
 def is_clean_no(message: str) -> bool:
     """The fill-and-recut offer's decline predicate: a short turn with
     a negation token or "leave it", no question mark, no affirmative."""
@@ -365,7 +499,7 @@ def no_match_hole_reply(
             and diameter > 0
         ):
             entries.append(
-                f"Ø{_fmt_size(float(diameter))} mm at "
+                f"Ø{fmt_mm1(float(diameter))} mm at "
                 f"({_fmt_coord(float(center[0]))}, {_fmt_coord(float(center[1]))})"
             )
     if not entries:
@@ -440,15 +574,18 @@ __all__ = [
     "FRILL_NO_MATCH_LEAD",
     "FRILL_POINT_AT_NO_DIM_TEMPLATE",
     "FRILL_POINT_AT_TEMPLATE",
+    "FRILL_POINT_FIRST_REPLY",
     "TRIGGER_MAX_INSTRUCTION_CHARS",
     "UNSETTLED_PART_REPLY",
     "boundary_sentence",
     "fill_and_recut_instruction",
     "fill_recut_trigger",
+    "is_bare_affirmation",
     "is_clean_no",
     "is_clean_yes",
     "no_match_hole_reply",
     "own_feature_names",
+    "point_at_sentence",
 ]
 
 

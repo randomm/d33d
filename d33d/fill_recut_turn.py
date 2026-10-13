@@ -22,19 +22,20 @@ logger = logging.getLogger(__name__)
 
 from d33d.fill_recut import (
     FILL_RECUT_DECLINE_REPLY,
-    FRILL_POINT_AT_NO_DIM_TEMPLATE,
-    FRILL_POINT_AT_TEMPLATE,
-    _fmt_size,
+    FRILL_POINT_FIRST_REPLY,
     boundary_sentence,
     fill_and_recut_instruction,
     fill_recut_trigger,
+    is_bare_affirmation,
     is_clean_no,
     is_clean_yes,
     no_match_hole_reply,
     own_feature_names,
+    point_at_sentence,
 )
 from d33d.hole_select import _NO_MATCH as _NO_MATCH_HOLE
 from d33d.hole_select import (
+    has_measured_holes,
     holes_in_mm,
     report_bounds_mm,
     select_measured_hole,
@@ -307,6 +308,25 @@ def _fill_recut_turn_body(
 
     if pending is None:
         trigger = fill_recut_trigger(message)
+        # Issue #437: a BARE affirmation with NO live offer, on a part with
+        # measured holes, is the user answering a point-at ask — there is
+        # no offer to accept and no hole to fill yet. Point-first reply,
+        # no loop, no offer (never a centre-less instruction). A yes plus
+        # an instruction ("yes, add a chamfer here") is NOT a bare
+        # affirmation (``is_bare_affirmation``), and a resize request is
+        # never a bare yes ("top right" contains "right"), so the trigger
+        # wins either way.
+        if (
+            trigger is None
+            and is_bare_affirmation(message)
+            and _has_measured_holes(part)
+        ):
+            return {
+                "kind": "answer",
+                "answer": FRILL_POINT_FIRST_REPLY,
+                "run_loop": False,
+                "outcome": "point_first",
+            }
         if trigger is not None:
             own = own_feature_names(versions.latest_version(project_id))
             if trigger["noun"] not in own:
@@ -335,13 +355,6 @@ def _fill_recut_turn_body(
                     "noun": trigger["noun"],
                     "size": trigger["size"],
                 }
-                sentence = boundary_sentence(
-                    trigger["noun"],
-                    trigger["size"],
-                    move=trigger["move"],
-                    move_distance_mm=trigger.get("move_distance"),
-                    move_direction=trigger.get("direction"),
-                )
                 point_at_fallback = False
                 no_match = False
 
@@ -420,17 +433,25 @@ def _fill_recut_turn_body(
                             offer_dict["center"] = selected.get("center")
                             offer_dict["axis"] = selected.get("axis")
                             offer_dict["diameter_mm"] = selected.get("diameter_mm")
+                    elif has_measured_holes(report):
+                        # Issue #437: the part HAS a measured hole list but
+                        # none converts to mm (no usable scale) — there is no
+                        # location to offer, so point at the hole (never a
+                        # centre-less Yes).
+                        point_at_fallback = True
 
                 if point_at_fallback:
-                    dim_str = _fmt_size(trigger["size"])
-                    if dim_str:
-                        sentence = FRILL_POINT_AT_TEMPLATE.format(
-                            noun=trigger["noun"], dim=dim_str
-                        )
-                    else:
-                        sentence = FRILL_POINT_AT_NO_DIM_TEMPLATE.format(
-                            noun=trigger["noun"]
-                        )
+                    # Issue #437: the point-at reply stores NO offer (the
+                    # done frame carries no Yes); the next turn is a fresh
+                    # evaluation. Point-at is only reached for HOLE_NOUNS.
+                    sentence = point_at_sentence(trigger["noun"], trigger["size"])
+                    versions.set_pending_offer(project_id, None)
+                    return {
+                        "kind": "answer",
+                        "answer": sentence,
+                        "run_loop": False,
+                        "outcome": "point_at",
+                    }
 
                 if no_match:
                     # Issue #414: the user named a hole by position but no
@@ -447,6 +468,16 @@ def _fill_recut_turn_body(
                         "outcome": "no_match",
                     }
 
+                # Issue #437: the one-decimal copy only for a resolved
+                # measured hole (``center`` is set only on that path).
+                sentence = boundary_sentence(
+                    trigger["noun"],
+                    trigger["size"],
+                    move=trigger["move"],
+                    move_distance_mm=trigger.get("move_distance"),
+                    move_direction=trigger.get("direction"),
+                    measured="center" in offer_dict,
+                )
                 versions.set_pending_offer(project_id, offer_dict)
                 return {
                     "kind": "answer",
@@ -455,6 +486,12 @@ def _fill_recut_turn_body(
                     "outcome": "fresh_offer",
                 }
     return None
+
+
+def _has_measured_holes(part: dict[str, Any] | None) -> bool:
+    """Whether the part carries a measured hole list (issue #437), whether
+    or not its holes convert to mm."""
+    return has_measured_holes(part.get("report") if part else None)
 
 
 def _report_is_legacy(report: dict[str, Any] | None) -> bool:
@@ -571,7 +608,7 @@ def fill_recut_turn(
     calls the shared body.
 
     Returns ``{"kind": "answer", "answer": <sentence>, "run_loop": bool,
-    "outcome": "fresh_offer" | "decline" | "accept" | "no_feature" | "no_match"}``
+    "outcome": "fresh_offer" | "decline" | "accept" | "no_feature" | "no_match" | "point_at" | "point_first"}``
     when the turn is handled here, else ``None`` (fall-through to the
     existing routes).
     """

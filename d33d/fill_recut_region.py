@@ -29,13 +29,18 @@ from fastapi.responses import JSONResponse
 from d33d.chat_frames import answered_frames, register_event_source
 from d33d.fill_recut import (
     FILL_RECUT_DECLINE_REPLY,
+    FRILL_POINT_FIRST_REPLY,
     boundary_sentence,
     fill_and_recut_instruction,
     fill_recut_trigger,
+    is_bare_affirmation,
     is_clean_no,
     is_clean_yes,
     own_feature_names,
+    point_at_sentence,
 )
+from d33d.hole_position import nearest_hole_to_point
+from d33d.hole_select import has_measured_holes, holes_in_mm
 from d33d.part_holes import HOLE_NOUNS, no_hole_reply, part_has_hole_evidence
 from d33d.part_units import USABLE_UNIT_STATUSES
 
@@ -109,13 +114,40 @@ class _FillNoFeature(TypedDict):
     outcome: Literal["no_feature"]
 
 
+class _FillPointAt(TypedDict):
+    kind: Literal["answer"]
+    answer: str
+    run_loop: bool
+    outcome: Literal["point_at"]
+
+
+class _FillPointFirst(TypedDict):
+    kind: Literal["answer"]
+    answer: str
+    run_loop: bool
+    outcome: Literal["point_first"]
+
+
 #: The decision union: an ``accept`` member, or any of the four
 #: answer-frame members (the caller dispatches on ``outcome``; only
 #: ``fresh_offer`` surfaces the SPA's offer buttons — the decline /
 #: no-normal / no-feature replies are plain answers, never an offer).
 FillResult = (
-    _FillAccept | _FillDecline | _FillFreshOffer | _FillNoNormal | _FillNoFeature
+    _FillAccept
+    | _FillDecline
+    | _FillFreshOffer
+    | _FillNoNormal
+    | _FillNoFeature
+    | _FillPointAt
+    | _FillPointFirst
 )
+
+
+def _has_measured_holes(part: dict[str, Any] | None) -> bool:
+    """Whether the part carries a measured hole list (issue #437), whether
+    or not its holes convert to mm. The region-edit twin of the chat seam's
+    guard of the same name (``d33d.fill_recut_turn._has_measured_holes``)."""
+    return has_measured_holes(part.get("report") if part else None)
 
 
 def fill_recut_region_edit(
@@ -125,6 +157,7 @@ def fill_recut_region_edit(
     face_normal: tuple[float, float, float] | None = None,
     row: dict[str, Any] | None = None,
     part: dict[str, Any] | None = None,
+    hit_point_mm: tuple[float, float, float] | None = None,
 ) -> FillResult | None:
     """The fill-and-recut pre-route DECISION for the REGION-EDIT seam
     (issue #338's operator decisions 5–6).
@@ -144,7 +177,7 @@ def fill_recut_region_edit(
     (a route that would have 404'd never calls this).
 
     Returns ``{"kind": "answer", "answer": <sentence>, "run_loop":
-    bool, "outcome": "accept" | "decline" | "fresh_offer" | "no_normal",
+    bool, "outcome": "accept" | "decline" | "fresh_offer" | "no_normal" | "no_feature" | "point_at" | "point_first",
     ...}`` when the pre-route handles the turn (the caller
     registers the event source and, when ``run_loop`` is true, runs the
     design loop with the ``instruction`` field prefixed to the request
@@ -187,6 +220,34 @@ def fill_recut_region_edit(
         return _handle_live_offer(versions, project_id, instruction, pending)
 
     trigger = fill_recut_trigger(instruction)
+    # Issue #437: a bare "yes" with NO live offer, on a part with measured
+    # holes, is the user answering a point-at ask — there is no offer to
+    # accept and no hole to fill yet. This is the region-edit twin of the
+    # chat seam's point-first guard (d33d.fill_recut_turn): the SPA's
+    # [Yes, do that] button posts to this seam, so a yes after a decline or
+    # a point-at must NOT fall through to the design loop with a
+    # centre-less "...: yes" request. Point-first reply, no loop, no offer.
+    # The measured-hole gate keeps the operator's #351 behaviour for
+    # unknown-count parts (a bare yes on those falls through as before).
+    # Mirroring the chat seam's predicate, the trigger is evaluated FIRST
+    # and wins: a resize like "make the right hole 38 mm" contains the
+    # affirmation word "right", but it is a fresh trigger, never a bare
+    # yes, so it must reach the offer, not the point-first reply. The
+    # guard is ``is_bare_affirmation`` (not ``is_clean_yes``): a yes plus
+    # an instruction is real work, not an acceptance.
+    if (
+        trigger is None
+        and is_bare_affirmation(instruction)
+        and _has_measured_holes(part)
+    ):
+        versions.set_pending_offer(project_id, None)
+        return {
+            "kind": "answer",
+            "answer": FRILL_POINT_FIRST_REPLY,
+            "run_loop": False,
+            "outcome": "point_first",
+        }
+
     if trigger is None or trigger["noun"] in own_feature_names(
         versions.latest_version(project_id)
     ):
@@ -210,7 +271,25 @@ def fill_recut_region_edit(
             "run_loop": False,
             "outcome": "no_feature",
         }
-    return _handle_fresh_trigger(versions, project_id, trigger, face_normal)
+    # Issue #437: a viewer pick of a hole offers Yes with the NEAREST
+    # measured hole to the pick point (XY). A part WITH measured holes whose
+    # pick resolves to none → point-at (no Yes without a location). A part
+    # with no measured holes keeps the #351 offer (nothing to point at).
+    hole = None
+    needs_hole = False
+    if trigger["noun"] in HOLE_NOUNS and face_normal is not None:
+        report = part.get("report") if part else None
+        holes = holes_in_mm(report, part.get("scale")) if report else []
+        needs_hole = has_measured_holes(report)
+        hole = nearest_hole_to_point(holes, hit_point_mm)
+    return _handle_fresh_trigger(
+        versions,
+        project_id,
+        trigger,
+        face_normal,
+        hole=hole,
+        needs_hole=needs_hole,
+    )
 
 
 def _handle_live_offer(
@@ -256,13 +335,21 @@ def _handle_fresh_trigger(
     project_id: int,
     trigger: dict[str, Any],
     face_normal: tuple[float, float, float] | None,
+    *,
+    hole: dict[str, Any] | None = None,
+    needs_hole: bool = False,
 ) -> FillResult:
     """A fresh fill-and-recut trigger: with a face normal the boundary
     sentence is the answer and the offer is recorded server-side (the
     offer carries the pick's normal as its ``axis`` — operator decision
     5); without one the axis-dependent offer is impossible — the
     no-normal degradation copy (operator decision 6), no offer, no
-    loop."""
+    loop.
+
+    Issue #437: a hole noun (``needs_hole``) is offered ONLY with a
+    resolved measured ``hole`` — its centre, diameter and axis go into the
+    offer (the hole's own axis, not the wall's normal). No resolved hole →
+    the point-at reply, no offer, no loop."""
     if face_normal is None:
         return {
             "kind": "answer",
@@ -270,22 +357,33 @@ def _handle_fresh_trigger(
             "run_loop": False,
             "outcome": "no_normal",
         }
+    if needs_hole and hole is None:
+        versions.set_pending_offer(project_id, None)
+        return {
+            "kind": "answer",
+            "answer": point_at_sentence(trigger["noun"], trigger["size"]),
+            "run_loop": False,
+            "outcome": "point_at",
+        }
     axis = tuple(float(v) for v in face_normal)
-    versions.set_pending_offer(
-        project_id,
-        {
-            "kind": "fill_recut",
-            "noun": trigger["noun"],
-            "size": trigger["size"],
-            "axis": list(axis),
-        },
-    )
+    offer: dict[str, Any] = {
+        "kind": "fill_recut",
+        "noun": trigger["noun"],
+        "size": trigger["size"],
+        "axis": list(axis),
+    }
+    if hole is not None:
+        offer["center"] = hole.get("center")
+        offer["axis"] = hole.get("axis")
+        offer["diameter_mm"] = hole.get("diameter_mm")
+    versions.set_pending_offer(project_id, offer)
     sentence = boundary_sentence(
         trigger["noun"],
         trigger["size"],
         move=trigger["move"],
         move_distance_mm=trigger.get("move_distance"),
         move_direction=trigger.get("direction"),
+        measured=hole is not None,
     )
     return {"kind": "answer", "answer": sentence, "run_loop": False, "outcome": "fresh_offer"}
 
@@ -301,6 +399,7 @@ def region_edit_preroute(
     start_loop: Callable[..., Any],
     loop_kwargs: dict[str, Any],
     inflight: set[int],
+    hit_point_mm: tuple[float, float, float] | None = None,
 ) -> JSONResponse | None:
     """The region-edit route's fill-and-recut pre-route, end to end
     (issue #338, operator decision 5).
@@ -340,6 +439,7 @@ def region_edit_preroute(
             face_normal=face_normal,
             row=row,
             part=part,
+            hit_point_mm=hit_point_mm,
         )
     except Exception:
         # Pre-route failure: the event source is NOT registered, so the

@@ -2936,10 +2936,10 @@ def test_offer_ambiguous_holes_point_at_fallback(app_with_projects) -> None:
     # The point-at fallback copy.
     msg = done[0].get("message", "")
     assert "Point at the" in msg, f"expected point-at fallback, got: {msg}"
-    # The offer is still stored (with no center/axis/diameter).
-    assert offer is not None
-    assert offer["kind"] == "fill_recut"
-    assert "center" not in offer, f"ambiguous offer must not carry center: {offer}"
+    # Issue #437: the point-at reply stores NO offer and carries no Yes
+    # button (the done frame has no fill_recut_offer flag).
+    assert offer is None, f"point-at must not store an offer: {offer}"
+    assert not done[0].get("fill_recut_offer"), done[0]
 
 
 def test_offer_center_hole_no_match_lists_measured_holes(app_with_projects) -> None:
@@ -2989,9 +2989,9 @@ def test_offer_center_hole_no_match_lists_measured_holes(app_with_projects) -> N
     assert "I don't see a hole" in msg, f"expected no-match reply, got: {msg}"
     assert "at that spot" in msg, f"expected no-match lead, got: {msg}"
     # Each measured hole is listed with its Ø and centre (mm).
-    assert "Ø4 mm at (8, 72)" in msg, f"missing hole 1 in list: {msg}"
-    assert "Ø4 mm at (112, 8)" in msg, f"missing hole 2 in list: {msg}"
-    assert "Ø4 mm at (112, 72)" in msg, f"missing hole 3 in list: {msg}"
+    assert "Ø4.0 mm at (8, 72)" in msg, f"missing hole 1 in list: {msg}"
+    assert "Ø4.0 mm at (112, 8)" in msg, f"missing hole 2 in list: {msg}"
+    assert "Ø4.0 mm at (112, 72)" in msg, f"missing hole 3 in list: {msg}"
     # The point-at fallback must NOT fire (it's for ambiguous picks, not
     # for no-match).
     assert "Point at the" not in msg, f"no-match must not use point-at copy: {msg}"
