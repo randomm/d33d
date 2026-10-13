@@ -3073,6 +3073,98 @@ class TestStatedFeatureDesignState:
         assert by_name["hole_diameter"]["provenance"] == "disagrees"
 
 
+class TestStatedFeatureToleranceBoundary:
+    """Issue #433 (adversarial fix): the tolerance is exact. A diff of exactly
+    0.05 mm is NOT a mismatch even though float subtraction lands just above
+    it (1.05 - 1.0 == 0.050000000000000044). Only a diff strictly above 0.05
+    flags."""
+
+    def _row(self, made: float, stated: float) -> dict:
+        from d33d.statement_extraction import StatedFeature
+
+        entries = state_block_for_version(
+            {"hole_diameter": made},
+            None,
+            None,
+            None,
+            None,
+            [StatedFeature(noun="hole", role=None, value=stated)],
+        )
+        return next(e for e in entries if e["name"] == "hole_diameter")
+
+    def test_stated_1_0_made_1_05_is_not_a_mismatch(self) -> None:
+        row = self._row(made=1.05, stated=1.0)
+        assert row["provenance"] == "stated"
+        assert "stated_value" not in row
+
+    def test_stated_1_0_made_1_06_is_a_mismatch(self) -> None:
+        row = self._row(made=1.06, stated=1.0)
+        assert row["provenance"] == "disagrees"
+        assert row["stated_value"] == 1.0
+
+    def test_stated_5_0_made_5_05_is_not_a_mismatch(self) -> None:
+        row = self._row(made=5.05, stated=5.0)
+        assert row["provenance"] == "stated"
+
+    def test_stated_5_05_made_5_10_is_not_a_mismatch(self) -> None:
+        row = self._row(made=5.10, stated=5.05)
+        assert row["provenance"] == "stated"
+
+
+class TestStatedFeatureSeamOrder:
+    """Issue #433 (adversarial fix): a row the feature match already set to
+    ``stated`` or ``disagrees`` is never re-written by the later axis
+    promotion seam (``_maybe_promote_params`` acts only on ``assumed``)."""
+
+    def test_feature_disagrees_row_not_overwritten_by_axis_promotion(self) -> None:
+        from d33d.statement_extraction import StatedFeature
+
+        entries = state_block_for_version(
+            {"hole_diameter": 8.0},
+            None,
+            {"W": 8.0},  # confirmed axis W=8 would promote an assumed row
+            {"hole_diameter": {"label": "Hole diameter", "unit": "mm", "axis": "W"}},
+            None,
+            [StatedFeature(noun="hole", role=None, value=5.0)],
+        )
+        row = next(e for e in entries if e["name"] == "hole_diameter")
+        assert row["provenance"] == "disagrees"
+        assert row["stated_value"] == 5.0
+        assert row["disagrees_source"] == "user"
+
+    def test_feature_disagrees_row_not_overwritten_by_confirmation(self) -> None:
+        """Rule (b) confirmation (confirmed hole_diameter=8) must not turn the
+        feature-disagreeing row (stated 5 / made 8) into ``stated``."""
+        from d33d.statement_extraction import StatedFeature
+
+        entries = state_block_for_version(
+            {"hole_diameter": 8.0},
+            None,
+            None,
+            None,
+            {"hole_diameter": 8.0},
+            [StatedFeature(noun="hole", role=None, value=5.0)],
+        )
+        row = next(e for e in entries if e["name"] == "hole_diameter")
+        assert row["provenance"] == "disagrees"
+        assert row["stated_value"] == 5.0
+
+    def test_feature_stated_row_not_overwritten_by_confirmation(self) -> None:
+        from d33d.statement_extraction import StatedFeature
+
+        entries = state_block_for_version(
+            {"hole_diameter": 5.0},
+            None,
+            None,
+            None,
+            {"hole_diameter": 5.0},
+            [StatedFeature(noun="hole", role=None, value=5.0)],
+        )
+        row = next(e for e in entries if e["name"] == "hole_diameter")
+        assert row["provenance"] == "stated"
+        assert "stated_value" not in row
+
+
 class TestStatedFeatureRoleMatching:
     """Issue #433 (round 2): the role gate. A role word binds ONLY to the
     param carrying that dimension; a role-less feature binds only to a

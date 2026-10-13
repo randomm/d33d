@@ -1257,7 +1257,9 @@ def _apply_stated_features(
         feature = matched[name]
         stated_value = float(feature.value)
         entry["stated_feature"] = feature.noun
-        if abs(float(value) - stated_value) <= FEATURE_MISMATCH_TOLERANCE_MM:
+        # Round the diff: float subtraction lands just above an exact 0.05
+        # (1.05 - 1.0 == 0.050000000000000044); the tolerance is exact.
+        if round(abs(float(value) - stated_value), 6) <= FEATURE_MISMATCH_TOLERANCE_MM:
             entry["provenance"] = "stated"
         else:
             entry["provenance"] = "disagrees"
