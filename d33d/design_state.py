@@ -537,14 +537,30 @@ FEATURE_MISMATCH_TOLERANCE_MM: float = 0.05
 #: word) matches a noun-only param (``hole`` alone, or ``hole_diameter``
 #: via the noun) — the noun is the binding, the role refines when
 #: present.
+_SIZE_TOKENS: frozenset[str] = frozenset({"diameter", "dia", "d", "size"})
+
+#: Every role word the extraction can emit (``statement_extraction``) maps to
+#: the param token(s) that carry that dimension. An UNKNOWN role maps to no
+#: entry and the matcher skips the feature (never a guessed binding).
 _FEATURE_ROLE_TOKENS: dict[str, frozenset[str]] = {
-    "diameter": frozenset({"diameter", "dia", "d", "size"}),
-    "dia": frozenset({"diameter", "dia", "d", "size"}),
+    "diameter": _SIZE_TOKENS,
+    "dia": _SIZE_TOKENS,
+    "d": _SIZE_TOKENS,
+    "size": _SIZE_TOKENS,
     "depth": frozenset({"depth"}),
+    "deep": frozenset({"depth"}),
     "width": frozenset({"width"}),
-    "d": frozenset({"diameter", "dia", "d", "size"}),
-    "size": frozenset({"diameter", "dia", "d", "size"}),
+    "wide": frozenset({"width"}),
+    "length": frozenset({"length"}),
+    "long": frozenset({"length"}),
+    "height": frozenset({"height"}),
+    "tall": frozenset({"height"}),
 }
+
+#: Dimension tokens that name a NON-size role: a role-less feature size never
+#: binds a param carrying one of these (``a 5 mm hole`` must not flag
+#: ``hole_depth``).
+_NON_SIZE_DIM_TOKENS: frozenset[str] = frozenset({"depth", "width", "length", "height"})
 
 
 def _param_tokens(name: str, label: str | None) -> set[str]:
@@ -564,7 +580,7 @@ def _match_stated_features(
     entries: list[dict[str, Any]],
     param_meta: dict[str, Any] | None,
     stated_features: Any,
-) -> dict[str, float]:
+) -> dict[str, Any]:
     """The param-keyed stated feature values (issue #433).
 
     Matches each stated feature to the param(s) its noun + role name via
@@ -583,7 +599,8 @@ def _match_stated_features(
     if not stated_features:
         return {}
     meta = param_meta if isinstance(param_meta, dict) else {}
-    out: dict[str, float] = {}
+    out: dict[str, Any] = {}
+    ambiguous: set[str] = set()
     for f in stated_features:
         value = getattr(f, "value", None)
         if not isinstance(value, (int, float)) or isinstance(value, bool):
@@ -592,6 +609,8 @@ def _match_stated_features(
             continue
         noun = getattr(f, "noun", "")
         role = getattr(f, "role", None)
+        if role is not None and role not in _FEATURE_ROLE_TOKENS:
+            continue  # an unknown role binds nothing (never a guess)
         role_tokens = _FEATURE_ROLE_TOKENS.get(role) if role else None
         for entry in entries:
             if entry.get("kind") != "param":
@@ -609,9 +628,21 @@ def _match_stated_features(
             tokens = _param_tokens(name, label if isinstance(label, str) else None)
             if noun not in tokens:
                 continue  # the noun guard: no feature noun → no match
-            if role_tokens is not None and not (tokens & role_tokens):
+            if role is None:
+                # Role-less: a size param (diameter/size token) or the bare
+                # noun param — never a depth/width/length/height param.
+                if tokens & _NON_SIZE_DIM_TOKENS:
+                    continue
+                if not (tokens & _SIZE_TOKENS or tokens <= {noun}):
+                    continue
+            elif not (tokens & role_tokens):
                 continue  # the role must also be present
-            out[name] = float(value)
+            prior = out.get(name)
+            if prior is not None and prior.value != f.value:
+                ambiguous.add(name)  # two stated values, one param: no call
+            out.setdefault(name, f)
+    for name in ambiguous:
+        out.pop(name, None)
     return out
 
 #: The literal parameter names that name a W/D/H dimension WITHOUT a
@@ -1223,13 +1254,45 @@ def _apply_stated_features(
         value = entry.get("value")
         if not _is_number(value) or value <= 0:
             continue
-        stated_value = matched[name]
+        feature = matched[name]
+        stated_value = float(feature.value)
+        entry["stated_feature"] = feature.noun
         if abs(float(value) - stated_value) <= FEATURE_MISMATCH_TOLERANCE_MM:
             entry["provenance"] = "stated"
         else:
             entry["provenance"] = "disagrees"
             entry["stated_value"] = stated_value
             entry["disagrees_source"] = "user"
+
+
+def feature_mismatches_from_block(
+    entries: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """The stated-vs-made feature mismatches the design-state block carries
+    (issue #433): one record per ``disagrees`` row whose stated value came
+    from the user's feature statement (``stated_feature`` + ``stated_value``).
+    The reply's done-frame list is built from THIS function, so the Brief row
+    and the reply are one fact by construction (never a second comparison).
+    """
+    out: list[dict[str, Any]] = []
+    for e in entries:
+        if e.get("kind") != "param" or e.get("provenance") != "disagrees":
+            continue
+        if e.get("disagrees_source") != "user" or "stated_feature" not in e:
+            continue
+        made = e.get("value")
+        if not _is_number(made):
+            continue
+        label = e.get("label")
+        out.append(
+            {
+                "noun": e["stated_feature"],
+                "stated_mm": float(e["stated_value"]),
+                "made_mm": float(made),
+                "label": label if isinstance(label, str) and label else e["name"],
+            }
+        )
+    return out
 
 
 #: The disagreement-SEVERITY threshold (issue #274): a model-source

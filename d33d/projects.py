@@ -240,12 +240,15 @@ async def _confirm_offer_route(app: Any, project_id: int, message: str):
     # value, so the ack and its ``confirm_ack_*`` fields ride the same
     # single source (the ``meta_unit`` / ``param_axis`` graft is applied
     # inside ``offer_entry`` as before — the value spelling is unchanged).
+    from d33d.stated_carry import carried_stated_features
+
     block = state_block_for_version(
         dict(latest["params"]),
         latest["bbox"],
         latest["stated_dims"],
         latest["param_meta"],
         latest["confirmed_params"],
+        carried_stated_features(versions.get_project(project_id)),
     )
     entry = offer_entry(
         dict(latest["params"]), latest["param_meta"], name, block_entries=block

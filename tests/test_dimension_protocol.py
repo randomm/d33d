@@ -2423,3 +2423,54 @@ def test_require_dimensions_confirmed_unsetled_part_stays_open():
         part_bbox_mm=None,
     )
     assert c.confirmed is False
+
+
+class TestStatedFeaturePhrasings:
+    """Issue #433 (round 2): which phrasings become a StatedFeature, and the
+    carry merge keeps every value of a restated key (no silent loss)."""
+
+    def test_phrasings_extracted_and_negatives_empty(self) -> None:
+        """Positives carry the noun+role+value; negatives (no feature noun,
+        or no mm number) yield nothing and never an axis."""
+        cases = {
+            "a 6 mm hole": [StatedFeature(noun="hole", role=None, value=6.0)],
+            "holes 4 mm deep": [StatedFeature(noun="hole", role="deep", value=4.0)],
+            "add a 10 mm deep hole": [StatedFeature(noun="hole", role="deep", value=10.0)],
+            "6 mm slot": [StatedFeature(noun="slot", role=None, value=6.0)],
+            "a boss 10 mm tall": [StatedFeature(noun="boss", role="tall", value=10.0)],
+            "M3 screw": [],
+            "move it 5 mm left": [],
+            "make it 5 mm taller": [],
+        }
+        for text, expected in cases.items():
+            assert stated_features_from_messages(text) == expected, text
+            assert stated_axes_from_message(text, []) == {}, text
+
+    def test_plural_noun_canonicalised_and_superseded(self) -> None:
+        """'holes 4 mm' is keyed as ``hole``: a later 'the hole is 6 mm'
+        restates the SAME feature and supersedes it (no duplicate key)."""
+        feats = stated_features_from_messages(["holes 4 mm", "the hole is 6 mm"])
+        assert feats == [StatedFeature(noun="hole", role=None, value=6.0)]
+
+    def test_carry_keeps_every_value_of_one_message(self) -> None:
+        """'a 5 mm hole and a 8 mm hole' — both values survive the carry
+        merge (the fresh set replaces a key as a group, never collapsed)."""
+        from d33d.stated_carry import effective_stated_features
+
+        out = effective_stated_features([], "a 5 mm hole and a 8 mm hole")
+        assert {f.value for f in out} == {5.0, 8.0}
+
+    def test_carry_keeps_other_feature_and_supersedes_same_key(self) -> None:
+        """A carried groove survives a new hole; a carried hole is superseded
+        by a restated hole (same key), and a carried groove is not."""
+        from d33d.stated_carry import effective_stated_features
+
+        carried = [
+            StatedFeature(noun="groove", role=None, value=10.0),
+            StatedFeature(noun="hole", role=None, value=5.0),
+        ]
+        out = effective_stated_features(carried, "the hole is 6 mm")
+        keys = {(f.noun, f.role, f.value) for f in out}
+        assert ("groove", None, 10.0) in keys
+        assert ("hole", None, 6.0) in keys
+        assert ("hole", None, 5.0) not in keys

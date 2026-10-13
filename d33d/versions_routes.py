@@ -467,7 +467,19 @@ def create_versions_router() -> APIRouter:
         # flow's evidence — a confirmed param renders ``stated`` (rule
         # (b)) in the SAME block the live prompt renders.
         confirmed = latest["confirmed_params"] if latest is not None else None
-        entries = state_block_for_version(params, measurement, stated, param_meta, confirmed)
+        # Issue #433: the carried stated FEATURE sizes ride the same block
+        # the live prompt and the reply read, so the Brief's feature rows
+        # (stated / disagrees) are the same comparison.
+        from d33d.stated_carry import carried_stated_features
+
+        entries = state_block_for_version(
+            params,
+            measurement,
+            stated,
+            param_meta,
+            confirmed,
+            carried_stated_features(project_row),
+        )
         # The part facts (issue #325): the project's imported part (NULL
         # columns → ``None`` — a project with no part renders ``null``,
         # never a fabricated empty object; the SPA uses the absence to

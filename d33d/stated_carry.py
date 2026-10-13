@@ -120,12 +120,12 @@ def effective_stated_features(
         return list(carried)
     if not fresh:
         return list(carried)
-    by_key: dict[tuple[str, str | None], StatedFeature] = {
-        (f.noun, f.role): f for f in carried
-    }
-    for f in fresh:
-        by_key[(f.noun, f.role)] = f  # supersede (or add)
-    return list(by_key.values())
+    # A restated key (noun, role) replaces its carried group AS A WHOLE, so
+    # every value the message stated for that key survives ("a 5 mm hole
+    # and a 8 mm hole" keeps both) — a per-key dict would collapse them.
+    fresh_keys = {(f.noun, f.role) for f in fresh}
+    kept = [f for f in carried if (f.noun, f.role) not in fresh_keys]
+    return kept + list(dict.fromkeys(fresh))
 
 
 def latest_stated_dims_dict(versions: Any, project_id: int) -> dict[str, float] | None:

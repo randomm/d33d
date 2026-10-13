@@ -96,6 +96,7 @@ void [PassCard, Composer];
 // (issue #117 adversarial fix) is gone: every one of those actions is
 // reachable from the sheet.
 import { HistorySheet } from "./components/versions/HistorySheet";
+import { featureMismatchSentences } from "./featureMismatch";
 
 // Overlay geometry (issue #119). The overlays are siblings above the
 // canvas, each inset OVERLAY_INSET_PX from the stage edge. z-index is a
@@ -1475,27 +1476,16 @@ export default function App({ client }: AppProps) {
                   },
                 ]);
               }
-              // Issue #433: the done frame's additive `feature_mismatch`
-              // field (the server built it from the design-state block's
-              // stated-vs-made comparison — one sentence per mismatching
-              // param, the conversational counterpart of the Brief's
-              // `stated 5 / made 8` ochre row) rides the same wiring as the
-              // offer: a plain assistant message AFTER the pass card. The
-              // Brief row is independent (it reads the design-state block
-              // via its existing `disagrees` copy); this is the reply's own
-              // sentence, rendered verbatim (the server is the writer of the
-              // wire string — the deck mirror is `confirmOffer.featureMismatch`).
-              const featureMismatch =
-                typeof data.feature_mismatch === "string" ? data.feature_mismatch : "";
-              if (featureMismatch.length > 0) {
+              // Issue #433: the done frame's additive `feature_mismatches`
+              // list (data only — the server built each record from the
+              // design-state block the Brief renders). The reply sentence is
+              // written here from copy.ts, one assistant message per mismatch,
+              // after the pass card. The Brief row is independent.
+              for (const sentence of featureMismatchSentences(data.feature_mismatches)) {
                 const mismatchId = nextMsgId("feature-mismatch");
                 setMessages((prev) => [
                   ...prev,
-                  {
-                    id: mismatchId,
-                    role: "assistant",
-                    content: featureMismatch,
-                  },
+                  { id: mismatchId, role: "assistant", content: sentence },
                 ]);
               }
             },

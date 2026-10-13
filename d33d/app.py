@@ -1967,6 +1967,7 @@ def _build_production_design_loop():
             state_meta=kwargs.get("state_meta"),
             state_confirmed=kwargs.get("state_confirmed"),
             design_source=kwargs.get("design_source"),
+            stated_features=kwargs.get("stated_features"),
             part_scale=kwargs.get("part_scale"),
             part_bbox_mm=kwargs.get("part_bbox_mm"),
             through_baseline_genus=kwargs.get("through_baseline_genus"),

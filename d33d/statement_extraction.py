@@ -22,6 +22,7 @@ from functools import cache
 from typing import Any
 
 from d33d.axis_lexicon import (
+    _FEATURE_NOUNS,
     ABSOLUTE_WORDS,
     DIMENSION_AXES,
     FEATURE_NOUN_RE,
@@ -54,8 +55,23 @@ __all__ = [
 #: falls through (a stated value the param matcher cannot attribute is
 #: kept in state, never flagged).
 _FEATURE_ROLE_WORDS: frozenset[str] = frozenset(
-    {"diameter", "dia", "wide", "deep", "long", "width", "depth"}
+    {
+        "diameter", "dia", "wide", "deep", "long", "width", "depth",
+        "tall", "height", "length",
+    }
 )
+
+
+def _canonical_feature_noun(noun: str) -> str:
+    """The singular feature noun (issue #433): ``holes`` / ``recesses`` /
+    ``notches`` key as ``hole`` / ``recess`` / ``notch``, so a plural clause
+    and a singular restatement are the SAME feature (the matcher's noun guard
+    and the supersession key both read this form)."""
+    if noun.endswith("s"):
+        for stem in (noun[:-1], noun[:-2]):
+            if stem in _FEATURE_NOUNS:
+                return stem
+    return noun
 
 _FEATURE_ROLE_RE = re.compile(
     r"(?<!\w)(?:"
@@ -377,7 +393,7 @@ def stated_features_from_messages(
                 continue  # a feature-verb sub-clause without a noun of its
                 # own: the noun (and its value) are recorded from the
                 # clause that names the feature.
-            noun = m.group(0).lower()
+            noun = _canonical_feature_noun(m.group(0).lower())
             rm = _FEATURE_ROLE_RE.search(clause)
             role = rm.group(0).lower() if rm else None
             for nm in _mm_number_occurrences(clause):

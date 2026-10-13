@@ -1386,6 +1386,7 @@ def _design_state_lines(
     state_stated: dict[str, float] | None = None,
     state_meta: dict[str, Any] | None = None,
     state_confirmed: dict[str, Any] | None = None,
+    stated_features: Any = None,
 ) -> list[str]:
     """The design-state block's prompt lines (issue #120).
 
@@ -1432,7 +1433,12 @@ def _design_state_lines(
 
     block = build_design_state_block(
         state_block_for_version(
-            state_params, state_bbox, state_stated, state_meta, state_confirmed
+            state_params,
+            state_bbox,
+            state_stated,
+            state_meta,
+            state_confirmed,
+            stated_features,
         )
     )
     # ``format_design_state_block`` renders the header + the entries. The
@@ -1572,6 +1578,7 @@ def _design_messages(
             state_stated,
             state_meta,
             state_confirmed,
+            stated_features=stated_features,
         )
     )
     # The import section (issue #332, sub-issue 3): rendered AFTER the
@@ -1933,6 +1940,7 @@ async def run_design_loop_async(
     state_stated: dict[str, float] | None = None,
     state_meta: dict[str, Any] | None = None,
     state_confirmed: dict[str, Any] | None = None,
+    stated_features: Any = None,
     on_progress: OnProgressFn | None = None,
     design_source: str | None = None,
     part_scale: float | None = None,
@@ -2163,6 +2171,7 @@ async def run_design_loop_async(
                 state_confirmed=state_confirmed,
                 design_source=design_source,
                 part_scale=part_scale,
+                stated_features=stated_features,
             ),
             _design_system(stated_dims, part_scale),
             deadline_armed=attempt_timeout is not None,
@@ -3004,6 +3013,7 @@ def run_design_loop(
     state_stated: dict[str, float] | None = None,
     state_meta: dict[str, Any] | None = None,
     state_confirmed: dict[str, Any] | None = None,
+    stated_features: Any = None,
     design_source: str | None = None,
     part_scale: float | None = None,
     part_bbox_mm: tuple[float, float, float] | None = None,
@@ -3040,6 +3050,7 @@ def run_design_loop(
             state_stated=state_stated,
             state_meta=state_meta,
             state_confirmed=state_confirmed,
+            stated_features=stated_features,
             design_source=design_source,
             part_scale=part_scale,
             part_bbox_mm=part_bbox_mm,
