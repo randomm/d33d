@@ -176,3 +176,25 @@ def test_fmt_mm1_is_half_up_on_the_typed_decimal() -> None:
     assert fmt_mm1(2.45) == "2.5"
     assert fmt_mm1(3.25) == "3.3"
     assert round(3.25, 1) == 3.2  # Python's round() is banker's: 3.2
+
+
+def test_fmt_mm1_is_total_on_large_finite_values() -> None:
+    """Review round 2: a 31-digit typed size must not raise (Decimal needs
+    32 significant digits; the default context has 28)."""
+    assert fmt_mm1(1e30) == "1000000000000000000000000000000.0"
+    assert fmt_mm1(1.7e308).endswith(".0")
+
+
+def test_fmt_mm1_non_finite_does_not_raise() -> None:
+    """Review round 2: Decimal("inf") cannot be quantized; never raise."""
+    assert fmt_mm1(float("inf")) == "inf"
+    assert fmt_mm1(float("-inf")) == "-inf"
+
+
+def test_trigger_non_finite_size_is_no_size() -> None:
+    """Review round 2: a 400-digit typed size parses to inf; the trigger
+    must drop it (no size) rather than carry an infinite diameter."""
+    from d33d.fill_recut import fill_recut_trigger
+
+    trig = fill_recut_trigger("make the hole " + "9" * 400 + " mm")
+    assert trig is not None and trig["size"] is None, trig
