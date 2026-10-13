@@ -40,9 +40,11 @@ __all__ = [
     "ABSOLUTE_WORDS",
     "DIMENSION_AXES",
     "FEATURE_NOUN_RE",
+    "FEATURE_ROLE_TOKENS",
     "GLOBAL_WORDS",
     "MM_UNIT_ALTERNATION",
     "RELATIVE_WORDS",
+    "SIZE_PARAM_TOKENS",
     "Cues",
     "axis_for_question_word",
     "classify",
@@ -144,6 +146,29 @@ _FEATURE_NOUNS: frozenset[str] = frozenset(
 FEATURE_NOUN_RE = re.compile(
     r"(?<!\w)(?:" + "|".join(_FEATURE_NOUNS) + r")(?!\w)", re.IGNORECASE
 )
+
+#: The param-name tokens that carry a feature SIZE (issue #433): a size
+#: param is named ``diameter`` / ``dia`` / ``d`` / ``size``.
+SIZE_PARAM_TOKENS: frozenset[str] = frozenset({"diameter", "dia", "d", "size"})
+
+#: The ONE closed role vocabulary for stated feature sizes (issue #433): every
+#: role word a feature clause can name (``a 5 mm hole`` / ``a 2 mm deep
+#: groove``), mapped to the param-name tokens that carry that dimension.
+#: ``d.statement_extraction`` derives its role-word set and size-slot roles
+#: from this map; ``d.design_state`` matches params through it. An unknown
+#: role maps to no entry and binds nothing (never a guessed binding).
+FEATURE_ROLE_TOKENS: dict[str, frozenset[str]] = {
+    "diameter": SIZE_PARAM_TOKENS,
+    "dia": SIZE_PARAM_TOKENS,
+    "wide": frozenset({"width"}),
+    "width": frozenset({"width"}),
+    "deep": frozenset({"depth"}),
+    "depth": frozenset({"depth"}),
+    "long": frozenset({"length"}),
+    "length": frozenset({"length"}),
+    "tall": frozenset({"height"}),
+    "height": frozenset({"height"}),
+}
 
 #: The nouns that can ALSO name a whole printed part (issue #305 task-a;
 #: issue #413 added "spacer"/"spacers"). "lid" stays in ``_FEATURE_NOUNS``

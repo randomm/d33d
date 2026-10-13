@@ -37,7 +37,7 @@ import math
 import re
 from collections.abc import AsyncIterator, Iterable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from PIL import Image
 
@@ -55,6 +55,9 @@ from d33d.design_loop import (
 from d33d.loop_timeout import AttemptTracker, archive_deadline
 from d33d.post_check_reasons import MESH_UNCHANGED_REASON, POST_CHECK_REASONS
 from d33d.render_worker import DEFAULT_TIMEOUT_S, VIEWS, RenderResult
+
+if TYPE_CHECKING:
+    from d33d.statement_extraction import StatedFeature
 
 logger = logging.getLogger(__name__)
 
@@ -1100,6 +1103,7 @@ async def _resolve_offer(
     prev_confirmed: dict[str, Any] | None = None,
     user_message: str = "",
     chat_history: tuple[str, ...] = (),
+    stated_features: list[StatedFeature] | None = None,
 ) -> dict[str, Any] | None:
     """Resolve the pending offer for a passing design pass (issue #250).
 
@@ -1157,6 +1161,7 @@ async def _resolve_offer(
         new_version["stated_dims"],
         meta,
         new_version["confirmed_params"],
+        stated_features,
     )
     # The single-source seam (issue #300): the block's PARAM rows — the
     # SAME rows the Brief shows — feed the selection, the entry lookup
@@ -1634,6 +1639,45 @@ def _seam_parent_mesh_stats(
         return (genus, None, None, None)
 
 
+def _feature_mismatches_for_version(
+    app: Any,
+    project_id: int,
+    version_id: int | None,
+    stated_features: Any,
+) -> list[dict[str, Any]]:
+    """The stated-vs-made feature mismatches of the NEW version (issue #433).
+
+    Built from the SAME design-state block the Brief GET renders
+    (``state_block_for_version`` over the version's persisted inputs plus
+    the carried stated features), via
+    :func:`d33d.design_state.feature_mismatches_from_block`. The reply and
+    the Brief's ``disagrees`` row are one comparison, never two. Each record
+    is ``{noun, stated_mm, made_mm, label}``; the SPA builds the reply
+    sentence from ``copy.ts`` (the server writes no prose). ``[]`` when there
+    is no version, no stated feature, or no mismatch (within tolerance, a
+    zero-match feature, or an unmeasured param: no flag).
+    """
+    if version_id is None or not stated_features:
+        return []
+    from d33d.design_state import (
+        feature_mismatches_from_block,
+        state_block_for_version,
+    )
+
+    version = app.state.versions.get_version(project_id, version_id)
+    if version is None:
+        return []
+    block = state_block_for_version(
+        dict(version["params"] or {}),
+        version["bbox"],
+        version["stated_dims"],
+        version["param_meta"],
+        version["confirmed_params"],
+        stated_features,
+    )
+    return feature_mismatches_from_block(block)
+
+
 async def _resolve_version_create(
     app: Any,
     project_id: int,
@@ -1814,6 +1858,7 @@ async def run_design_loop_with_events(
     photo: str,
     request_text: str,
     stated_axes: dict[str, float] | None = None,
+    stated_features: list[StatedFeature] | None = None,
 ) -> AsyncIterator[tuple[str, dict[str, Any]]]:
     """Run the injected design loop (``app.state.run_design_loop``) for
     one chat message and yield the SSE frame contract.
@@ -1983,6 +2028,12 @@ async def run_design_loop_with_events(
         # this adapter's deadline below is a generous outer safety net
         # only.
         "attempt_timeout": DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS,
+        # Issue #433: the stated FEATURE sizes (the feature-side sibling
+        # of ``stated_axes``) — the chat route computes them (carried set
+        # + this message's extraction, persisted), the finalize route
+        # computes them on its own seam, and ``None`` (no version / no
+        # feature stated) renders nothing (byte-identical to today).
+        "stated_features": stated_features,
     }
 
     # The production closure (``_build_production_design_loop``) takes
@@ -2589,6 +2640,7 @@ async def run_design_loop_with_events(
                 prev_confirmed=kwargs["state_confirmed"],
                 user_message=user_message,
                 chat_history=chat_history,
+                stated_features=stated_features,
             )
         except Exception:
             logger.exception(
@@ -2624,6 +2676,24 @@ async def run_design_loop_with_events(
         if offer_field is not None:
             done_data["confirm_offer"] = offer_field["param"]
             done_data["confirm_sentence"] = offer_field["sentence"]
+        # Issue #433: the stated-vs-made feature mismatches ride the done
+        # frame as an ADDITIVE ``feature_mismatches`` list (data only:
+        # ``{noun, stated_mm, made_mm, label}``; the SPA writes the reply
+        # sentence from copy.ts). Built from the same design-state block
+        # the Brief renders, so the reply and the ``disagrees`` row cannot
+        # diverge. Omitted when there is no mismatch.
+        try:
+            _mismatches = _feature_mismatches_for_version(
+                app, project_id, version_id, stated_features
+            )
+            if _mismatches:
+                done_data["feature_mismatches"] = _mismatches
+        except Exception:
+            logger.exception(
+                "feature-mismatch sentence failed for project %s — "
+                "emitting the pass without the sentence",
+                project_id,
+            )
         for _f in _yield_notice():
             yield _f
         yield ("done", done_data)

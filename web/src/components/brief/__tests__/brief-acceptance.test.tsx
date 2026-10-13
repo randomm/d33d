@@ -874,3 +874,77 @@ describe("Brief — two-zone split (issue #338)", () => {
     expect(screen.getByTestId("brief-row-rod_bore")).toBeTruthy();
   });
 });
+
+/** A USER-source stated-feature mismatch row (issue #433): the user
+ *  stated a feature size ("a 5 mm hole") and the model made a different
+ *  value (hole_diameter = 8) — the same ``disagrees`` shape as the axis
+ *  path, ``disagrees_source: "user"`` (the user gave the evidence), so
+ *  BriefRow's existing ``disagreesInline`` / ``disagreement`` copy handles
+ *  it with no new frontend copy. */
+const statedFeatureMismatch = (
+  name: string,
+  label: string,
+  statedMm: number,
+  madeMm: number,
+): DesignStateEntry => ({
+  name,
+  kind: "param",
+  label,
+  value: madeMm,
+  unit: "mm",
+  provenance: "disagrees",
+  stated_value: statedMm,
+  disagrees_source: "user",
+});
+
+describe("Brief — stated feature mismatch (issue #433)", () => {
+  it("a stated 5 / made 8 feature row renders ochre with both numbers collapsed", () => {
+    render(
+      <Brief
+        {...baseProps}
+        entries={[statedFeatureMismatch("hole_diameter", "Hole diameter", 5, 8)]}
+      />,
+    );
+    const row = screen.getByTestId("brief-row-hole_diameter");
+    // The collapsed cell shows stated 5 first, made 8 second — the
+    // existing ``disagreesInline`` copy (stated · measures made).
+    const valueCell = row.querySelector("[data-testid='brief-value']");
+    expect(valueCell?.textContent).toBe(copy.brief.disagreesInline(5, 8));
+    expect(valueCell?.textContent).toContain("5.0");
+    expect(valueCell?.textContent).toContain("8.0");
+    expect((valueCell as HTMLElement)?.style.fontFamily).toBe("var(--font-mono)");
+    // The mark: the blocked (ochre) token, never the #FF3300 marker.
+    const markStyle = (row.querySelector("[data-testid='brief-mark']")?.getAttribute("style") ?? "").toLowerCase();
+    expect(markStyle).toContain("--color-blocked");
+    expect(markStyle).not.toContain("#ff3300");
+    // The sentence is hidden until expanded; the USER copy names both
+    // numbers (the feature mismatch is user-sourced — the user stated the
+    // 5, the model made the 8).
+    expect(screen.queryByTestId("brief-disagreement")).toBeNull();
+    const inner = row.querySelector("[data-testid='brief-value']")?.parentElement as HTMLElement;
+    fireEvent.click(inner);
+    const sentence = screen.getByTestId("brief-disagreement");
+    expect(sentence.textContent).toContain(copy.brief.disagreement(5, 8));
+    expect(sentence.textContent).toContain("You asked for 5.0\u202fmm");
+    expect(sentence.textContent).toContain("8.0");
+  });
+
+  it("a matching stated feature (5 / 5) renders stated with no flag", () => {
+    // The within-tolerance case: the model made the value the user stated
+    // — provenance ``stated``, no ``disagrees`` mark, no sentence.
+    render(
+      <Brief {...baseProps} entries={[stated("hole_diameter", 5)]} />,
+    );
+    const row = screen.getByTestId("brief-row-hole_diameter");
+    expect(row.getAttribute("data-provenance")).toBe("stated");
+    // The stated mark (the live token), never the blocked (ochre) token.
+    const markStyle = (row.querySelector("[data-testid='brief-mark']")?.getAttribute("style") ?? "").toLowerCase();
+    expect(markStyle).toContain("--color-live");
+    expect(markStyle).not.toContain("--color-blocked");
+    // No disagreement sentence (there is no disagreement).
+    expect(screen.queryByTestId("brief-disagreement")).toBeNull();
+    // The value cell shows the stated number (5.0), mono face.
+    const valueCell = row.querySelector("[data-testid='brief-value']");
+    expect(valueCell?.textContent).toContain("5.0");
+  });
+});

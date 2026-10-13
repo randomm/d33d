@@ -860,6 +860,27 @@ export const confirmOffer = {
    *  run, no new version — the value is recorded as confirmed). */
   acknowledged: (label: string, value: string): string =>
     `Got it — ${label} stays ${value}.`,
+
+  /** Issue #433: the stated-vs-made feature mismatch reply sentence. The
+   *  server sends data only (the done frame's `feature_mismatches` list);
+   *  this is the one place the sentence is written (`featureMismatch.ts`).
+   *  The Brief row is independent: it renders the `stated 5 / made 8`
+   *  ochre `disagrees` row via `disagreement`. `noun` is the feature noun
+   *  ("hole"), `statedMm` / `madeMm` the two numbers (one decimal),
+   *  `label` the param's user-facing label. */
+  featureMismatch: (
+    noun: string,
+    statedMm: number,
+    label: string,
+    madeMm: number,
+  ): string => {
+    const article = /^[aeiou]/i.test(noun) ? "an" : "a";
+    // A capitalised label reads mid-sentence in lower case; an acronym stays.
+    const subject = /^[A-Z][a-z]/.test(label)
+      ? label.charAt(0).toLowerCase() + label.slice(1)
+      : label;
+    return `You asked for ${article} ${noun} ${mm(statedMm)}; I made it ${subject} ${mm(madeMm)}.`;
+  },
 } as const;
 
 /**

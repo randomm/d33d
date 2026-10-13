@@ -49,8 +49,10 @@ from d33d.stated_carry import (
     resolve_stated_cues,
 )
 from d33d.statement_extraction import (
+    StatedFeature,
     stated_axes_from_message,
     stated_dims_from_message,
+    stated_features_from_messages,
 )
 
 # ---------------------------------------------------------------------------
@@ -1218,6 +1220,125 @@ class TestFeatureVerbClauseNoAxis:
         assert axes == {"H": 15.0}
 
 
+class TestStatedFeatureExtraction:
+    """Issue #433: the FEATURE-clause half of the dimension protocol —
+    the user's stated feature sizes (``a 5 mm hole``) are extracted as
+    :class:`StatedFeature` records (noun, role, value), carried across
+    turns with the operator supersession rule, and NEVER a W/D/H axis
+    (the #398/#413 axis guard stays green — the same message still
+    yields the part's axes only)."""
+
+    def test_feature_noun_value_extracted(self) -> None:
+        """'a 40 mm wide box with a 5 mm hole' → a hole/None/5.0 record
+        AND W=40 (the feature's 5 is never an axis)."""
+        feats = stated_features_from_messages("a 40 mm wide box with a 5 mm hole")
+        assert feats == [StatedFeature(noun="hole", role=None, value=5.0)]
+        axes = stated_axes_from_message("a 40 mm wide box with a 5 mm hole", [])
+        assert axes == {"W": 40.0}
+
+    def test_feature_verb_deep_role_extracted(self) -> None:
+        """'add a 3 mm wide, 2 mm deep groove' → a groove/deep/2.0 record
+        (the role word 'deep' is captured) and NO axis (the feature's
+        sizes are not the part's)."""
+        feats = stated_features_from_messages("add a 3 mm wide, 2 mm deep groove")
+        assert StatedFeature(noun="groove", role="deep", value=2.0) in feats
+        axes = stated_axes_from_message("add a 3 mm wide, 2 mm deep groove", [])
+        assert axes == {}
+
+    def test_no_feature_clause_yields_no_records(self) -> None:
+        """A message with no feature clause states no features (the
+        part's axes are the only statement)."""
+        assert stated_features_from_messages("a 40 mm wide box") == []
+        assert stated_features_from_messages("make it taller") == []
+
+    def test_later_restatement_supersedes(self) -> None:
+        """A later message restating the SAME feature (same noun+role)
+        replaces the earlier value (the operator decision — the flag uses
+        the latest statement): 'a 40 mm wide box with a 5 mm hole' then
+        'the hole is 6 mm' → hole/None/6.0 (the 5 is gone)."""
+        feats = stated_features_from_messages(
+            ["a 40 mm wide box with a 5 mm hole", "the hole is 6 mm"]
+        )
+        assert feats == [StatedFeature(noun="hole", role=None, value=6.0)]
+
+    def test_different_feature_leaves_earlier_value(self) -> None:
+        """A later message naming a DIFFERENT feature leaves the earlier
+        value in place: 'a 40 mm wide box with a 5 mm hole' then 'add a
+        10 mm groove' → both records (the hole's 5 is not superseded by
+        the groove's 10)."""
+        feats = stated_features_from_messages(
+            ["a 40 mm wide box with a 5 mm hole", "add a 10 mm groove"]
+        )
+        keys = {(f.noun, f.role, f.value) for f in feats}
+        assert ("hole", None, 5.0) in keys
+        assert ("groove", None, 10.0) in keys
+
+    def test_no_feature_clause_leaves_earlier_value(self) -> None:
+        """A later message with no feature clause leaves the earlier
+        stated feature unchanged (the operator decision — supersession
+        needs a restatement, not silence)."""
+        feats = stated_features_from_messages(
+            ["a 40 mm wide box with a 5 mm hole", "make it taller"]
+        )
+        assert feats == [StatedFeature(noun="hole", role=None, value=5.0)]
+
+    def test_size_role_restatement_supersedes_bare_size(self) -> None:
+        """A restatement with the SIZE role (diameter) supersedes a role-less
+        earlier size of the same hole: 'a 5 mm hole' then 'the hole's diameter
+        is 6 mm' → only the diameter 6 (both bind hole_diameter — keeping both
+        made the design-state match ambiguous and dropped the flag)."""
+        feats = stated_features_from_messages(
+            ["a 40 mm wide box with a 5 mm hole", "the hole's diameter is 6 mm"]
+        )
+        assert feats == [StatedFeature(noun="hole", role="diameter", value=6.0)]
+
+    def test_depth_restatement_leaves_size_value(self) -> None:
+        """A depth restatement is a different slot: 'a 5 mm hole' then 'the
+        hole depth is 6 mm' keeps the 5 mm size AND adds the depth 6."""
+        feats = stated_features_from_messages(
+            ["a 40 mm wide box with a 5 mm hole", "the hole depth is 6 mm"]
+        )
+        keys = {(f.noun, f.role, f.value) for f in feats}
+        assert ("hole", None, 5.0) in keys
+        assert ("hole", "depth", 6.0) in keys
+
+    def test_carried_bare_size_superseded_by_diameter_restatement(self) -> None:
+        """The carry merge applies the same size-slot rule across turns."""
+        from d33d.stated_carry import effective_stated_features
+
+        out = effective_stated_features(
+            [StatedFeature(noun="hole", role=None, value=5.0)],
+            "the hole diameter is 6 mm",
+        )
+        assert out == [StatedFeature(noun="hole", role="diameter", value=6.0)]
+
+    def test_distance_number_is_not_a_feature_size(self) -> None:
+        """A mm number that is a distance, spacing or wall thickness is never
+        the feature's size (it would flag a wrong hole diameter)."""
+        for text in (
+            "put a hole 5 mm from the edge",
+            "add a hole spaced 10 mm apart",
+            "a hole with 3 mm wall thickness",
+            "holes are 4 mm apart",
+            "the hole center is 12 mm from the wall",
+        ):
+            assert stated_features_from_messages(text) == [], text
+
+    def test_each_size_takes_its_own_role(self) -> None:
+        """A role word binds only the number it follows: '6 mm hole 20 mm
+        deep' → the 6 is role-less, the 20 is the depth (never 6 deep)."""
+        assert stated_features_from_messages("a 6 mm hole 20 mm deep") == [
+            StatedFeature(noun="hole", role=None, value=6.0),
+            StatedFeature(noun="hole", role="deep", value=20.0),
+        ]
+
+    def test_non_mm_feature_size_not_extracted(self) -> None:
+        """A non-mm feature size (cm, unitless) is out of scope (the
+        operator decision) — only explicit-mm numbers are extracted."""
+        assert stated_features_from_messages("a box with a 2 cm hole") == []
+        assert stated_features_from_messages("a box with a hole 5") == []
+
+
 class TestAnchoredDeltaMarkers:
     """Issue #369 round 2: delta markers are anchored to their own number
     — a marker on a different number never suppresses the other number's
@@ -2340,3 +2461,77 @@ def test_require_dimensions_confirmed_unsetled_part_stays_open():
         part_bbox_mm=None,
     )
     assert c.confirmed is False
+
+
+class TestStatedFeaturePhrasings:
+    """Issue #433 (round 2): which phrasings become a StatedFeature, and the
+    carry merge keeps every value of a restated key (no silent loss)."""
+
+    def test_phrasings_extracted_and_negatives_empty(self) -> None:
+        """Positives carry the noun+role+value; negatives (no feature noun,
+        or no mm number) yield nothing and never an axis."""
+        cases = {
+            "a 6 mm hole": [StatedFeature(noun="hole", role=None, value=6.0)],
+            "holes 4 mm deep": [StatedFeature(noun="hole", role="deep", value=4.0)],
+            "add a 10 mm deep hole": [StatedFeature(noun="hole", role="deep", value=10.0)],
+            "6 mm slot": [StatedFeature(noun="slot", role=None, value=6.0)],
+            "a boss 10 mm tall": [StatedFeature(noun="boss", role="tall", value=10.0)],
+            "M3 screw": [],
+            "move it 5 mm left": [],
+            "make it 5 mm taller": [],
+        }
+        for text, expected in cases.items():
+            assert stated_features_from_messages(text) == expected, text
+            assert stated_axes_from_message(text, []) == {}, text
+
+    def test_plural_noun_canonicalised_and_superseded(self) -> None:
+        """'holes 4 mm' is keyed as ``hole``: a later 'the hole is 6 mm'
+        restates the SAME feature and supersedes it (no duplicate key)."""
+        feats = stated_features_from_messages(["holes 4 mm", "the hole is 6 mm"])
+        assert feats == [StatedFeature(noun="hole", role=None, value=6.0)]
+
+    def test_carry_keeps_every_value_of_one_message(self) -> None:
+        """'a 5 mm hole and a 8 mm hole' — both values survive the carry
+        merge (the fresh set replaces a key as a group, never collapsed)."""
+        from d33d.stated_carry import effective_stated_features
+
+        out = effective_stated_features([], "a 5 mm hole and a 8 mm hole")
+        assert {f.value for f in out} == {5.0, 8.0}
+
+    def test_carry_keeps_other_feature_and_supersedes_same_key(self) -> None:
+        """A carried groove survives a new hole; a carried hole is superseded
+        by a restated hole (same key), and a carried groove is not."""
+        from d33d.stated_carry import effective_stated_features
+
+        carried = [
+            StatedFeature(noun="groove", role=None, value=10.0),
+            StatedFeature(noun="hole", role=None, value=5.0),
+        ]
+        out = effective_stated_features(carried, "the hole is 6 mm")
+        keys = {(f.noun, f.role, f.value) for f in out}
+        assert ("groove", None, 10.0) in keys
+        assert ("hole", None, 6.0) in keys
+        assert ("hole", None, 5.0) not in keys
+
+
+class TestPartNounIsNotAFeature:
+    """Issue #433 (review fix): a part noun (``lid``, ``spacer``) names the
+    whole printed part, so its mm size is never a feature size. A feature
+    noun in the same clause still records its own size."""
+
+    def test_part_noun_size_is_not_a_feature(self) -> None:
+        for text in (
+            "a 7 mm lid",
+            "a 55 x 40 mm lid that fits a 60 x 45 mm box",
+        ):
+            assert stated_features_from_messages(text) == [], text
+
+    def test_feature_beside_part_noun_keeps_only_the_feature(self) -> None:
+        assert stated_features_from_messages("a 5 mm hole and a 2 mm lid") == [
+            StatedFeature(noun="hole", role=None, value=5.0)
+        ]
+
+    def test_part_noun_size_inside_feature_clause_is_not_recorded(self) -> None:
+        assert stated_features_from_messages("a 5 mm hole in a 40 mm lid") == [
+            StatedFeature(noun="hole", role=None, value=5.0)
+        ]

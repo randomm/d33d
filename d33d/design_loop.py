@@ -61,7 +61,7 @@ import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import httpx
 
@@ -101,6 +101,9 @@ from d33d.visual_review import (
     render_view_data_uris,
     review_render,
 )
+
+if TYPE_CHECKING:
+    from d33d.statement_extraction import StatedFeature
 
 logger = logging.getLogger(__name__)
 
@@ -1347,6 +1350,38 @@ def _design_system(
     return system
 
 
+def _stated_feature_lines(stated_features: list[StatedFeature] | None) -> list[str]:
+    """The stated FEATURE lines for the design prompt (issue #433).
+
+    The feature-side sibling of the design-state block: one line per
+    carried :class:`~d33d.statement_extraction.StatedFeature`, rendered
+    as ``Stated feature: {noun} = {value:g} mm`` — the model's ground
+    truth for the feature's size (the ``a 5 mm hole`` the user stated,
+    which the axis lexicon deliberately keeps OUT of the W/D/H block).
+    ``None`` / an empty list renders NOTHING (the no-version /
+    no-feature-statement case is byte-identical to today's prompt — the
+    line is additive, like the import section). An explicit ``role``
+    renders the size as ``{noun} ({role})`` so the model can bind the
+    value to the right parameter (``hole (diameter)``).
+    """
+    if not stated_features:
+        return []
+    lines: list[str] = []
+    for f in stated_features:
+        value = f.value
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            continue
+        if float(value) <= 0:
+            continue
+        noun = f.noun
+        role = f.role
+        if role:
+            lines.append(f"Stated feature: {noun} ({role}) = {float(value):g} mm")
+        else:
+            lines.append(f"Stated feature: {noun} = {float(value):g} mm")
+    return lines
+
+
 def _design_state_lines(
     stated: tuple[float, float, float],
     state_params: dict[str, Any] | None,
@@ -1354,6 +1389,7 @@ def _design_state_lines(
     state_stated: dict[str, float] | None = None,
     state_meta: dict[str, Any] | None = None,
     state_confirmed: dict[str, Any] | None = None,
+    stated_features: list[StatedFeature] | None = None,
 ) -> list[str]:
     """The design-state block's prompt lines (issue #120).
 
@@ -1400,7 +1436,12 @@ def _design_state_lines(
 
     block = build_design_state_block(
         state_block_for_version(
-            state_params, state_bbox, state_stated, state_meta, state_confirmed
+            state_params,
+            state_bbox,
+            state_stated,
+            state_meta,
+            state_confirmed,
+            stated_features,
         )
     )
     # ``format_design_state_block`` renders the header + the entries. The
@@ -1493,6 +1534,7 @@ def _design_messages(
     state_confirmed: dict[str, Any] | None = None,
     design_source: str | None = None,
     part_scale: float | None = None,
+    stated_features: list[StatedFeature] | None = None,
 ) -> list[dict[str, Any]]:
     """The design-role message list: the current user's REQUEST as the
     first line of the user text (issue #97: the current message used to be
@@ -1539,12 +1581,20 @@ def _design_messages(
             state_stated,
             state_meta,
             state_confirmed,
+            stated_features=stated_features,
         )
     )
     # The import section (issue #332, sub-issue 3): rendered AFTER the
     # state block, BEFORE the design-source section — ``None`` renders
     # nothing (byte-identical to today).
     lines.extend(import_part_lines(part_scale))
+    # The stated-feature lines (issue #433): the feature sizes the user
+    # stated (``a 5 mm hole``) — the axis lexicon keeps these OUT of the
+    # W/D/H block by design (the feature's size is not the part's
+    # envelope), and this is where they reach the model so the model
+    # honours them. ``None`` / empty renders nothing (byte-identical to
+    # today when no feature size was stated).
+    lines.extend(_stated_feature_lines(stated_features))
     # The current design source (issue #105): the previous version's
     # actual SCAD, rendered between the state block and the reference
     # dimensions (same insertion point as the state block). One mechanism,
@@ -1893,6 +1943,7 @@ async def run_design_loop_async(
     state_stated: dict[str, float] | None = None,
     state_meta: dict[str, Any] | None = None,
     state_confirmed: dict[str, Any] | None = None,
+    stated_features: list[StatedFeature] | None = None,
     on_progress: OnProgressFn | None = None,
     design_source: str | None = None,
     part_scale: float | None = None,
@@ -2123,6 +2174,7 @@ async def run_design_loop_async(
                 state_confirmed=state_confirmed,
                 design_source=design_source,
                 part_scale=part_scale,
+                stated_features=stated_features,
             ),
             _design_system(stated_dims, part_scale),
             deadline_armed=attempt_timeout is not None,
@@ -2964,6 +3016,7 @@ def run_design_loop(
     state_stated: dict[str, float] | None = None,
     state_meta: dict[str, Any] | None = None,
     state_confirmed: dict[str, Any] | None = None,
+    stated_features: list[StatedFeature] | None = None,
     design_source: str | None = None,
     part_scale: float | None = None,
     part_bbox_mm: tuple[float, float, float] | None = None,
@@ -3000,6 +3053,7 @@ def run_design_loop(
             state_stated=state_stated,
             state_meta=state_meta,
             state_confirmed=state_confirmed,
+            stated_features=stated_features,
             design_source=design_source,
             part_scale=part_scale,
             part_bbox_mm=part_bbox_mm,

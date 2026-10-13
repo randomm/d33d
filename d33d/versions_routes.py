@@ -467,7 +467,19 @@ def create_versions_router() -> APIRouter:
         # flow's evidence — a confirmed param renders ``stated`` (rule
         # (b)) in the SAME block the live prompt renders.
         confirmed = latest["confirmed_params"] if latest is not None else None
-        entries = state_block_for_version(params, measurement, stated, param_meta, confirmed)
+        # Issue #433: the carried stated FEATURE sizes ride the same block
+        # the live prompt and the reply read, so the Brief's feature rows
+        # (stated / disagrees) are the same comparison.
+        from d33d.stated_carry import carried_stated_features
+
+        entries = state_block_for_version(
+            params,
+            measurement,
+            stated,
+            param_meta,
+            confirmed,
+            carried_stated_features(project_row),
+        )
         # The part facts (issue #325): the project's imported part (NULL
         # columns → ``None`` — a project with no part renders ``null``,
         # never a fabricated empty object; the SPA uses the absence to
@@ -599,6 +611,9 @@ def create_versions_router() -> APIRouter:
                     **_finalize_loop_kwargs(request, project_id, body),
                 )
             else:
+                # A stub seam with no ``app`` parameter never reaches
+                # ``_finalize_loop_kwargs``: its feature carry is not planned
+                # or persisted (production always takes ``app``).
                 result = run_loop()
             if inspect.isawaitable(result):
                 result = await result
@@ -889,6 +904,32 @@ def _finalize_loop_kwargs(
     db_path = getattr(app.state, "db_path", None)
     data_dir = Path(db_path).parent if db_path is not None else Path(".")
 
+    row = app.state.versions.get_project(project_id)
+    assert row is not None  # already 404'd above
+
+    # Issue #433: the stated FEATURE sizes for the finalize seam (the
+    # feature-side sibling of the ``state_stated`` / ``state_bbox`` block
+    # inputs): the project's carried set + the finalize message's
+    # extraction, merged by the SAME helper the chat route uses (a later
+    # restatement supersedes the earlier value). ``[]`` when nothing was
+    # stated (the prompt line and the design-state comparison both no-op).
+    # The merge is computed here in memory only and PERSISTED at the very end
+    # of this builder, just before the loop kwargs are returned. Gates above
+    # that point (404, params, photo, bad input) leave the carried column
+    # untouched. Gates AFTER this builder (a loop exception -> 502, a non-pass
+    # -> 422, no parameter set -> 502, a version conflict -> 409) do NOT undo
+    # it: the turn's statement is carried pass-or-fail, the same as the chat
+    # turn and ``carried_stated_dims``.
+    from d33d.stated_carry import (
+        persist_carried_stated_features,
+        plan_carried_stated_features,
+    )
+
+    _msg = getattr(body, "request", None) or getattr(body, "message", None) or ""
+    stated_features, _carried_features = plan_carried_stated_features(
+        app.state.versions, project_id, _msg
+    )
+
     def _render_fn(scad_source: str, defines: dict[str, str]) -> Any:
         # Project-scoped persistence (issue #72): bind the per-project
         # renders_dir so the worker's post-harvest step actually fires in
@@ -919,9 +960,6 @@ def _finalize_loop_kwargs(
             "finalize route llm_fn must never be called "
             "(the production closure builds its own llm_fn)"
         )
-
-    row = app.state.versions.get_project(project_id)
-    assert row is not None  # already 404'd above
 
     # The photo gate (issue #299 — the finalize seam's twin of the chat
     # path's ``photo_data_uri`` / ``photo_lost`` gate, #295): the
@@ -1009,7 +1047,7 @@ def _finalize_loop_kwargs(
         } or None
         current_axes = effective_stated_dims(_carried_gate, _explicit)
     else:
-        _msg = body.request or body.message or ""
+        _msg = getattr(body, "request", None) or getattr(body, "message", None) or ""
         current_axes = resolve_stated_cues(
             _carried_gate, _msg, label="gate", project_id=project_id
         )
@@ -1156,7 +1194,7 @@ def _finalize_loop_kwargs(
     # ``request`` must be non-empty: the hook builds a FailureEvent from
     # it (``min_length=1``) and an empty string would silently drop the
     # failures.jsonl line for an exhausted loop.
-    request_text = body.request or body.message
+    request_text = getattr(body, "request", None) or getattr(body, "message", None)
     if not request_text:
         request_text = f"finalize project {project_id}"
 
@@ -1191,6 +1229,7 @@ def _finalize_loop_kwargs(
         "state_meta": state_meta,
         "state_confirmed": state_confirmed,
         "design_source": design_source,
+        "stated_features": stated_features,
     }
     if _tb_genus is not None:
         out["through_baseline_genus"] = _tb_genus
@@ -1218,6 +1257,12 @@ def _finalize_loop_kwargs(
         out["part_scale"] = part_env["scale"]
         if part_env.get("bbox_mm") is not None:
             out["part_bbox_mm"] = part_env["bbox_mm"]
+    # Issue #433: persist the carried feature set only now that every gate
+    # above has passed and the loop is about to start (best effort — a failed
+    # write is a WARNING, never a failed finalize).
+    persist_carried_stated_features(
+        app.state.versions, project_id, stated_features, _carried_features
+    )
     return out
 
 

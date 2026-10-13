@@ -30,6 +30,7 @@ from d33d.design_loop_events import (
 )
 from d33d.stated_carry import (
     carried_stated_set,
+    carry_stated_features_for_turn,
     effective_stated_dims,
     resolve_stated_cues,
 )
@@ -254,6 +255,17 @@ async def run_design_loop(
     except Exception:  # the write must never fail the 202
         logger.debug("carried_stated_dims write failed for project %s", project_id, exc_info=True)
 
+    # Issue #433: the stated FEATURE sizes (``a 5 mm hole``) — the
+    # feature-side sibling of ``per_axis_stated`` (the W/D/H set). The
+    # carried set (``projects.carried_stated_features``) is merged with
+    # this message's extraction (a later restatement supersedes the
+    # earlier value) and persisted at the end of the turn — the design
+    # prompt's ``Stated feature:`` line and the design-state
+    # stated-vs-made comparison (``d33d.design_state``) both read it.
+    # Best-effort: a failure degrades to no stated features (the honest
+    # empty set) and never fails the 202.
+    stated_features = carry_stated_features_for_turn(app.state.versions, project_id, message)
+
     # Photo: read the project's stored photo NOW (synchronously, before
     # the 202 response) — the background task runs via asyncio and the
     # DB may be closed by the time the loop starts (a deleted project
@@ -298,6 +310,7 @@ async def run_design_loop(
             chat_history=chat_history,
             photo=photo,
             request_text=_request_text,
+            stated_features=stated_features,
         )
     except Exception:
         # Design-loop setup failed BEFORE an event source was
