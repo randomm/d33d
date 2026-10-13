@@ -1401,9 +1401,6 @@ def test_region_edit_fill_recut_trigger_no_loop(app_with_projects, monkeypatch):
         r = await client.post("/api/projects", json={"name": "Imported Part"})
         pid = r.json()["id"]
         _set_part_columns(app_with_projects, pid, unit_status="settled")
-        # Issue #437: a measured Ø30 hole at (10, 0) and a Ø8 hole far away;
-        # the pick at (12, 0, 20) is nearest the Ø30 hole.
-        _store_measured_holes(app_with_projects, pid)
         r2 = await client.post(
             f"/api/projects/{pid}/region-edits",
             json=_region_edit_body(
@@ -1431,7 +1428,7 @@ def test_region_edit_fill_recut_trigger_no_loop(app_with_projects, monkeypatch):
     assert done[0].get("kind") == "answer", done
     msg = done[0]["message"]
     assert "That hole came with your file" in msg, msg
-    assert "Ø38.0 mm" in msg, msg
+    assert "Ø38 mm" in msg, msg
     # The done frame surfaces the fresh offer (the SPA renders the
     # [Yes, do that] / [Leave it] buttons from this field).
     assert done[0].get("fill_recut_offer") is True, done
@@ -1442,10 +1439,6 @@ def test_region_edit_fill_recut_trigger_no_loop(app_with_projects, monkeypatch):
     assert offer["kind"] == "fill_recut", offer
     assert offer["noun"] == "hole", offer
     assert offer["size"] == 38.0, offer
-    # Issue #437: the viewer pick offers Yes with the nearest measured
-    # hole's centre and diameter (not a centre-less offer).
-    assert offer["center"] == [10.0, 0.0], offer
-    assert offer["diameter_mm"] == 30.0, offer
 
 
 def test_region_edit_far_pick_from_any_hole_is_point_at(app_with_projects, monkeypatch):

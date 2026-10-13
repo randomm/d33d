@@ -1234,7 +1234,7 @@ def test_fill_recut_trigger_no_hole_report_no_offer(app_with_projects):
     holey_done = [d for e, d in holey_frames if e == "done"]
     assert holey_done, f"no done frame: {holey_frames}"
     assert "That hole came with your file" in holey_done[0]["message"], holey_done
-    assert "Ø10.0 mm" in holey_done[0]["message"], holey_done
+    assert "Ø10 mm" in holey_done[0]["message"], holey_done
     assert holey_done[0].get("fill_recut_offer") is True, holey_done
     offer = svc.get_pending_offer(holey_pid)
     assert offer is not None
@@ -1344,7 +1344,7 @@ def test_fill_recut_offer_fires_for_annulus_import(app_with_projects):
     assert done[0].get("kind") == "answer", done
     msg = done[0]["message"]
     assert "That hole came with your file" in msg, msg
-    assert "Ø10.0 mm" in msg, msg
+    assert "Ø10 mm" in msg, msg
     assert done[0].get("fill_recut_offer") is True, done
     svc = _svc(app_with_projects)
     offer = svc.get_pending_offer(pid)
@@ -1377,8 +1377,8 @@ def test_fill_recut_trigger_hole_with_dimension(app_with_projects):
     assert done[0].get("kind") == "answer", done
     msg = done[0]["message"]
     assert "That hole came with your file" in msg, msg
-    assert "Ø38.0 mm" in msg, msg
-    assert "fill it, then cut a Ø38.0 mm one on the same axis" in msg, msg
+    assert "Ø38 mm" in msg, msg
+    assert "fill it, then cut a Ø38 mm one on the same axis" in msg, msg
     # The done frame carries the offer flag (the SPA renders the
     # [Yes, do that] / [Leave it] buttons from it — fresh offer only).
     assert done[0].get("fill_recut_offer") is True, done
@@ -1927,16 +1927,17 @@ def test_fill_recut_trigger_decimal_size_not_truncated() -> None:
 
 
 def test_fill_recut_trigger_integer_size_rendered_zero() -> None:
-    """An integer number ("38") is captured and rendered as 38.0 (Ø38.0 —
-    one decimal, issue #437), never truncated or dropped."""
+    """An integer number ("38") is captured and rendered as 38 (Ø38), the
+    same value the pre-fix code produced for the integer case (no
+    behaviour change for integers)."""
     t = fill_recut.fill_recut_trigger("make the big hole 38 mm")
     assert t is not None
     assert t["noun"] == "hole"
     assert t["size"] == 38.0, t
     # The rendered sentence (the deck's :g spelling — 38.0 renders as 38).
     s = fill_recut.boundary_sentence(t["noun"], t["size"])
-    assert "Ø38.0 mm" in s, s
-    assert "Ø38 mm" not in s, s
+    assert "Ø38 mm" in s, s
+    assert "Ø38.0" not in s, s
 
 
 def test_fill_recut_trigger_partial_number_not_parsed() -> None:
@@ -2297,7 +2298,7 @@ def test_fill_recut_templates_match_copy_ts_fill_recut() -> None:
         return ts
 
     # The hole/bore diameter resize (dim 38).
-    hole = _render(_deck_fn("holeDiameter"), noun="hole", dim="38.0")
+    hole = _render(_deck_fn("holeDiameter"), noun="hole", dim="38")
     assert hole == fill_recut.boundary_sentence("hole", 38.0)
 
     # The other-noun resize (dim 5).
@@ -2586,7 +2587,7 @@ def test_fill_recut_parity_fresh_offer_no_loop(app_with_projects, monkeypatch):
     assert chat_done[0].get("kind") == "answer"
     assert region_done[0].get("kind") == "answer"
     assert chat_done[0]["message"] == region_done[0]["message"]
-    assert "Ø38.0 mm" in chat_done[0]["message"]
+    assert "Ø38 mm" in chat_done[0]["message"]
 
 
 def test_fill_recut_parity_clean_decline_clears_offer(app_with_projects, monkeypatch):

@@ -145,6 +145,16 @@ def test_fmt_mm1_shared_sample_values(value: float, expected: str) -> None:
     assert fmt_mm1(value) == expected
 
 
+def test_one_decimal_copy_is_only_for_a_resolved_measured_hole() -> None:
+    """Operator decision (2026-10-12): the #351 unknown-count offer keeps its
+    copy ("\u00d838 mm"); the one-decimal diameter is for a resolved measured
+    hole only."""
+    from d33d.fill_recut import boundary_sentence
+
+    assert "\u00d838 mm" in boundary_sentence("hole", 38.0)
+    assert "\u00d838.0 mm" in boundary_sentence("hole", 38.0, measured=True)
+
+
 def test_fmt_mm1_is_half_up_on_the_typed_decimal() -> None:
     """Half-up on the decimal the user typed — never binary rounding
     (Python's own ``round(3.25, 1)`` gives 3.2)."""
