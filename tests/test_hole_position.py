@@ -129,6 +129,46 @@ def test_nearest_hole_to_viewer_pick_without_point_is_none() -> None:
     assert nearest_hole_to_point(PLATE, [float("inf"), 0.0, 0.0]) is None
 
 
+def test_nearest_hole_skips_non_finite_centres() -> None:
+    """Lens round 3: a hole with a NaN/inf centre (or a centre that is
+    None, the wrong type, or too short) must be skipped — it must not rank
+    first with a NaN distance and carry NaN into the pending offer. A valid
+    hole near the pick is returned."""
+    valid = _hole(112.0, 72.0)
+    bad = [
+        {"center": [float("nan"), 72.0, 3.0], "axis": [0.0, 0.0, 1.0], "diameter_mm": 4.0},
+        {"center": [float("inf"), 72.0, 3.0], "axis": [0.0, 0.0, 1.0], "diameter_mm": 4.0},
+        {"center": [112.0, float("-inf"), 3.0], "axis": [0.0, 0.0, 1.0], "diameter_mm": 4.0},
+        {"center": None, "axis": [0.0, 0.0, 1.0], "diameter_mm": 4.0},
+        {"center": "nope", "axis": [0.0, 0.0, 1.0], "diameter_mm": 4.0},
+        {"center": ["x", 72.0, 3.0], "axis": [0.0, 0.0, 1.0], "diameter_mm": 4.0},
+        {"center": [112.0], "axis": [0.0, 0.0, 1.0], "diameter_mm": 4.0},
+        {"axis": [0.0, 0.0, 1.0], "diameter_mm": 4.0},  # no centre at all
+    ]
+    for hole in bad:
+        holes = [hole, valid]
+        chosen = nearest_hole_to_point(holes, [110.0, 70.0, 3.0])
+        assert chosen is valid, hole
+
+
+def test_nearest_hole_only_bad_centres_is_none() -> None:
+    bad = [
+        {"center": [float("nan"), 72.0, 3.0], "axis": [0.0, 0.0, 1.0], "diameter_mm": 4.0},
+        {"center": None, "axis": [0.0, 0.0, 1.0], "diameter_mm": 4.0},
+        {"center": [112.0], "axis": [0.0, 0.0, 1.0], "diameter_mm": 4.0},
+    ]
+    assert nearest_hole_to_point(bad, [110.0, 70.0, 3.0]) is None
+
+
+def test_nearest_hole_nan_diameter_is_none() -> None:
+    """Lens round 3: a NaN radius must not make the proximity bound
+    (distance > radius + tolerance) always False."""
+    hole = {"center": [112.0, 72.0, 3.0], "axis": [0.0, 0.0, 1.0], "diameter_mm": float("nan")}
+    assert nearest_hole_to_point([hole], [112.0, 72.0, 3.0]) is None
+    hole_inf = {"center": [112.0, 72.0, 3.0], "axis": [0.0, 0.0, 1.0], "diameter_mm": float("inf")}
+    assert nearest_hole_to_point([hole_inf], [112.0, 72.0, 3.0]) is None
+
+
 # Issue #437 — one-decimal half-up formatting (the Python side of the
 # parity pin; the TS twin is ``fmtMm1`` / ``dia`` in web/src/copy.ts).
 @pytest.mark.parametrize(

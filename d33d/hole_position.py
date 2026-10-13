@@ -91,6 +91,23 @@ def _distance(
     )
 
 
+def _finite_center(hole: dict[str, Any]) -> tuple[float, float] | None:
+    """The hole's centre as a finite ``(x, y)``, or ``None`` when the centre
+    is missing, the wrong shape/type, or non-finite (NaN/inf) — such a hole
+    must never rank (a NaN distance sorts first and carries NaN into the
+    pick)."""
+    center = hole.get("center")
+    if not isinstance(center, (list, tuple)) or len(center) < 2:
+        return None
+    try:
+        point = (float(center[0]), float(center[1]))
+    except (TypeError, ValueError):
+        return None
+    if not all(math.isfinite(v) for v in point):
+        return None
+    return point
+
+
 def select_positional_hole(
     holes: list[dict[str, Any]],
     message: str,
@@ -111,14 +128,8 @@ def select_positional_hole(
     vertical, horizontal, _corner = words
     ranked: list[tuple[float, dict[str, Any]]] = []
     for hole in holes:
-        center = hole.get("center")
-        if not isinstance(center, (list, tuple)) or len(center) < 2:
-            continue
-        try:
-            point = (float(center[0]), float(center[1]))
-        except (TypeError, ValueError):
-            continue
-        if not all(math.isfinite(v) for v in point):
+        point = _finite_center(hole)
+        if point is None:
             continue
         ranked.append((_distance(point, vertical, horizontal, box), hole))
     if not ranked:
@@ -151,10 +162,10 @@ def nearest_hole_to_point(
         return None
     ranked: list[tuple[float, dict[str, Any]]] = []
     for hole in holes:
-        center = hole.get("center")
-        if not isinstance(center, (list, tuple)) or len(center) < 2:
+        center = _finite_center(hole)
+        if center is None:
             continue
-        ranked.append((math.hypot(float(center[0]) - px, float(center[1]) - py), hole))
+        ranked.append((math.hypot(center[0] - px, center[1] - py), hole))
     if not ranked:
         return None
     ranked.sort(key=lambda r: r[0])
