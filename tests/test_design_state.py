@@ -3260,14 +3260,17 @@ class TestStatedFeatureRoleMatching:
         assert feature_mismatches_from_block(ok) == []
 
 
+_FEATURE_AXIS_META = {
+    "hole_diameter": {"label": "Hole diameter", "unit": "mm", "axis": "W"}
+}
+
+
 class TestFeatureRowNeverAxisMeasured:
     """Issue #433 (round 1 fix): a feature row (``a 5 mm hole``) is a HOLE
     size, never a part extent. A feature row whose param declares an axis must
     not be re-tagged against the bbox extent (no false ochre flag, no hole
     diameter compared to a part width) and must not be collapsed into an
     agreeing axis row (which would show the part's W as a user-stated value)."""
-
-    _META = {"hole_diameter": {"label": "Hole diameter", "unit": "mm", "axis": "W"}}
 
     def _feat(self, value: float):
         from d33d.statement_extraction import StatedFeature
@@ -3281,7 +3284,7 @@ class TestFeatureRowNeverAxisMeasured:
             {"hole_diameter": 5.0},
             {"x": 20.0, "y": 20.0, "z": 20.0},
             None,
-            self._META,
+            _FEATURE_AXIS_META,
             None,
             self._feat(5.0),
         )
@@ -3296,7 +3299,7 @@ class TestFeatureRowNeverAxisMeasured:
             {"hole_diameter": 5.0},
             {"x": 5.0, "y": 20.0, "z": 20.0},
             None,
-            self._META,
+            _FEATURE_AXIS_META,
             None,
             self._feat(5.0),
         )
