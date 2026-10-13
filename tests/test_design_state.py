@@ -3258,3 +3258,51 @@ class TestStatedFeatureRoleMatching:
             {"hole_diameter": 5.0}, None, None, None, None, self._feat(5.0),
         )
         assert feature_mismatches_from_block(ok) == []
+
+
+class TestFeatureRowNeverAxisMeasured:
+    """Issue #433 (round 1 fix): a feature row (``a 5 mm hole``) is a HOLE
+    size, never a part extent. A feature row whose param declares an axis must
+    not be re-tagged against the bbox extent (no false ochre flag, no hole
+    diameter compared to a part width) and must not be collapsed into an
+    agreeing axis row (which would show the part's W as a user-stated value)."""
+
+    _META = {"hole_diameter": {"label": "Hole diameter", "unit": "mm", "axis": "W"}}
+
+    def _feat(self, value: float):
+        from d33d.statement_extraction import StatedFeature
+
+        return [StatedFeature(noun="hole", role=None, value=value)]
+
+    def test_feature_row_with_declared_axis_not_axis_measured(self) -> None:
+        from d33d.design_state import feature_mismatches_from_block
+
+        entries = state_block_for_version(
+            {"hole_diameter": 5.0},
+            {"x": 20.0, "y": 20.0, "z": 20.0},
+            None,
+            self._META,
+            None,
+            self._feat(5.0),
+        )
+        row = next(e for e in entries if e["name"] == "hole_diameter")
+        assert row["provenance"] == "stated"
+        assert row["value"] == 5.0
+        assert "stated_value" not in row
+        assert feature_mismatches_from_block(entries) == []
+
+    def test_feature_row_not_collapsed_into_agreeing_axis(self) -> None:
+        entries = state_block_for_version(
+            {"hole_diameter": 5.0},
+            {"x": 5.0, "y": 20.0, "z": 20.0},
+            None,
+            self._META,
+            None,
+            self._feat(5.0),
+        )
+        params = [e for e in entries if e["kind"] == "param" and e["name"] == "hole_diameter"]
+        assert len(params) == 1
+        assert params[0]["provenance"] == "stated"
+        w_axis = next(e for e in entries if e["kind"] == "axis" and e["name"] == "W")
+        assert w_axis["provenance"] == "measured"
+        assert w_axis.get("label") != "Hole diameter"
