@@ -1700,6 +1700,99 @@ def test_region_edit_fill_recut_decline_clears_offer(app_with_projects, monkeypa
     assert svc.get_pending_offer(pid) is None, "offer not cleared"
 
 
+def test_region_edit_bare_yes_measured_part_point_first(app_with_projects, monkeypatch):
+    """Issue #437: a bare "yes" via the REGION-EDIT seam (the SPA's
+    [Yes, do that] button) with NO live fill-recut offer, on a part with
+    MEASURED holes, is the point-first reply — the user must point at the
+    hole first. No offer is stored, no design loop runs (never a
+    centre-less "…: yes Pick hit point…" instruction). The chat seam has
+    this guard (fill_recut_turn); the region seam needed the twin."""
+    import d33d.design_loop_events as dle_mod
+    loop_calls: list[dict[str, Any]] = []
+
+    async def _fake_loop(app, pid, **kwargs):
+        loop_calls.append(kwargs)
+        yield ("progress", {"step": "design-loop-start"})
+        yield ("done", {"message": "ok", "kind": "loop_done"})
+
+    monkeypatch.setattr(dle_mod, "run_design_loop_with_events", _fake_loop)
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "Meas Yes"})
+        pid = r.json()["id"]
+        _set_part_columns(app_with_projects, pid, unit_status="settled")
+        _store_measured_holes(app_with_projects, pid)
+        r2 = await client.post(
+            f"/api/projects/{pid}/region-edits",
+            json=_region_edit_body(instruction="yes"),
+        )
+        source = app_with_projects.state.event_sources.get(pid)
+        frames = []
+        if source is not None:
+            async for event, data in source:
+                frames.append((event, data))
+                if event in ("done", "error"):
+                    break
+        return pid, r2.status_code, frames
+
+    pid, status, frames = _run_async(app_with_projects, _call)
+    assert status == 202, status
+    # The loop was NOT called (no centre-less instruction).
+    assert not loop_calls, f"the design loop was called: {loop_calls}"
+    done = [d for e, d in frames if e == "done"]
+    assert done, f"no done frame: {frames}"
+    # The point-first copy — point at the hole first.
+    assert done[0].get("kind") == "answer", done
+    msg = done[0]["message"]
+    assert "Point at the hole on the part first" in msg, msg
+    # No offer buttons — no offer exists to accept.
+    assert "fill_recut_offer" not in done[0], done
+    # No pending offer.
+    assert _svc(app_with_projects).get_pending_offer(pid) is None
+
+
+def test_region_edit_bare_yes_unknown_count_part_falls_through(app_with_projects, monkeypatch):
+    """Issue #437 operator decision: the point-first rule applies ONLY to
+    parts whose holes were measured. A part with UNKNOWN hole count (no
+    report / legacy row) keeps the #351 behaviour — a bare "yes" via region
+    edit is not a resize trigger, so it falls through to the design loop
+    exactly as before."""
+    import d33d.design_loop_events as dle_mod
+    loop_calls: list[dict[str, Any]] = []
+
+    async def _fake_loop(app, pid, **kwargs):
+        loop_calls.append(kwargs)
+        yield ("progress", {"step": "design-loop-start"})
+        yield ("done", {"message": "ok", "kind": "loop_done"})
+
+    monkeypatch.setattr(dle_mod, "run_design_loop_with_events", _fake_loop)
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "Unk Yes"})
+        pid = r.json()["id"]
+        # Unknown count: the part row has no hole report (report is NULL).
+        _set_part_columns(app_with_projects, pid, unit_status="settled")
+        r2 = await client.post(
+            f"/api/projects/{pid}/region-edits",
+            json=_region_edit_body(instruction="yes"),
+        )
+        source = app_with_projects.state.event_sources.get(pid)
+        frames = []
+        if source is not None:
+            async for event, data in source:
+                frames.append((event, data))
+                if event in ("done", "error"):
+                    break
+        return pid, r2.status_code, frames
+
+    _pid, status, _frames = _run_async(app_with_projects, _call)
+    assert status == 202, status
+    # The loop WAS called via the patched seam (the #351 fall-through).
+    assert loop_calls, "the design loop was not called"
+    rt = loop_calls[0].get("request_text", "")
+    assert "yes" in rt, rt
+
+
 def test_region_edit_no_part_fallthrough_runs_loop(app_with_projects, monkeypatch):
     """A region edit on a project WITHOUT a part falls through the fill-recut
     pre-route (no trigger possible) and runs the design loop normally."""

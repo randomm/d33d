@@ -29,6 +29,7 @@ from fastapi.responses import JSONResponse
 from d33d.chat_frames import answered_frames, register_event_source
 from d33d.fill_recut import (
     FILL_RECUT_DECLINE_REPLY,
+    FRILL_POINT_FIRST_REPLY,
     boundary_sentence,
     fill_and_recut_instruction,
     fill_recut_trigger,
@@ -119,6 +120,13 @@ class _FillPointAt(TypedDict):
     outcome: Literal["point_at"]
 
 
+class _FillPointFirst(TypedDict):
+    kind: Literal["answer"]
+    answer: str
+    run_loop: bool
+    outcome: Literal["point_first"]
+
+
 #: The decision union: an ``accept`` member, or any of the four
 #: answer-frame members (the caller dispatches on ``outcome``; only
 #: ``fresh_offer`` surfaces the SPA's offer buttons — the decline /
@@ -130,7 +138,15 @@ FillResult = (
     | _FillNoNormal
     | _FillNoFeature
     | _FillPointAt
+    | _FillPointFirst
 )
+
+
+def _has_measured_holes(part: dict[str, Any] | None) -> bool:
+    """Whether the part carries a measured hole list (issue #437), whether
+    or not its holes convert to mm. The region-edit twin of the chat seam's
+    guard of the same name (``d33d.fill_recut_turn._has_measured_holes``)."""
+    return has_measured_holes(part.get("report") if part else None)
 
 
 def fill_recut_region_edit(
@@ -160,7 +176,7 @@ def fill_recut_region_edit(
     (a route that would have 404'd never calls this).
 
     Returns ``{"kind": "answer", "answer": <sentence>, "run_loop":
-    bool, "outcome": "accept" | "decline" | "fresh_offer" | "no_normal",
+    bool, "outcome": "accept" | "decline" | "fresh_offer" | "no_normal" | "no_feature" | "point_at" | "point_first",
     ...}`` when the pre-route handles the turn (the caller
     registers the event source and, when ``run_loop`` is true, runs the
     design loop with the ``instruction`` field prefixed to the request
@@ -201,6 +217,24 @@ def fill_recut_region_edit(
     pending = versions.get_pending_offer(project_id)
     if pending is not None and pending.get("kind") == "fill_recut":
         return _handle_live_offer(versions, project_id, instruction, pending)
+
+    # Issue #437: a bare "yes" with NO live offer, on a part with measured
+    # holes, is the user answering a point-at ask — there is no offer to
+    # accept and no hole to fill yet. This is the region-edit twin of the
+    # chat seam's point-first guard (d33d.fill_recut_turn): the SPA's
+    # [Yes, do that] button posts to this seam, so a yes after a decline or
+    # a point-at must NOT fall through to the design loop with a
+    # centre-less "...: yes" request. Point-first reply, no loop, no offer.
+    # The measured-hole gate keeps the operator's #351 behaviour for
+    # unknown-count parts (a bare yes on those falls through as before).
+    if is_clean_yes(instruction) and _has_measured_holes(part):
+        versions.set_pending_offer(project_id, None)
+        return {
+            "kind": "answer",
+            "answer": FRILL_POINT_FIRST_REPLY,
+            "run_loop": False,
+            "outcome": "point_first",
+        }
 
     trigger = fill_recut_trigger(instruction)
     if trigger is None or trigger["noun"] in own_feature_names(
