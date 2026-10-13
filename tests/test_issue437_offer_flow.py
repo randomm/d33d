@@ -9,6 +9,7 @@ report), so no mesh load runs.
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 
 from httpx import ASGITransport, AsyncClient
@@ -17,6 +18,8 @@ from d33d import fill_recut
 from d33d.fill_recut import FILL_RECUT_DECLINE_REPLY, FRILL_POINT_FIRST_REPLY
 from d33d.fill_recut_region import fill_recut_region_edit
 from d33d.part_http import part_public
+import d33d.chat_loop as chat_loop_mod
+import d33d.design_loop_events as dle_mod
 from tests.legacy_bounds_fixtures import _set_legacy_part
 
 PLATE_REPORT = {
@@ -43,9 +46,14 @@ def _run_async(app: Any, coro_factory) -> Any:
     return asyncio.run(_run())
 
 
-async def _chat(app: Any, client: AsyncClient, pid: int, message: str):
+async def _chat(
+    app: Any, client: AsyncClient, pid: int, message: str, history: list[str] | None = None
+):
     """POST one chat turn and drive its event source to the done frame."""
-    r = await client.post(f"/api/projects/{pid}/chat", json={"message": message})
+    body: dict[str, Any] = {"message": message}
+    if history is not None:
+        body["chat_history"] = history
+    r = await client.post(f"/api/projects/{pid}/chat", json=body)
     assert r.status_code == 202, r.text
     source = app.state.event_sources.get(pid)
     assert source is not None, "no event source registered"
@@ -70,6 +78,134 @@ def _new_plate_project(app: Any, client: AsyncClient):
         return pid
 
     return _create()
+
+
+def _set_plate_without_scale(app: Any, pid: int) -> None:
+    """The QA plate's measured hole list on a row with NO usable part_scale
+    (``part_scale`` NULL): the holes are in unknown units, so none resolve
+    to mm (issue #437, review finding 1)."""
+    conn = app.state.conn
+    conn.raw.execute(
+        "UPDATE projects SET part_filename='part.stl', part_format='stl', "
+        "part_unit='mm', part_unit_status='settled', part_scale=NULL, "
+        "part_report=? WHERE id=?",
+        (json.dumps(PLATE_REPORT), pid),
+    )
+    conn.commit()
+
+
+def _new_unscaled_plate_project(app: Any, client: AsyncClient):
+    async def _create():
+        r = await client.post("/api/projects", json={"name": "Plate437b"})
+        pid = r.json()["id"]
+        _set_plate_without_scale(app, pid)
+        return pid
+
+    return _create()
+
+
+def test_measured_list_without_scale_never_offers_yes_chat(app_with_projects, monkeypatch) -> None:
+    """Review finding 1: a part with a KNOWN measured hole list but no usable
+    scale has no resolved hole — the chat turn is a point-at (no Yes, no
+    offer), and a bare "yes" is the point-first reply, never a loop."""
+    loop_calls = _capture_loop(monkeypatch)
+
+    async def _call(client):
+        pid = await _new_unscaled_plate_project(app_with_projects, client)
+        fresh = await _chat(app_with_projects, client, pid, "make the top right hole 6 mm")
+        offer = app_with_projects.state.versions.get_pending_offer(pid)
+        after_yes = await _chat(app_with_projects, client, pid, "yes")
+        return fresh, offer, after_yes
+
+    fresh, offer, after_yes = _run_async(app_with_projects, _call)
+    assert "Point at the hole" in fresh["message"], fresh
+    assert not fresh.get("fill_recut_offer"), fresh
+    assert offer is None, offer
+    assert after_yes["message"] == FRILL_POINT_FIRST_REPLY, after_yes
+    assert not loop_calls, f"the design loop ran: {loop_calls}"
+
+
+def test_measured_list_without_scale_never_offers_yes_region(app_with_projects) -> None:
+    """Review finding 1, viewer pick: the pick on a measured hole of an
+    unscaled part names no resolved hole → point-at, no offer."""
+
+    async def _call(client):
+        pid = await _new_unscaled_plate_project(app_with_projects, client)
+        row = app_with_projects.state.conn.get_project(pid)
+        part = {**part_public(row), "scale": None}
+        result = fill_recut_region_edit(
+            app_with_projects,
+            pid,
+            "make the big hole 6 mm",
+            face_normal=(0.0, 1.0, 0.0),
+            row=row,
+            part=part,
+            hit_point_mm=(112.0, 72.0, 3.0),
+        )
+        return result, app_with_projects.state.versions.get_pending_offer(pid)
+
+    result, offer = _run_async(app_with_projects, _call)
+    assert result is not None and result["outcome"] == "point_at", result
+    assert offer is None, offer
+
+
+def _capture_loop(monkeypatch) -> list[dict[str, Any]]:
+    """Replace the design loop with a recorder; returns the kwargs list."""
+    loop_calls: list[dict[str, Any]] = []
+
+    async def _fake_loop(app, pid, **kwargs):
+        loop_calls.append(kwargs)
+        yield ("done", {"message": "ok", "kind": "loop_done"})
+
+    monkeypatch.setattr(dle_mod, "run_design_loop_with_events", _fake_loop)
+    monkeypatch.setattr(chat_loop_mod, "run_design_loop_with_events", _fake_loop)
+    return loop_calls
+
+
+def test_declined_request_never_reaches_a_later_design_loop(app_with_projects, monkeypatch) -> None:
+    """Review finding 3: the declined "38 mm" request (and its decline) is
+    in the SPA's history. A later design request must not carry it into the
+    loop's history or request text."""
+    loop_calls = _capture_loop(monkeypatch)
+
+    async def _call(client):
+        pid = await _new_plate_project(app_with_projects, client)
+        await _chat(app_with_projects, client, pid, "make the top left hole 38 mm")
+        await _chat(app_with_projects, client, pid, "no")
+        await _chat(
+            app_with_projects,
+            client,
+            pid,
+            "make it 5 mm taller",
+            ["make the top left hole 38 mm", "no"],
+        )
+
+    _run_async(app_with_projects, _call)
+    assert len(loop_calls) == 1, loop_calls
+    history = loop_calls[0]["chat_history"]
+    assert not any("38" in t for t in history), history
+    assert "38" not in loop_calls[0]["request_text"], loop_calls[0]
+
+
+def test_accepted_offer_loop_history_omits_the_declined_request(app_with_projects, monkeypatch) -> None:
+    """Review finding 3, accept path: the accepted positional offer runs the
+    loop with the measured numbers, and neither the loop's history nor its
+    request text carries the declined 38 mm request."""
+    loop_calls = _capture_loop(monkeypatch)
+    history = ["make the top left hole 38 mm", "no", "make the top right hole 6 mm"]
+
+    async def _call(client):
+        pid = await _new_plate_project(app_with_projects, client)
+        await _chat(app_with_projects, client, pid, "make the top left hole 38 mm")
+        await _chat(app_with_projects, client, pid, "no")
+        await _chat(app_with_projects, client, pid, "make the top right hole 6 mm", history[:2])
+        await _chat(app_with_projects, client, pid, "yes", history)
+
+    _run_async(app_with_projects, _call)
+    assert len(loop_calls) == 1, loop_calls
+    assert not any("38" in t for t in loop_calls[0]["chat_history"]), loop_calls[0]
+    assert "38" not in loop_calls[0]["request_text"], loop_calls[0]
+    assert "(112, 72)" in loop_calls[0]["request_text"], loop_calls[0]
 
 
 def test_point_at_text_reply_has_no_yes_and_no_pending_offer(app_with_projects) -> None:
