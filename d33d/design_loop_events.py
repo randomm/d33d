@@ -1688,25 +1688,32 @@ def _feature_mismatch_sentences(
     if not matched:
         return []
     out: list[str] = []
-    for f in stated_features:
-        value = getattr(f, "value", None)
-        if not isinstance(value, (int, float)) or isinstance(value, bool):
+    seen_features: set[str] = set()
+    for name, stated_value in matched.items():
+        made = params.get(name)
+        if not isinstance(made, (int, float)) or isinstance(made, bool):
             continue
-        noun = getattr(f, "noun", "")
-        for name, stated_value in matched.items():
-            made = params.get(name)
-            if not isinstance(made, (int, float)) or isinstance(made, bool):
-                continue
-            if abs(float(made) - stated_value) <= FEATURE_MISMATCH_TOLERANCE_MM:
-                continue  # the made value is the stated one — no mismatch
-            m = meta.get(name)
-            label = m.get("label") if isinstance(m, dict) else None
-            if not isinstance(label, str) or not label:
-                label = name
-            out.append(
-                f"You asked for a {noun} {stated_value:g} mm; "
-                f"I made it {label} {float(made):g} mm"
-            )
+        if abs(float(made) - stated_value) <= FEATURE_MISMATCH_TOLERANCE_MM:
+            continue  # the made value is the stated one — no mismatch
+        # One sentence per feature (noun), not per matching param.
+        # Find the StatedFeature whose value matches this stated_value.
+        feature_noun = ""
+        for f in stated_features:
+            fval = getattr(f, "value", None)
+            if isinstance(fval, (int, float)) and not isinstance(fval, bool) and float(fval) == stated_value:
+                feature_noun = getattr(f, "noun", "")
+                break
+        if feature_noun in seen_features:
+            continue  # already emitted a sentence for this feature
+        seen_features.add(feature_noun)
+        m = meta.get(name)
+        label = m.get("label") if isinstance(m, dict) else None
+        if not isinstance(label, str) or not label:
+            label = name
+        out.append(
+            f"You asked for a {feature_noun} {stated_value:.1f} mm; "
+            f"I made it {label} {float(made):.1f} mm."
+        )
     return out
 
 

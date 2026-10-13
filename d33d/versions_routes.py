@@ -889,6 +889,9 @@ def _finalize_loop_kwargs(
     db_path = getattr(app.state, "db_path", None)
     data_dir = Path(db_path).parent if db_path is not None else Path(".")
 
+    row = app.state.versions.get_project(project_id)
+    assert row is not None  # already 404'd above
+
     # Issue #433: the stated FEATURE sizes for the finalize seam (the
     # feature-side sibling of the ``state_stated`` / ``state_bbox`` block
     # inputs): the project's carried set + the finalize message's
@@ -960,9 +963,6 @@ def _finalize_loop_kwargs(
             "finalize route llm_fn must never be called "
             "(the production closure builds its own llm_fn)"
         )
-
-    row = app.state.versions.get_project(project_id)
-    assert row is not None  # already 404'd above
 
     # The photo gate (issue #299 — the finalize seam's twin of the chat
     # path's ``photo_data_uri`` / ``photo_lost`` gate, #295): the

@@ -1352,38 +1352,6 @@ def _stated_feature_lines(stated_features: Any) -> list[str]:
 
     The feature-side sibling of the design-state block: one line per
     carried :class:`~d33d.statement_extraction.StatedFeature`, rendered
-    as ``Stated feature: {noun} {value:g} mm`` — the model's ground truth
-    for the feature's size (the ``a 5 mm hole`` the user stated, which
-    the axis lexicon deliberately keeps OUT of the W/D/H block). ``None``
-    / an empty list renders NOTHING (the no-version / no-feature-statement
-    case is byte-identical to today's prompt — the line is additive, like
-    the import section). An explicit ``role`` renders the size as
-    ``{noun} ({role})`` so the model can bind the value to the right
-    parameter (``hole (diameter) 5 mm``).
-    """
-    if not stated_features:
-        return []
-    lines: list[str] = []
-    for f in stated_features:
-        if not isinstance(f, (int, float)) or isinstance(f, bool):
-            continue
-        value = float(getattr(f, "value", 0.0))
-        if value <= 0:
-            continue
-        noun = getattr(f, "noun", "")
-        role = getattr(f, "role", None)
-        if role:
-            lines.append(f"Stated feature: {noun} ({role}) = {value:g} mm")
-        else:
-            lines.append(f"Stated feature: {noun} = {value:g} mm")
-    return lines
-
-
-def _stated_feature_lines(stated_features: Any) -> list[str]:
-    """The stated FEATURE lines for the design prompt (issue #433).
-
-    The feature-side sibling of the design-state block: one line per
-    carried :class:`~d33d.statement_extraction.StatedFeature`, rendered
     as ``Stated feature: {noun} = {value:g} mm`` — the model's ground
     truth for the feature's size (the ``a 5 mm hole`` the user stated,
     which the axis lexicon deliberately keeps OUT of the W/D/H block).

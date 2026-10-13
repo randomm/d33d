@@ -338,7 +338,7 @@ def stated_features_from_messages(
     ``user_quoted_unmapped_mm``'s tier-2 scan.
     """
     from d33d import feature_clause
-    from d33d.axis_lexicon import _split_on_and, _numbers_in, _word_re
+    from d33d.axis_lexicon import _numbers_in, _split_on_and, _word_re
 
     #: The current (message index, records) per (noun, role) key — a later
     #: message restating the same key replaces the earlier records; the

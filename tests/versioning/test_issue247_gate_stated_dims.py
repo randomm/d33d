@@ -465,6 +465,8 @@ def test_chat_feature_clause_stated_value_reaches_design_state(
     assert feats[0].noun == "hole"
     assert feats[0].value == 10.0
 
+
+def test_chat_global_cue_releases_all_axes(app_with_versions):
     """CARRY-FORWARD (issue #261, global cue): "make it bigger" on a
     project whose latest row persists a FULL {W: 12, D: 8, H: 5} set —
     the loop receives ``None`` (the global cue releases ALL THREE axes,
