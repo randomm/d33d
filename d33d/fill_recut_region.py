@@ -33,6 +33,7 @@ from d33d.fill_recut import (
     boundary_sentence,
     fill_and_recut_instruction,
     fill_recut_trigger,
+    is_bare_affirmation,
     is_clean_no,
     is_clean_yes,
     own_feature_names,
@@ -231,8 +232,14 @@ def fill_recut_region_edit(
     # Mirroring the chat seam's predicate, the trigger is evaluated FIRST
     # and wins: a resize like "make the right hole 38 mm" contains the
     # affirmation word "right", but it is a fresh trigger, never a bare
-    # yes, so it must reach the offer, not the point-first reply.
-    if trigger is None and is_clean_yes(instruction) and _has_measured_holes(part):
+    # yes, so it must reach the offer, not the point-first reply. The
+    # guard is ``is_bare_affirmation`` (not ``is_clean_yes``): a yes plus
+    # an instruction is real work, not an acceptance.
+    if (
+        trigger is None
+        and is_bare_affirmation(instruction)
+        and _has_measured_holes(part)
+    ):
         versions.set_pending_offer(project_id, None)
         return {
             "kind": "answer",

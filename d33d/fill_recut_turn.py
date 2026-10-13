@@ -26,6 +26,7 @@ from d33d.fill_recut import (
     boundary_sentence,
     fill_and_recut_instruction,
     fill_recut_trigger,
+    is_bare_affirmation,
     is_clean_no,
     is_clean_yes,
     no_match_hole_reply,
@@ -307,13 +308,19 @@ def _fill_recut_turn_body(
 
     if pending is None:
         trigger = fill_recut_trigger(message)
-        # Issue #437: a bare "yes" with NO live offer, on a part with
+        # Issue #437: a BARE affirmation with NO live offer, on a part with
         # measured holes, is the user answering a point-at ask — there is
         # no offer to accept and no hole to fill yet. Point-first reply,
-        # no loop, no offer (never a centre-less instruction). A resize
-        # request is never a bare yes ("top right" contains "right", which
-        # the affirmation heuristic reads as a yes), so the trigger wins.
-        if trigger is None and is_clean_yes(message) and _has_measured_holes(part):
+        # no loop, no offer (never a centre-less instruction). A yes plus
+        # an instruction ("yes, add a chamfer here") is NOT a bare
+        # affirmation (``is_bare_affirmation``), and a resize request is
+        # never a bare yes ("top right" contains "right"), so the trigger
+        # wins either way.
+        if (
+            trigger is None
+            and is_bare_affirmation(message)
+            and _has_measured_holes(part)
+        ):
             return {
                 "kind": "answer",
                 "answer": FRILL_POINT_FIRST_REPLY,

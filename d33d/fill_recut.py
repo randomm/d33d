@@ -335,6 +335,46 @@ def is_clean_yes(message: str) -> bool:
 
     return _is_clean_affirmation(message)
 
+#: The closed bare-affirmation token set (issue #437, adversarial review):
+#: a point-first reply is warranted ONLY for an acceptance with nothing
+#: else in the turn — every token in this set. A yes plus an instruction
+#: ("yes, add a chamfer here") carries real work and must not be swallowed
+#: by the point-first guard. Punctuation is stripped before tokenising.
+_BARE_AFFIRMATION_TOKENS = frozenset(
+    {
+        "yes",
+        "yeah",
+        "yep",
+        "ok",
+        "okay",
+        "sure",
+        "please",
+        "do",
+        "that",
+        "it",
+        "go",
+        "ahead",
+        "right",
+        "accept",
+    }
+)
+
+
+def is_bare_affirmation(text: str) -> bool:
+    """True if ``text`` is a BARE affirmation — short, no question mark,
+    and every token in :data:`_BARE_AFFIRMATION_TOKENS`. The point-first
+    guards (the chat seam ``fill_recut_turn`` and the region-edit seam
+    ``fill_recut_region_edit``) use this instead of :func:`is_clean_yes`:
+    ``is_clean_yes`` accepts any short turn containing a yes/right/ok token
+    ("yes, add a chamfer here"), which must proceed as a normal turn, not
+    get the point-first reply."""
+    if "?" in text:
+        return False
+    tokens = re.findall(r"[a-z']+", text.lower().replace("-", " "))
+    if not tokens or len(tokens) > 6:
+        return False
+    return all(t in _BARE_AFFIRMATION_TOKENS for t in tokens)
+
 def is_clean_no(message: str) -> bool:
     """The fill-and-recut offer's decline predicate: a short turn with
     a negation token or "leave it", no question mark, no affirmative."""
@@ -470,6 +510,7 @@ __all__ = [
     "boundary_sentence",
     "fill_and_recut_instruction",
     "fill_recut_trigger",
+    "is_bare_affirmation",
     "is_clean_no",
     "is_clean_yes",
     "no_match_hole_reply",

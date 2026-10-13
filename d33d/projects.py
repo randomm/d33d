@@ -35,7 +35,6 @@ from d33d.chat_frames import answered_frames as _answered_frames
 from d33d.chat_loop import run_design_loop as chat_loop_run_design_loop
 from d33d.design_frames import PHOTO_MISSING_NOTICE, SAVED_DESIGN_MISSING_REPLY
 from d33d.design_loop_events import photo_storage_signal
-from d33d.dimension_protocol import _is_clean_affirmation
 from d33d.part_units import USABLE_UNIT_STATUSES
 from d33d.photo_upload import photo_upload_route
 from d33d.project_git import (
@@ -174,7 +173,11 @@ def _is_bare_affirmation_no_offer(
         # A live offer of either shape (param or fill-recut) — its own
         # pre-route handles it; the guard never steals that acceptance.
         return False
-    return _is_clean_affirmation(message)
+    # Issue #437 (adversarial review): the narrow BARE-affirmation
+    # predicate, not the clean-affirmation heuristic — a yes plus an
+    # instruction ("yes, add a chamfer here") carries real work and must
+    # flow to the design loop, never the no-offer notice.
+    return fill_recut.is_bare_affirmation(message)
 
 
 async def _confirm_offer_route(app: Any, project_id: int, message: str):

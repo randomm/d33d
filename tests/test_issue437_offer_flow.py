@@ -473,3 +473,176 @@ def test_positional_hole_request_without_holes_is_the_no_hole_reply(app_with_pro
     assert "I don't see a hole on the part" in done["message"], done
     assert not done.get("fill_recut_offer"), done
     assert offer is None, offer
+
+
+# ---------------------------------------------------------------------------
+# Issue #437 (adversarial review): the point-first guard must fire ONLY on a
+# BARE affirmation. "yes" + an instruction is a normal turn (trigger / design
+# loop), never the point-first reply.
+# ---------------------------------------------------------------------------
+
+
+BARE_AFFIRMATIONS = [
+    "yes",
+    "yes, do that",
+    "ok",
+    "yes please",
+    "Yes, do that",  # the SPA [Yes, do that] button's exact posted text
+    "yeah",
+    "sure, go ahead",
+]
+
+
+def test_is_bare_affirmation_accepts_only_closed_set() -> None:
+    """The narrow predicate: every token in the closed affirmation set,
+    nothing else."""
+    from d33d.fill_recut import is_bare_affirmation
+
+    for text in BARE_AFFIRMATIONS:
+        assert is_bare_affirmation(text), text
+    for text in [
+        "yes, add a chamfer here",
+        "ok, make it 5 mm taller",
+        "right, also add a tab",
+        "yes make the top left hole 38 mm",
+        "",
+        "maybe",
+        "yes?",
+    ]:
+        assert not is_bare_affirmation(text), text
+
+
+def test_chat_yes_plus_instruction_is_not_point_first(app_with_projects, monkeypatch) -> None:
+    """Chat seam, measured part, no live offer: "ok, make it 5 mm taller"
+    must NOT get the point-first reply — it is not a bare affirmation,
+    and it is not the #349 no-offer notice either (it carries a real
+    instruction, so the normal route applies: the design loop runs)."""
+    loop_calls = _capture_loop(monkeypatch)
+
+    async def _call(client):
+        pid = await _new_plate_project(app_with_projects, client)
+        done = await _chat(app_with_projects, client, pid, "ok, make it 5 mm taller")
+        return done
+
+    done = _run_async(app_with_projects, _call)
+    assert done["message"] != FRILL_POINT_FIRST_REPLY, done
+    assert "nothing waiting for a yes" not in done["message"], done
+    assert not done.get("fill_recut_offer"), done
+    # The normal route: the design loop ran ("taller" is not a trigger
+    # noun, so no offer, no pre-route answer).
+    assert len(loop_calls) == 1, loop_calls
+
+
+def test_chat_yes_plus_chamfer_instruction_is_not_point_first(app_with_projects, monkeypatch) -> None:
+    """Chat seam, measured part, no live offer: "yes, add a chamfer here" is
+    a real instruction ("yes" + verb), never the point-first reply and
+    never the #349 no-offer notice — the design loop runs."""
+    loop_calls = _capture_loop(monkeypatch)
+
+    async def _call(client):
+        pid = await _new_plate_project(app_with_projects, client)
+        done = await _chat(app_with_projects, client, pid, "yes, add a chamfer here")
+        return done
+
+    done = _run_async(app_with_projects, _call)
+    assert done["message"] != FRILL_POINT_FIRST_REPLY, done
+    assert "nothing waiting for a yes" not in done["message"], done
+    assert not done.get("fill_recut_offer"), done
+    assert len(loop_calls) == 1, loop_calls
+
+
+def test_region_yes_plus_instruction_is_not_point_first(app_with_projects, monkeypatch) -> None:
+    """Region-edit seam, measured part, no live offer: a "yes, ..." region
+    instruction is NOT the point-first reply — "yes, add a tab" is a yes
+    plus an instruction, so it proceeds as before: the pre-route returns
+    None (a "yes" prefix is not a bare affirmation) and the design loop
+    runs with the user's real instruction."""
+    loop_calls = _capture_loop(monkeypatch)
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "YesInstr"})
+        pid = r.json()["id"]
+        _set_legacy_part(app_with_projects, pid, PLATE_REPORT)
+        r2 = await client.post(
+            f"/api/projects/{pid}/region-edits",
+            json=_region_edit_body(instruction="yes, add a tab"),
+        )
+        source = app_with_projects.state.event_sources.get(pid)
+        frames = []
+        if source is not None:
+            async for event, data in source:
+                frames.append((event, data))
+                if event in ("done", "error"):
+                    break
+        return pid, r2.status_code, frames
+
+    _pid, status, frames = _run_async(app_with_projects, _call)
+    assert status == 202, status
+    assert len(loop_calls) == 1, loop_calls
+    assert "yes, add a tab" in loop_calls[0]["request_text"], loop_calls[0]
+    done = [d for e, d in frames if e == "done"]
+    assert done, frames
+    assert "Point at the hole on the part first" not in done[0]["message"], done[0]
+
+
+def test_region_bare_affirmations_stay_point_first(app_with_projects, monkeypatch) -> None:
+    """Region-edit seam, measured part, no live offer: the closed set of bare
+    affirmations (including the SPA button's exact text) still gets the
+    point-first reply — no loop, no offer."""
+    import d33d.design_loop_events as dle_mod
+
+    loop_calls: list[dict[str, Any]] = []
+
+    async def _fake_loop(app, pid, **kwargs):
+        loop_calls.append(kwargs)
+        yield ("done", {"message": "ok", "kind": "loop_done"})
+
+    monkeypatch.setattr(dle_mod, "run_design_loop_with_events", _fake_loop)
+
+    async def _call(client):
+        results = []
+        for text in ("yes", "yes, do that", "ok", "yes please", "Yes, do that"):
+            r = await client.post("/api/projects", json={"name": f"Bare-{text}"})
+            pid = r.json()["id"]
+            _set_legacy_part(app_with_projects, pid, PLATE_REPORT)
+            r2 = await client.post(
+                f"/api/projects/{pid}/region-edits",
+                json=_region_edit_body(instruction=text),
+            )
+            assert r2.status_code == 202, r2.text
+            source = app_with_projects.state.event_sources.get(pid)
+            done = None
+            if source is not None:
+                async for event, data in source:
+                    if event == "done":
+                        done = data
+                        break
+            results.append((text, done, app_with_projects.state.versions.get_pending_offer(pid)))
+        return results
+
+    results = _run_async(app_with_projects, _call)
+    assert results, "no results"
+    assert not loop_calls, f"the design loop ran: {loop_calls}"
+    for text, done, offer in results:
+        assert done is not None, (text, done)
+        assert "Point at the hole on the part first" in done["message"], (text, done)
+        assert offer is None, (text, offer)
+
+
+def test_chat_bare_affirmations_stay_point_first(app_with_projects) -> None:
+    """Chat seam, measured part, no live offer: the bare affirmations (the
+    closed set incl. the SPA button text) still get the point-first reply.
+    "yes" + instruction is covered by the two tests above."""
+
+    async def _call(client):
+        pid = await _new_plate_project(app_with_projects, client)
+        results = []
+        for text in ("yes, do that", "ok", "yes please", "Yes, do that"):
+            done = await _chat(app_with_projects, client, pid, text)
+            results.append((text, done))
+        return results
+
+    results = _run_async(app_with_projects, _call)
+    for text, done in results:
+        assert done["message"] == FRILL_POINT_FIRST_REPLY, (text, done)
+        assert not done.get("fill_recut_offer"), (text, done)
