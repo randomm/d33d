@@ -490,12 +490,26 @@ BARE_AFFIRMATIONS = [
     "Yes, do that",  # the SPA [Yes, do that] button's exact posted text
     "yeah",
     "sure, go ahead",
+    # Issue #437 (adversarial round 2): pure acknowledgements that the OLD
+    # clean-affirmation predicate caught (they carried a yes/ok/correct
+    # token) — the widened closed set must keep them bare so the #349
+    # no-offer guard still answers them (never the design loop).
+    "yes thanks",
+    "yes that's great",
+    "ok cool",
+    "yep go for it",
+    "correct",
+    "confirmed",
+    "right, sounds good",
+    "yes, go for it",
 ]
 
 
 def test_is_bare_affirmation_accepts_only_closed_set() -> None:
     """The narrow predicate: every token in the closed affirmation set,
-    nothing else."""
+    nothing else. Instruction verbs/nouns keep a yes-plus-instruction turn
+    out of the set (it must reach the design loop, not the point-first
+    reply or the #349 no-offer notice)."""
     from d33d.fill_recut import is_bare_affirmation
 
     for text in BARE_AFFIRMATIONS:
@@ -505,9 +519,32 @@ def test_is_bare_affirmation_accepts_only_closed_set() -> None:
         "ok, make it 5 mm taller",
         "right, also add a tab",
         "yes make the top left hole 38 mm",
+        "make it 5 mm taller",
+        "add a chamfer here",
         "",
         "maybe",
         "yes?",
+    ]:
+        assert not is_bare_affirmation(text), text
+
+
+def test_is_bare_affirmation_rejects_negation() -> None:
+    """Issue #437 (adversarial round 2): a negation token (no/nope/nah/…) is
+    in the widened set (so "nope, thanks" tokenises fully) but DISQUALIFIES
+    bare-affirmation status, exactly as the old clean-affirmation predicate
+    treated it — a decline is never a bare yes (a decline is handled by
+    ``is_clean_no``, never by the point-first or #349 guard)."""
+    from d33d.fill_recut import is_bare_affirmation
+
+    for text in [
+        "nope, thanks",
+        "no",
+        "no problem, thanks",
+        "nah, thanks",
+        "never, thanks",
+        "not sure, thanks",
+        "incorrect",
+        "wrong, thanks",
     ]:
         assert not is_bare_affirmation(text), text
 
@@ -646,3 +683,60 @@ def test_chat_bare_affirmations_stay_point_first(app_with_projects) -> None:
     for text, done in results:
         assert done["message"] == FRILL_POINT_FIRST_REPLY, (text, done)
         assert not done.get("fill_recut_offer"), (text, done)
+
+
+# ---------------------------------------------------------------------------
+# Issue #437 (adversarial round 2): the widened bare-affirmation set must
+# keep PURE ACKNOWLEDGEMENTS on the #349 no-offer reply (never the design
+# loop) — the old clean-affirmation predicate caught them, the narrowed
+# closed set let them through. End to end through the chat route, no
+# version, no live offer (the #349 guard's shape).
+# ---------------------------------------------------------------------------
+
+
+def test_acknowledgement_no_offler_replies_no_offer_no_loop(app_with_projects, monkeypatch) -> None:
+    """Issue #437 (adversarial round 2), end to end: a pure acknowledgement
+    ("yes thanks", "ok cool", "yep go for it", "correct") with NO version
+    and NO live offer is a bare affirmation under the widened set — the
+    #349 guard answers it with the deterministic no-offer reply. The
+    design loop is NOT called, NO version is created. These turns used to
+    get the no-offer reply under the old clean-affirmation predicate; the
+    narrowed closed set (round 1) let them run a full loop."""
+    from d33d.question_answer import NO_OFFER_AFFIRMATION_REPLY
+
+    loop_calls: list[dict[str, Any]] = []
+
+    async def _fake_loop(app, pid, **kwargs):
+        loop_calls.append(kwargs)
+        yield ("progress", {"step": "design-loop-start"})
+        yield ("done", {"message": "ok", "kind": "loop_done"})
+
+    monkeypatch.setattr(dle_mod, "run_design_loop_with_events", _fake_loop)
+    monkeypatch.setattr(chat_loop_mod, "run_design_loop_with_events", _fake_loop)
+
+    async def _call(client):
+        results = []
+        for text in ("yes thanks", "ok cool", "yep go for it", "correct"):
+            r = await client.post("/api/projects", json={"name": f"Ack-{text}"})
+            pid = r.json()["id"]
+            # No version, no part, no offer — the #349 guard's shape.
+            r2 = await client.post(f"/api/projects/{pid}/chat", json={"message": text})
+            assert r2.status_code == 202, r2.text
+            source = app_with_projects.state.event_sources.get(pid)
+            assert source is not None, "event source not registered"
+            frames = []
+            async for event, data in source:
+                frames.append((event, data))
+                if event in ("done", "error"):
+                    break
+            done = [d for e, d in frames if e == "done"]
+            results.append((text, done, len(app_with_projects.state.versions.list_versions(pid))))
+        return results
+
+    results = _run_async(app_with_projects, _call)
+    assert not loop_calls, f"the design loop ran on an acknowledgement: {loop_calls}"
+    for text, done, version_count in results:
+        assert done, (text, done)
+        assert version_count == 0, f"no version may be created for {text!r}: {version_count}"
+        assert done[0].get("kind") == "answer", (text, done)
+        assert done[0]["message"] == NO_OFFER_AFFIRMATION_REPLY, (text, done)

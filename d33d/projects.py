@@ -135,9 +135,9 @@ def _is_bare_affirmation_no_offer(
     message: str,
     latest: dict[str, Any] | None = None,
 ) -> bool:
-    """True iff ``message`` is a CLEAN AFFIRMATION (the issue #249
-    heuristic — ``_is_clean_affirmation`` — "yes" yes; "yes but make it
-    2 mm" no) and NO live offer is pending (the guard checks
+    """True iff ``message`` is a BARE AFFIRMATION (the issue #437
+    closed-set ``is_bare_affirmation`` — "yes" yes; "yes, add a chamfer
+    here" no) and NO live offer is pending (the guard checks
     ``versions.get_pending_offer`` itself — issue #349: the guard is
     self-sufficient, the caller no longer has to establish the no-offer
     state upstream). ``latest`` is the caller's existing
@@ -147,11 +147,15 @@ def _is_bare_affirmation_no_offer(
     the fill-recut path nor the offer pre-route creates versions, so it
     is the correct "is this #250 offer live" check.
 
-    The predicate itself is the EXISTING clean-affirmation heuristic,
-    unchanged (operator decision 1, issue #349) — the SAME predicate
-    ``is_pending_offer_acceptance`` uses. The "no live offer" condition
-    is the guard's OWN: a LIVE offer of either shape suppresses the
-    guard (a bare "yes" must never steal an acceptance that the
+    The predicate is the BARE-affirmation closed-set
+    (``fill_recut.is_bare_affirmation``), narrowed from the old
+    clean-affirmation heuristic (issue #437 adversarial review): a yes
+    plus an instruction ("yes, add a chamfer here") is real work and
+    must flow to the design loop, never the no-offer notice; a pure
+    acknowledgement ("yes thanks", "ok cool", "correct") is bare and
+    gets the no-offer reply. The "no live offer" condition is the
+    guard's OWN: a LIVE offer of either shape suppresses the guard (a
+    bare "yes" must never steal an acceptance that the
     offer pre-routes handle); everything else — no pending offer at
     all, a fill-recut offer that was already declined/cleared, or a
     stale #250 param offer whose version is no longer the latest

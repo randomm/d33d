@@ -340,6 +340,17 @@ def is_clean_yes(message: str) -> bool:
 #: else in the turn — every token in this set. A yes plus an instruction
 #: ("yes, add a chamfer here") carries real work and must not be swallowed
 #: by the point-first guard. Punctuation is stripped before tokenising.
+#
+#: The set is the BARE affirmative words plus the acknowledgement words the
+#: old #349 clean-affirmation predicate caught ("yes thanks", "ok cool",
+#: "correct", … — an acknowledgement with no instruction content) and the
+#: NEGATION/stop words (no, nope, nah, …) the old predicate disqualified.
+#: The negation tokens are in the set so an acknowledgement like "nope,
+#: thanks" tokenises fully, but ``is_bare_affirmation`` rejects ANY turn
+#: carrying one (a decline is never a bare yes — it is handled by
+#: ``is_clean_no``, never by the point-first or #349 guard). Instruction
+#: verbs and nouns (add, make, hole, chamfer, mm, …) stay OUT, so a
+#: yes-plus-instruction still reaches the design loop.
 _BARE_AFFIRMATION_TOKENS = frozenset(
     {
         "yes",
@@ -351,12 +362,48 @@ _BARE_AFFIRMATION_TOKENS = frozenset(
         "please",
         "do",
         "that",
+        "that's",
         "it",
         "go",
         "ahead",
         "right",
         "accept",
+        # Acknowledgement words (the #349 no-offer guard's catch net):
+        "thanks",
+        "thank",
+        "you",
+        "great",
+        "good",
+        "sounds",
+        "perfect",
+        "cool",
+        "fine",
+        "looks",
+        "lgtm",
+        "for",
+        "correct",
+        "confirmed",
+        "correctly",
+        # Negation / stop words — in the set so "nope, thanks" tokenises
+        # fully, but they DISQUALIFY bare-affirmation status (see
+        # _BARE_NEGATION_TOKENS): a decline is never a bare yes.
+        "no",
+        "not",
+        "nope",
+        "nah",
+        "wrong",
+        "incorrect",
+        "never",
+        "reconsider",
     }
+)
+
+#: The subset of :data:`_BARE_AFFIRMATION_TOKENS` that DISQUALIFIES
+#: bare-affirmation status: a turn carrying any of these is a decline or
+#: a hedge, never a bare yes (the old clean-affirmation predicate rejected
+#: the same tokens). ``is_clean_no`` handles the declines.
+_BARE_NEGATION_TOKENS = frozenset(
+    {"no", "not", "nope", "nah", "wrong", "incorrect", "never", "reconsider"}
 )
 
 
@@ -372,6 +419,10 @@ def is_bare_affirmation(text: str) -> bool:
         return False
     tokens = re.findall(r"[a-z']+", text.lower().replace("-", " "))
     if not tokens or len(tokens) > 6:
+        return False
+    if set(tokens) & _BARE_NEGATION_TOKENS:
+        # A decline or hedge ("nope, thanks", "not sure") — never a bare
+        # yes; ``is_clean_no`` owns the declines.
         return False
     return all(t in _BARE_AFFIRMATION_TOKENS for t in tokens)
 
