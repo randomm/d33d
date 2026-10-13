@@ -38,7 +38,7 @@ from d33d.fill_recut import (
     point_at_sentence,
 )
 from d33d.hole_position import nearest_hole_to_point
-from d33d.hole_select import holes_in_mm
+from d33d.hole_select import has_measured_holes, holes_in_mm
 from d33d.part_holes import HOLE_NOUNS, no_hole_reply, part_has_hole_evidence
 from d33d.part_units import USABLE_UNIT_STATUSES
 
@@ -235,7 +235,7 @@ def fill_recut_region_edit(
     if trigger["noun"] in HOLE_NOUNS and face_normal is not None:
         report = part.get("report") if part else None
         holes = holes_in_mm(report, part.get("scale")) if report else []
-        needs_hole = bool(holes)
+        needs_hole = has_measured_holes(report)
         hole = nearest_hole_to_point(holes, hit_point_mm)
     return _handle_fresh_trigger(
         versions,

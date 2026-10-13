@@ -354,6 +354,21 @@ def _numeric_vec(values: Any, length: int) -> list[float] | None:
     return out
 
 
+def has_measured_holes(report: Any) -> bool:
+    """True when the stored report carries a MEASURED hole list (issue #437).
+
+    This is the raw list, independent of its mm conversion: a part whose
+    list is known but whose scale is unusable has measured holes that
+    resolve to no location, so the offer must point at them rather than
+    offer a centre-less Yes. :func:`holes_in_mm` is the mm view.
+    """
+    return (
+        isinstance(report, dict)
+        and isinstance(report.get("holes"), list)
+        and len(report["holes"]) > 0
+    )
+
+
 def holes_in_mm(report: dict[str, Any] | None, scale: float | None) -> list[dict[str, Any]]:
     """The stored ``part_report["holes"]`` list converted to MM (issue
     #396).

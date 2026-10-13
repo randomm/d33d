@@ -30,7 +30,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, field_validator
 
 from d33d import db as db_mod
-from d33d import fill_recut
+from d33d import fill_recut, fill_recut_history
 from d33d.chat_frames import answered_frames as _answered_frames
 from d33d.chat_loop import run_design_loop as chat_loop_run_design_loop
 from d33d.design_frames import PHOTO_MISSING_NOTICE, SAVED_DESIGN_MISSING_REPLY
@@ -627,7 +627,15 @@ def create_projects_router() -> APIRouter:
         # the photo capture, and the loop's event-source registration) lives
         # in ``d33d.chat_loop`` — the thin entry point keeps this router file
         # under the 500-line split threshold (AGENTS.md).
-        chat_history = tuple(body.chat_history or ())
+        # Issue #437: the fill-and-recut requests the pre-route answered
+        # (a declined size included) never reach the loop's history.
+        chat_history = fill_recut_history.loop_chat_history(
+            body.chat_history,
+            own_names=fill_recut.own_feature_names(
+                app.state.versions.latest_version(project_id)
+            ),
+            part_usable=_part is not None,
+        )
         try:
             return await chat_loop_run_design_loop(
                 app,

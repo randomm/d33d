@@ -34,6 +34,7 @@ from d33d.fill_recut import (
 )
 from d33d.hole_select import _NO_MATCH as _NO_MATCH_HOLE
 from d33d.hole_select import (
+    has_measured_holes,
     holes_in_mm,
     report_bounds_mm,
     select_measured_hole,
@@ -312,7 +313,7 @@ def _fill_recut_turn_body(
         # no loop, no offer (never a centre-less instruction). A resize
         # request is never a bare yes ("top right" contains "right", which
         # the affirmation heuristic reads as a yes), so the trigger wins.
-        if trigger is None and is_clean_yes(message) and _measured_holes(part):
+        if trigger is None and is_clean_yes(message) and _has_measured_holes(part):
             return {
                 "kind": "answer",
                 "answer": FRILL_POINT_FIRST_REPLY,
@@ -432,6 +433,12 @@ def _fill_recut_turn_body(
                             offer_dict["center"] = selected.get("center")
                             offer_dict["axis"] = selected.get("axis")
                             offer_dict["diameter_mm"] = selected.get("diameter_mm")
+                    elif has_measured_holes(report):
+                        # Issue #437: the part HAS a measured hole list but
+                        # none converts to mm (no usable scale) — there is no
+                        # location to offer, so point at the hole (never a
+                        # centre-less Yes).
+                        point_at_fallback = True
 
                 if point_at_fallback:
                     # Issue #437: the point-at reply stores NO offer (the
@@ -471,12 +478,10 @@ def _fill_recut_turn_body(
     return None
 
 
-def _measured_holes(part: dict[str, Any] | None) -> list[dict[str, Any]]:
-    """The part's measured holes in mm (issue #437) — ``[]`` when the part
-    has no report or no usable scale (``holes_in_mm`` never returns file
-    units)."""
-    report = part.get("report") if part else None
-    return holes_in_mm(report, part.get("scale")) if report else []
+def _has_measured_holes(part: dict[str, Any] | None) -> bool:
+    """Whether the part carries a measured hole list (issue #437), whether
+    or not its holes convert to mm."""
+    return has_measured_holes(part.get("report") if part else None)
 
 
 def _report_is_legacy(report: dict[str, Any] | None) -> bool:
