@@ -14,12 +14,12 @@ from typing import Any
 
 from httpx import ASGITransport, AsyncClient
 
+import d33d.chat_loop as chat_loop_mod
+import d33d.design_loop_events as dle_mod
 from d33d import fill_recut
 from d33d.fill_recut import FILL_RECUT_DECLINE_REPLY, FRILL_POINT_FIRST_REPLY
 from d33d.fill_recut_region import fill_recut_region_edit
 from d33d.part_http import part_public
-import d33d.chat_loop as chat_loop_mod
-import d33d.design_loop_events as dle_mod
 from tests.legacy_bounds_fixtures import _set_legacy_part
 
 PLATE_REPORT = {
