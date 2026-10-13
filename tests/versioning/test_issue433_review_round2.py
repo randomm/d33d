@@ -37,22 +37,54 @@ class _Conn:
 
 
 @pytest.mark.parametrize("corrupt", ["{not json", '{"noun": "hole"}', "42"])
-def test_corrupt_stored_carry_is_left_unchanged_and_warned(
+def test_corrupt_stored_carry_is_replaced_when_new_set_is_non_empty(
     corrupt: str, caplog: pytest.LogCaptureFixture
 ) -> None:
-    from d33d.stated_carry import carry_stated_features_for_turn
+    """An unreadable row never stays corrupt forever: once a turn states a
+    feature, the new set replaces it and the replacement is logged with the
+    replaced value's length (permanent loss of every future statement is worse
+    than replacing a derived column)."""
+    from d33d.stated_carry import (
+        carried_stated_features,
+        carry_stated_features_for_turn,
+    )
 
     conn = _Conn({"carried_stated_features": corrupt})
     with caplog.at_level(logging.WARNING, logger="d33d.stated_carry"):
         merged = carry_stated_features_for_turn(conn, 11, "a 5 mm hole")
 
     assert [(f.noun, f.value) for f in merged] == [("hole", 5.0)]
+    assert len(conn.writes) == 1
+    assert carried_stated_features(conn.get_project(11)) == merged
+    messages = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any(
+        "11" in m and "carried_stated_features" in m and str(len(corrupt)) in m
+        for m in messages
+    ), caplog.text
+
+
+def test_corrupt_stored_carry_stays_when_new_set_is_empty() -> None:
+    """With nothing new to carry, a corrupt row is not rewritten to an empty set."""
+    from d33d.stated_carry import carry_stated_features_for_turn
+
+    conn = _Conn({"carried_stated_features": "{not json"})
+    merged = carry_stated_features_for_turn(conn, 12, "make it taller")
+
+    assert merged == []
     assert conn.writes == []
-    assert conn.row["carried_stated_features"] == corrupt
-    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-    assert len(warnings) == 1, caplog.text
-    assert "11" in warnings[0].getMessage()
-    assert "carried_stated_features" in warnings[0].getMessage()
+
+
+def test_read_side_cap_keeps_newest_features() -> None:
+    """A tampered row over the cap keeps the NEWEST 32 on read, matching the
+    write side (the oldest entries are the ones dropped)."""
+    from d33d.stated_carry import carried_stated_features
+
+    stored = [{"noun": "hole", "role": None, "value": float(i + 1)} for i in range(40)]
+    out = carried_stated_features({"carried_stated_features": json.dumps(stored)})
+
+    assert len(out) == 32
+    assert out[0].value == 9.0
+    assert out[-1].value == 40.0
 
 
 # ---------------------------------------------------------------------------
