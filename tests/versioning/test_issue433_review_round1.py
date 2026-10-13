@@ -14,22 +14,10 @@ import pytest
 
 from d33d.statement_extraction import StatedFeature
 
-_WRITE_SQL = "UPDATE projects SET carried_stated_features"
-
-
-class _Raw:
-    def __init__(self, fail_write: bool = False, fail_read: bool = False) -> None:
-        self.fail_write = fail_write
-        self.executed: list[str] = []
-
-    def execute(self, sql: str, *args: Any) -> None:
-        self.executed.append(sql)
-        if self.fail_write and sql.startswith(_WRITE_SQL):
-            raise sqlite3.OperationalError("disk I/O error")
-
 
 class _Conn:
-    """A stand-in for the db wrapper: ``get_project`` / ``raw`` / ``commit``."""
+    """A stand-in for the versions repository: ``get_project`` and the
+    ``set_carried_stated_features`` accessor (the only carried-column writer)."""
 
     def __init__(
         self,
@@ -40,15 +28,18 @@ class _Conn:
     ) -> None:
         self.row = row
         self.fail_read = fail_read
-        self.raw = _Raw(fail_write=fail_write)
+        self.fail_write = fail_write
+        self.writes: list[Any] = []
 
     def get_project(self, _project_id: int) -> dict[str, Any] | None:
         if self.fail_read:
             raise sqlite3.OperationalError("database is locked")
         return self.row
 
-    def commit(self) -> None:
-        return None
+    def set_carried_stated_features(self, _project_id: int, value: Any) -> None:
+        if self.fail_write:
+            raise sqlite3.OperationalError("disk I/O error")
+        self.writes.append(value)
 
 
 def _carried_row(items: list[dict[str, Any]]) -> dict[str, Any]:
@@ -91,7 +82,7 @@ def test_failed_read_keeps_features_stated_in_the_current_message(
         merged = carry_stated_features_for_turn(conn, 7, "a 5 mm hole")
 
     assert [(f.noun, f.value) for f in merged] == [("hole", 5.0)]
-    assert not any(_WRITE_SQL in s for s in conn.raw.executed)
+    assert conn.writes == []
     assert any(r.levelno == logging.WARNING and "7" in r.getMessage() for r in caplog.records)
 
 
@@ -102,7 +93,7 @@ def test_successful_turn_persists_merged_set() -> None:
     merged = carry_stated_features_for_turn(conn, 3, "the hole is 6 mm")
 
     assert {(f.noun, f.value) for f in merged} == {("groove", 2.0), ("hole", 6.0)}
-    assert any(s.startswith(_WRITE_SQL) for s in conn.raw.executed)
+    assert len(conn.writes) == 1
 
 
 def test_finalize_message_only_body_carries_feature(app_with_versions: Any) -> None:
@@ -144,22 +135,8 @@ def test_finalize_write_failure_logs_warning_and_turn_runs(
     import d33d.versions_routes as routes_mod
     from tests.versioning.helpers import create_project, run_async
 
-    class _FailingRaw:
-        def __init__(self, inner: Any) -> None:
-            self._inner = inner
-
-        def execute(self, sql: str, *args: Any) -> Any:
-            if sql.startswith(_WRITE_SQL):
-                raise sqlite3.OperationalError("disk I/O error")
-            return self._inner.execute(sql, *args)
-
-    class _FailingWrites:
-        def __init__(self, inner: Any) -> None:
-            self._inner = inner
-            self.raw = _FailingRaw(inner.raw)
-
-        def __getattr__(self, name: str) -> Any:
-            return getattr(self._inner, name)
+    def _failing_write(_project_id: int, _value: Any) -> None:
+        raise sqlite3.OperationalError("disk I/O error")
 
     class _Req:
         app = app_with_versions
@@ -169,7 +146,7 @@ def test_finalize_write_failure_logs_warning_and_turn_runs(
     async def _call(client: Any) -> tuple[int, list[Any]]:
         pid = (await create_project(client))["id"]
         monkeypatch.setattr(
-            app_with_versions.state, "conn", _FailingWrites(app_with_versions.state.conn)
+            app_with_versions.state.versions, "set_carried_stated_features", _failing_write
         )
         with caplog.at_level(logging.WARNING, logger="d33d.stated_carry"):
             kwargs = routes_mod._finalize_loop_kwargs(_Req(), pid, body)

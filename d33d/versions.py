@@ -1256,6 +1256,19 @@ class VersionService:
                 return offer
         return None
 
+    def set_carried_stated_features(
+        self, project_id: int, value_json: str | None
+    ) -> None:
+        """Persist (or clear, with ``None``) the project's carried stated-feature
+        set (issue #433) as its JSON text — the ONE writer of
+        ``projects.carried_stated_features``. The caller owns the shape
+        (``d33d.stated_carry`` serialises and bounds it)."""
+        self.conn.raw.execute(
+            "UPDATE projects SET carried_stated_features = ? WHERE id = ?",
+            (value_json, project_id),
+        )
+        self.conn.commit()
+
     def set_pending_offer(self, project_id: int, offer: dict[str, Any] | None) -> None:
         """Persist (or clear, with ``None``) the project's pending offer.
 

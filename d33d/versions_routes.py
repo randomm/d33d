@@ -908,19 +908,21 @@ def _finalize_loop_kwargs(
     # feature-side sibling of the ``state_stated`` / ``state_bbox`` block
     # inputs): the project's carried set + the finalize message's
     # extraction, merged by the SAME helper the chat route uses (a later
-    # restatement supersedes the earlier value). Persisted here (best
-    # effort — a failure degrades to no stated features and never fails
-    # the 201), so the version the finalize creates and the next chat
-    # turn both read the same carried set. ``[]`` when nothing was stated
-    # (the prompt line and the design-state comparison both no-op).
-    # The persist helper is shared with the chat turn (``stated_carry``): a
-    # failed write is a WARNING, never a failed finalize. The call stays in
-    # this builder (the finalize seam's kwargs need the merged set); the
-    # helper is the only writer.
-    from d33d.stated_carry import carry_stated_features_for_turn
+    # restatement supersedes the earlier value). ``[]`` when nothing was
+    # stated (the prompt line and the design-state comparison both no-op).
+    # The merge is computed here in memory only; it is PERSISTED at the very
+    # end of this builder (just before the loop kwargs are returned), so a
+    # request rejected by any gate above that point leaves the carried column
+    # untouched.
+    from d33d.stated_carry import (
+        persist_carried_stated_features,
+        plan_carried_stated_features,
+    )
 
     _msg = getattr(body, "request", None) or getattr(body, "message", None) or ""
-    stated_features = carry_stated_features_for_turn(app.state.conn, project_id, _msg)
+    stated_features, _carried_features = plan_carried_stated_features(
+        app.state.versions, project_id, _msg
+    )
 
     def _render_fn(scad_source: str, defines: dict[str, str]) -> Any:
         # Project-scoped persistence (issue #72): bind the per-project
@@ -1249,6 +1251,12 @@ def _finalize_loop_kwargs(
         out["part_scale"] = part_env["scale"]
         if part_env.get("bbox_mm") is not None:
             out["part_bbox_mm"] = part_env["bbox_mm"]
+    # Issue #433: persist the carried feature set only now that every gate
+    # above has passed and the loop is about to start (best effort — a failed
+    # write is a WARNING, never a failed finalize).
+    persist_carried_stated_features(
+        app.state.versions, project_id, stated_features, _carried_features
+    )
     return out
 
 

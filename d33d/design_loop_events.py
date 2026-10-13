@@ -37,7 +37,7 @@ import math
 import re
 from collections.abc import AsyncIterator, Iterable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from PIL import Image
 
@@ -55,6 +55,9 @@ from d33d.design_loop import (
 from d33d.loop_timeout import AttemptTracker, archive_deadline
 from d33d.post_check_reasons import MESH_UNCHANGED_REASON, POST_CHECK_REASONS
 from d33d.render_worker import DEFAULT_TIMEOUT_S, VIEWS, RenderResult
+
+if TYPE_CHECKING:
+    from d33d.statement_extraction import StatedFeature
 
 logger = logging.getLogger(__name__)
 
@@ -1100,7 +1103,7 @@ async def _resolve_offer(
     prev_confirmed: dict[str, Any] | None = None,
     user_message: str = "",
     chat_history: tuple[str, ...] = (),
-    stated_features: Any = None,
+    stated_features: list[StatedFeature] | None = None,
 ) -> dict[str, Any] | None:
     """Resolve the pending offer for a passing design pass (issue #250).
 
@@ -1855,7 +1858,7 @@ async def run_design_loop_with_events(
     photo: str,
     request_text: str,
     stated_axes: dict[str, float] | None = None,
-    stated_features: Any = None,
+    stated_features: list[StatedFeature] | None = None,
 ) -> AsyncIterator[tuple[str, dict[str, Any]]]:
     """Run the injected design loop (``app.state.run_design_loop``) for
     one chat message and yield the SSE frame contract.

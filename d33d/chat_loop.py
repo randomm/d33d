@@ -264,7 +264,7 @@ async def run_design_loop(
     # stated-vs-made comparison (``d33d.design_state``) both read it.
     # Best-effort: a failure degrades to no stated features (the honest
     # empty set) and never fails the 202.
-    stated_features = carry_stated_features_for_turn(app.state.conn, project_id, message)
+    stated_features = carry_stated_features_for_turn(app.state.versions, project_id, message)
 
     # Photo: read the project's stored photo NOW (synchronously, before
     # the 202 response) — the background task runs via asyncio and the
