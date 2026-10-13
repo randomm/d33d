@@ -925,7 +925,11 @@ def state_block_for_version(
         # the stated (confirmed) value riding along (user-sourced —
         # ``disagrees_source`` absent, the backward-compatible default).
         name = entry["name"]
-        if extents is not None and name in AXIS_PARAM_NAMES:
+        if (
+            extents is not None
+            and name in AXIS_PARAM_NAMES
+            and "stated_feature" not in entry
+        ):
             stated_value = entry["value"]
             if _is_number(stated_value) and stated_value > 0:
                 extent = extents[AXIS_PARAM_NAMES.index(name)]
