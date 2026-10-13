@@ -49,8 +49,10 @@ from d33d.stated_carry import (
     resolve_stated_cues,
 )
 from d33d.statement_extraction import (
+    StatedFeature,
     stated_axes_from_message,
     stated_dims_from_message,
+    stated_features_from_messages,
 )
 
 # ---------------------------------------------------------------------------
@@ -1216,6 +1218,87 @@ class TestFeatureVerbClauseNoAxis:
         feature). The #383 part-floor tests must stay green."""
         axes = stated_axes_from_message("cut it to 15 mm tall", [])
         assert axes == {"H": 15.0}
+
+
+class TestStatedFeatureExtraction:
+    """Issue #433: the FEATURE-clause half of the dimension protocol —
+    the user's stated feature sizes (``a 5 mm hole``) are extracted as
+    :class:`StatedFeature` records (noun, role, value), carried across
+    turns with the operator supersession rule, and NEVER a W/D/H axis
+    (the #398/#413 axis guard stays green — the same message still
+    yields the part's axes only)."""
+
+    def test_feature_noun_value_extracted(self) -> None:
+        """'a 40 mm wide box with a 5 mm hole' → a hole/None/5.0 record
+        AND W=40 (the feature's 5 is never an axis)."""
+        feats = stated_features_from_messages("a 40 mm wide box with a 5 mm hole")
+        assert feats == [StatedFeature(noun="hole", role=None, value=5.0)]
+        axes = stated_axes_from_message("a 40 mm wide box with a 5 mm hole", [])
+        assert axes == {"W": 40.0}
+
+    def test_feature_verb_deep_role_extracted(self) -> None:
+        """'add a 3 mm wide, 2 mm deep groove' → a groove/deep/2.0 record
+        (the role word 'deep' is captured) and NO axis (the feature's
+        sizes are not the part's)."""
+        feats = stated_features_from_messages("add a 3 mm wide, 2 mm deep groove")
+        assert StatedFeature(noun="groove", role="deep", value=2.0) in feats
+        axes = stated_axes_from_message("add a 3 mm wide, 2 mm deep groove", [])
+        assert axes == {}
+
+    def test_no_feature_clause_yields_no_records(self) -> None:
+        """A message with no feature clause states no features (the
+        part's axes are the only statement)."""
+        assert stated_features_from_messages("a 40 mm wide box") == []
+        assert stated_features_from_messages("make it taller") == []
+
+    def test_later_restatement_supersedes(self) -> None:
+        """A later message restating the SAME feature (same noun+role)
+        replaces the earlier value (the operator decision — the flag uses
+        the latest statement): 'a 40 mm wide box with a 5 mm hole' then
+        'the hole is 6 mm' → hole/None/6.0 (the 5 is gone)."""
+        feats = stated_features_from_messages(
+            ["a 40 mm wide box with a 5 mm hole", "the hole is 6 mm"]
+        )
+        assert feats == [StatedFeature(noun="hole", role=None, value=6.0)]
+
+    def test_different_feature_leaves_earlier_value(self) -> None:
+        """A later message naming a DIFFERENT feature leaves the earlier
+        value in place: 'a 40 mm wide box with a 5 mm hole' then 'add a
+        10 mm groove' → both records (the hole's 5 is not superseded by
+        the groove's 10)."""
+        feats = stated_features_from_messages(
+            ["a 40 mm wide box with a 5 mm hole", "add a 10 mm groove"]
+        )
+        keys = {(f.noun, f.role, f.value) for f in feats}
+        assert ("hole", None, 5.0) in keys
+        assert ("groove", None, 10.0) in keys
+
+    def test_no_feature_clause_leaves_earlier_value(self) -> None:
+        """A later message with no feature clause leaves the earlier
+        stated feature unchanged (the operator decision — supersession
+        needs a restatement, not silence)."""
+        feats = stated_features_from_messages(
+            ["a 40 mm wide box with a 5 mm hole", "make it taller"]
+        )
+        assert feats == [StatedFeature(noun="hole", role=None, value=5.0)]
+
+    def test_explicit_role_never_matches_bare_restatement(self) -> None:
+        """A restatement with an EXPLICIT role does not supersede a
+        role-less earlier value (and vice versa): 'a 5 mm hole' then
+        'the hole's diameter is 6 mm' → both records (the diameter-role
+        6 and the bare 5 are distinct features by key)."""
+        feats = stated_features_from_messages(
+            ["a 40 mm wide box with a 5 mm hole", "the hole's diameter is 6 mm"]
+        )
+        keys = {(f.noun, f.role, f.value) for f in feats}
+        assert ("hole", None, 5.0) in keys
+        assert ("hole", "diameter", 6.0) in keys
+
+    def test_non_mm_feature_size_not_extracted(self) -> None:
+        """A non-mm feature size (cm, unitless) is out of scope (the
+        operator decision) — only explicit-mm numbers are extracted."""
+        assert stated_features_from_messages("a box with a 2 cm hole") == []
+        assert stated_features_from_messages("a box with a hole 5") == []
 
 
 class TestAnchoredDeltaMarkers:

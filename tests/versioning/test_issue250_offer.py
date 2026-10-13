@@ -3038,3 +3038,37 @@ def test_chat_block_built_once_per_resolve(app_with_versions):
     assert done[-1]["confirm_offer"] != "tray_width"  # never a stated axis
     assert done[-1]["confirm_offer"] != "tray_depth"
     assert done[-1]["confirm_offer"] != "tray_height"
+
+
+def test_tier2_stated_feature_size_not_offered_as_axis():
+    """Issue #433: a quoted FEATURE size ("a 40 mm wide box with a 5 mm
+    hole" → 5.0 is unmapped) is NOT offered as an axis and is stated
+    rather than assumed. The tier-2 offer requires the param's value to
+    EQUAL a quoted number — a stated 5 vs a model value of 8 never
+    matches, so no tier-2 offer is produced (the flag lives in the
+    design-state block + reply sentence, not the offer). A quoted 8 that
+    EQUALS the model's hole_diameter IS offered (the value-match rule is
+    unchanged)."""
+    from d33d.confirm_offer import select_offer_candidate
+
+    # Stated 5, model 8: the 5.0 quote does not equal 8.0 → tier 2 empty.
+    name = select_offer_candidate(
+        {"hole_diameter": 8.0},
+        {"hole_diameter": {"label": "Hole diameter", "unit": "mm"}},
+        None,
+        set(),
+        None,
+        user_quoted_mm={5.0},
+    )
+    assert name is None  # no offer — the flag, not an offer, is the fix
+    # A quote that EQUALS the param's value is still offered (tier 2's
+    # value-match rule is unchanged — the feature flag is additive).
+    name2 = select_offer_candidate(
+        {"hole_diameter": 8.0},
+        {"hole_diameter": {"label": "Hole diameter", "unit": "mm"}},
+        None,
+        set(),
+        None,
+        user_quoted_mm={8.0},
+    )
+    assert name2 == "hole_diameter"

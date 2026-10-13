@@ -2940,3 +2940,133 @@ def test_design_state_part_block_bbox_mm_reads_v1_not_latest(
     assert part is not None
     # The V1's mm bbox — not the latest candidate's 30 mm extents.
     assert part["bbox_mm"] == [20.0, 20.0, 20.0]
+
+
+# ---------------------------------------------------------------------------
+# Issue #433: stated feature values — extract, match, flag
+# ---------------------------------------------------------------------------
+
+
+class TestStatedFeatureDesignState:
+    """Issue #433: a stated feature value (``a 5 mm hole``) matched to a
+    param by noun+role tokens promotes the row ``assumed`` → ``stated``
+    (within tolerance) or renders ``disagrees`` (``stated 5 / made 8``,
+    the Brief's ochre row) — the same shape as the axis disagreement
+    path, so BriefRow's existing ``disagreesInline`` / ``disagreement``
+    copy handle it with no new frontend copy."""
+
+    def _feats(self, value: float, noun: str = "hole", role: str | None = None):
+        from d33d.statement_extraction import StatedFeature
+
+        return [StatedFeature(noun=noun, role=role, value=value)]
+
+    def test_stated_feature_mismatch_yields_disagrees(self) -> None:
+        """'a 40 mm wide box with a 5 mm hole', model picks hole_diameter=8
+        → the row is ``disagrees`` with stated_value 5, value 8 (the made
+        value displayed — the Brief's ``stated 5 / made 8`` ochre row),
+        source ``user`` (the user gave the evidence)."""
+        feats = self._feats(5.0)
+        entries = state_block_for_version(
+            {"hole_diameter": 8.0}, None, {"W": 40.0}, None, None, feats
+        )
+        row = next(e for e in entries if e["name"] == "hole_diameter")
+        assert row["provenance"] == "disagrees"
+        assert row["value"] == 8.0
+        assert row["stated_value"] == 5.0
+        assert row["disagrees_source"] == "user"
+
+    def test_stated_feature_within_tolerance_yields_stated(self) -> None:
+        """Model picks hole_diameter=5 (== stated) → ``stated``, no flag,
+        no stated_value (the within-tolerance case — honest provenance)."""
+        feats = self._feats(5.0)
+        entries = state_block_for_version(
+            {"hole_diameter": 5.0}, None, None, None, None, feats
+        )
+        row = next(e for e in entries if e["name"] == "hole_diameter")
+        assert row["provenance"] == "stated"
+        assert row["value"] == 5.0
+        assert "stated_value" not in row
+
+    def test_stated_feature_boundary_exactly_005_no_flag(self) -> None:
+        """|stated − made| == 0.05 EXACTLY is NOT a mismatch (the
+        operator decision — the flag fires only STRICTLY above the
+        tolerance) → ``stated``."""
+        feats = self._feats(5.0)
+        entries = state_block_for_version(
+            {"hole_diameter": 5.05}, None, None, None, None, feats
+        )
+        row = next(e for e in entries if e["name"] == "hole_diameter")
+        assert row["provenance"] == "stated"
+
+    def test_stated_feature_boundary_just_above_005_flag(self) -> None:
+        """|stated − made| == 0.06 (> 0.05) IS a mismatch → ``disagrees``
+        with the stated value riding along."""
+        feats = self._feats(5.0)
+        entries = state_block_for_version(
+            {"hole_diameter": 5.06}, None, None, None, None, feats
+        )
+        row = next(e for e in entries if e["name"] == "hole_diameter")
+        assert row["provenance"] == "disagrees"
+        assert row["stated_value"] == 5.0
+        assert row["value"] == 5.06
+
+    def test_stated_feature_zero_match_no_flag(self) -> None:
+        """A stated feature that matches NO param (the model never emitted
+        a hole param) → no flag, the param stays ``assumed`` (the
+        zero-match case — the stated value is kept in state, unflagged)."""
+        feats = self._feats(5.0)
+        entries = state_block_for_version(
+            {"groove_depth": 8.0}, None, None, None, None, feats
+        )
+        row = next(e for e in entries if e["name"] == "groove_depth")
+        assert row["provenance"] == "assumed"
+
+    def test_stated_feature_bare_d_requires_noun_guard(self) -> None:
+        """A bare ``d`` role token NEVER matches without the feature noun
+        in the name/label (the noun guard — a ``d`` in ``draft_angle`` is
+        not a diameter): ``draft_angle`` stays ``assumed``."""
+        feats = self._feats(5.0, role="d")
+        entries = state_block_for_version(
+            {"draft_angle": 5.0}, None, None, None, None, feats
+        )
+        row = next(e for e in entries if e["name"] == "draft_angle")
+        assert row["provenance"] == "assumed"
+
+    def test_stated_feature_label_token_match(self) -> None:
+        """A param whose NAME lacks the noun but whose LABEL carries it
+        (``hole_diameter`` vs label "Hole diameter") matches via the label
+        tokens (the name+label token set is the matcher's source)."""
+        feats = self._feats(5.0)
+        meta = {"hole_diameter": {"label": "Hole diameter", "unit": "mm"}}
+        entries = state_block_for_version(
+            {"hole_diameter": 8.0}, None, None, meta, None, feats
+        )
+        row = next(e for e in entries if e["name"] == "hole_diameter")
+        assert row["provenance"] == "disagrees"
+        assert row["stated_value"] == 5.0
+
+    def test_stated_feature_multi_match_flags_all(self) -> None:
+        """Two params matching the same stated feature (``hole_diameter``
+        and ``hole_d``) → BOTH flag (the operator decision — flag all)."""
+        feats = self._feats(5.0)
+        entries = state_block_for_version(
+            {"hole_diameter": 8.0, "hole_d": 9.0}, None, None, None, None, feats
+        )
+        by_name = {e["name"]: e for e in entries}
+        assert by_name["hole_diameter"]["provenance"] == "disagrees"
+        assert by_name["hole_d"]["provenance"] == "disagrees"
+        assert by_name["hole_d"]["stated_value"] == 5.0
+
+    def test_stated_feature_never_an_axis(self) -> None:
+        """The feature size never becomes a W/D/H axis: the block carries
+        a hole param row (disagrees) and a W axis row (the part's 40 mm —
+        the #398/#413 guard stays green)."""
+        feats = self._feats(5.0)
+        entries = state_block_for_version(
+            {"hole_diameter": 8.0}, None, {"W": 40.0}, None, None, feats
+        )
+        by_name = {e["name"]: e for e in entries}
+        assert by_name["W"]["kind"] == "axis"
+        assert by_name["W"]["provenance"] == "stated"
+        assert by_name["hole_diameter"]["kind"] == "param"
+        assert by_name["hole_diameter"]["provenance"] == "disagrees"

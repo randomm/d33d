@@ -1905,6 +1905,17 @@ def migrate(conn: db_mod.Connection) -> None:
     # reader in ``dimension_protocol.carried_stated_set`` feeds all four
     # production seams (chat, finalize, region edit).
     _ensure_column(conn, "projects", "carried_stated_dims", "TEXT")
+    # ``projects.carried_stated_features`` (issue #433): the project-level
+    # carried stated-feature set (JSON list of ``{noun, role, value}``
+    # objects — the feature-side sibling of ``carried_stated_dims``, which
+    # owns the W/D/H set). A feature size is NEVER a W/D/H axis (the
+    # #398/#413 guard), so the two stores are separate. Written at the
+    # end of every chat/finalize turn (pass or fail) — the user's stated
+    # feature survives a failed turn; the single reader
+    # ``stated_carry.carried_stated_features`` feeds the design prompt's
+    # ``Stated feature:`` line and the design-state stated-vs-made
+    # comparison (``d33d.design_state``).
+    _ensure_column(conn, "projects", "carried_stated_features", "TEXT")
     # ``versions.source_kind`` (issue #325): the version's origin
     # (``"import"`` for a part-import v1, NULL for a design-loop version).
     # Nullable with no default; pre-existing rows read back as ``None``

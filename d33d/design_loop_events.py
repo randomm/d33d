@@ -1634,12 +1634,89 @@ def _seam_parent_mesh_stats(
         return (genus, None, None, None)
 
 
+def _feature_mismatch_sentences(
+    result: Any,
+    stated_features: Any,
+) -> list[str]:
+    """The stated-vs-made feature mismatch sentences (issue #433).
+
+    One sentence per param the user's stated feature matched (by
+    noun+role tokens, :func:`d33d.design_state._match_stated_features`) whose
+    made value differs from the stated one by MORE than
+    :data:`d33d.design_state.FEATURE_MISMATCH_TOLERANCE_MM` (the same
+    comparison the design-state block runs — the row the Brief renders
+    and the reply sentence are one fact, never two). The sentence
+    (``You asked for a {noun} {stated:g} mm; I made it {label} {value:g}
+    mm`` — one decimal place, the operator decision; the noun + both
+    values, the acceptance-criterion shape) is built here, server-side:
+    the wire string is the reply's own, not the SPA's (the SPA renders
+    the ``stated 5 / made 8`` row from the design-state block via its
+    existing ``disagrees`` copy — the reply sentence is the
+    conversational counterpart, and it rides the done frame's
+    ``feature_mismatches`` field, one entry per mismatching param).
+
+    ``label_lookup`` is the param-name → user-facing label map (the new
+    version's ``param_meta`` — the label the Brief shows; the name is
+    the mono fallback). A matching value (within tolerance) yields NO
+    sentence (the ``hole_diameter = 5`` case — honest provenance, no
+    flag, no sentence). A param the user stated a feature for but that
+    the model never emitted (zero matches) yields no sentence (the
+    stated value stays in state, unflagged — the operator decision).
+    """
+    if not stated_features:
+        return []
+    from d33d.design_state import (
+        FEATURE_MISMATCH_TOLERANCE_MM,
+        _match_stated_features,
+    )
+
+    best = getattr(result, "best", None)
+    if best is None:
+        return []
+    params = getattr(best, "params", None)
+    if not isinstance(params, dict):
+        return []
+    meta = getattr(best, "param_meta", None)
+    if not isinstance(meta, dict):
+        meta = {}
+    entries = [
+        {"name": name, "kind": "param", "value": value}
+        for name, value in params.items()
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
+    ]
+    matched = _match_stated_features(entries, meta, stated_features)
+    if not matched:
+        return []
+    out: list[str] = []
+    for f in stated_features:
+        value = getattr(f, "value", None)
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            continue
+        noun = getattr(f, "noun", "")
+        for name, stated_value in matched.items():
+            made = params.get(name)
+            if not isinstance(made, (int, float)) or isinstance(made, bool):
+                continue
+            if abs(float(made) - stated_value) <= FEATURE_MISMATCH_TOLERANCE_MM:
+                continue  # the made value is the stated one — no mismatch
+            m = meta.get(name)
+            label = m.get("label") if isinstance(m, dict) else None
+            if not isinstance(label, str) or not label:
+                label = name
+            out.append(
+                f"You asked for a {noun} {stated_value:g} mm; "
+                f"I made it {label} {float(made):g} mm"
+            )
+    return out
+
+
 async def _resolve_version_create(
     app: Any,
     project_id: int,
     result: Any,
     user_message: str,
     stated_axes: dict[str, float] | None = None,
+    stated_features: Any = None,
 ) -> int | None:
     """On a ``pass``: create the version and return its id — a passing
     loop ALWAYS materialises a version (issue #93), with whatever params
@@ -1814,6 +1891,7 @@ async def run_design_loop_with_events(
     photo: str,
     request_text: str,
     stated_axes: dict[str, float] | None = None,
+    stated_features: Any = None,
 ) -> AsyncIterator[tuple[str, dict[str, Any]]]:
     """Run the injected design loop (``app.state.run_design_loop``) for
     one chat message and yield the SSE frame contract.
@@ -1983,6 +2061,12 @@ async def run_design_loop_with_events(
         # this adapter's deadline below is a generous outer safety net
         # only.
         "attempt_timeout": DESIGN_LOOP_ATTEMPT_TIMEOUT_SECONDS,
+        # Issue #433: the stated FEATURE sizes (the feature-side sibling
+        # of ``stated_axes``) — the chat route computes them (carried set
+        # + this message's extraction, persisted), the finalize route
+        # computes them on its own seam, and ``None`` (no version / no
+        # feature stated) renders nothing (byte-identical to today).
+        "stated_features": stated_features,
     }
 
     # The production closure (``_build_production_design_loop``) takes
@@ -2568,6 +2652,7 @@ async def run_design_loop_with_events(
             result,
             user_message,
             stated_axes=stated_axes,
+            stated_features=stated_features,
         )
         # The assumed-value offer (issue #250): pick AT MOST ONE assumed
         # param of the NEW version, build its sentence (the model's
@@ -2624,6 +2709,28 @@ async def run_design_loop_with_events(
         if offer_field is not None:
             done_data["confirm_offer"] = offer_field["param"]
             done_data["confirm_sentence"] = offer_field["sentence"]
+        # Issue #433: the stated-vs-made feature mismatch sentence rides
+        # the done frame as an ADDITIVE field (one sentence per
+        # mismatching param — the conversational counterpart of the
+        # Brief's ``stated 5 / made 8`` row; the SPA renders it as a
+        # plain assistant message after the pass card). Omitted when
+        # there is no mismatch (the within-tolerance ``hole_diameter =
+        # 5`` case carries no sentence — honest provenance, no flag).
+        # Best-effort: a failure logs and degrades to no sentence (the
+        # pass itself is unaffected; the Brief row is independent — it
+        # reads the design-state block, not this field).
+        try:
+            _mismatches = _feature_mismatch_sentences(result, stated_features)
+            if _mismatches:
+                done_data["feature_mismatch"] = _mismatches[0]
+                if len(_mismatches) > 1:
+                    done_data["feature_mismatches"] = _mismatches
+        except Exception:
+            logger.exception(
+                "feature-mismatch sentence failed for project %s — "
+                "emitting the pass without the sentence",
+                project_id,
+            )
         for _f in _yield_notice():
             yield _f
         yield ("done", done_data)

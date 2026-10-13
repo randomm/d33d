@@ -860,6 +860,26 @@ export const confirmOffer = {
    *  run, no new version — the value is recorded as confirmed). */
   acknowledged: (label: string, value: string): string =>
     `Got it — ${label} stays ${value}.`,
+
+  /** Issue #433: the stated-vs-made feature mismatch sentence (deck mirror
+   *  of the server's ``d33d.design_loop_events._feature_mismatch_sentences``
+   *  template — the server is the writer of the wire string, which rides the
+   *  done frame's ``feature_mismatch`` field; the SPA renders it verbatim as
+   *  a plain assistant message after the pass card, the same wiring as
+   *  ``offer`` above). The Brief row is independent — it renders the
+   *  ``stated 5 / made 8`` ochre ``disagrees`` row from the design-state
+   *  block via ``disagreement``; this is the conversational counterpart.
+   *  ``noun`` is the feature noun ("hole"), ``statedMm`` / ``madeMm`` are
+   *  the two numbers (one decimal, the operator decision), ``label`` the
+   *  param's user-facing label (the name is the mono fallback on the
+   *  server). */
+  featureMismatch: (
+    noun: string,
+    statedMm: number,
+    label: string,
+    madeMm: number,
+  ): string =>
+    `You asked for a ${noun} ${mm(statedMm)}; I made it ${label} ${mm(madeMm)}.`,
 } as const;
 
 /**

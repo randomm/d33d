@@ -1347,6 +1347,70 @@ def _design_system(
     return system
 
 
+def _stated_feature_lines(stated_features: Any) -> list[str]:
+    """The stated FEATURE lines for the design prompt (issue #433).
+
+    The feature-side sibling of the design-state block: one line per
+    carried :class:`~d33d.statement_extraction.StatedFeature`, rendered
+    as ``Stated feature: {noun} {value:g} mm`` — the model's ground truth
+    for the feature's size (the ``a 5 mm hole`` the user stated, which
+    the axis lexicon deliberately keeps OUT of the W/D/H block). ``None``
+    / an empty list renders NOTHING (the no-version / no-feature-statement
+    case is byte-identical to today's prompt — the line is additive, like
+    the import section). An explicit ``role`` renders the size as
+    ``{noun} ({role})`` so the model can bind the value to the right
+    parameter (``hole (diameter) 5 mm``).
+    """
+    if not stated_features:
+        return []
+    lines: list[str] = []
+    for f in stated_features:
+        if not isinstance(f, (int, float)) or isinstance(f, bool):
+            continue
+        value = float(getattr(f, "value", 0.0))
+        if value <= 0:
+            continue
+        noun = getattr(f, "noun", "")
+        role = getattr(f, "role", None)
+        if role:
+            lines.append(f"Stated feature: {noun} ({role}) = {value:g} mm")
+        else:
+            lines.append(f"Stated feature: {noun} = {value:g} mm")
+    return lines
+
+
+def _stated_feature_lines(stated_features: Any) -> list[str]:
+    """The stated FEATURE lines for the design prompt (issue #433).
+
+    The feature-side sibling of the design-state block: one line per
+    carried :class:`~d33d.statement_extraction.StatedFeature`, rendered
+    as ``Stated feature: {noun} = {value:g} mm`` — the model's ground
+    truth for the feature's size (the ``a 5 mm hole`` the user stated,
+    which the axis lexicon deliberately keeps OUT of the W/D/H block).
+    ``None`` / an empty list renders NOTHING (the no-version /
+    no-feature-statement case is byte-identical to today's prompt — the
+    line is additive, like the import section). An explicit ``role``
+    renders the size as ``{noun} ({role})`` so the model can bind the
+    value to the right parameter (``hole (diameter)``).
+    """
+    if not stated_features:
+        return []
+    lines: list[str] = []
+    for f in stated_features:
+        value = getattr(f, "value", None)
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            continue
+        if float(value) <= 0:
+            continue
+        noun = getattr(f, "noun", "")
+        role = getattr(f, "role", None)
+        if role:
+            lines.append(f"Stated feature: {noun} ({role}) = {float(value):g} mm")
+        else:
+            lines.append(f"Stated feature: {noun} = {float(value):g} mm")
+    return lines
+
+
 def _design_state_lines(
     stated: tuple[float, float, float],
     state_params: dict[str, Any] | None,
@@ -1493,6 +1557,7 @@ def _design_messages(
     state_confirmed: dict[str, Any] | None = None,
     design_source: str | None = None,
     part_scale: float | None = None,
+    stated_features: Any = None,
 ) -> list[dict[str, Any]]:
     """The design-role message list: the current user's REQUEST as the
     first line of the user text (issue #97: the current message used to be
@@ -1545,6 +1610,13 @@ def _design_messages(
     # state block, BEFORE the design-source section — ``None`` renders
     # nothing (byte-identical to today).
     lines.extend(import_part_lines(part_scale))
+    # The stated-feature lines (issue #433): the feature sizes the user
+    # stated (``a 5 mm hole``) — the axis lexicon keeps these OUT of the
+    # W/D/H block by design (the feature's size is not the part's
+    # envelope), and this is where they reach the model so the model
+    # honours them. ``None`` / empty renders nothing (byte-identical to
+    # today when no feature size was stated).
+    lines.extend(_stated_feature_lines(stated_features))
     # The current design source (issue #105): the previous version's
     # actual SCAD, rendered between the state block and the reference
     # dimensions (same insertion point as the state block). One mechanism,

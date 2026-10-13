@@ -7,6 +7,17 @@ carry-forward input readers), ``effective_stated_dims`` (the merge
 helper) and ``resolve_stated_cues`` (the one-message cue resolution used
 at the chat and finalize seams).
 
+Issue #433 adds the FEATURE-side carry: ``StatedFeature`` records (the
+stated feature sizes — ``a 5 mm hole``) extracted by
+``d33d.statement_extraction.stated_features_from_messages`` and carried
+across turns in the project-level ``carried_stated_features`` column
+(sibling of ``carried_stated_dims`` — the W/D/H set). The feature set
+lives alongside the axis set, never inside it: a feature size is never a
+W/D/H axis (the #398/#413 guard), so the two stores are separate and
+:func:`effective_stated_features` owns the feature supersession (a later
+message restating the same noun+role replaces the earlier value; a
+different feature or no feature clause leaves the earlier value).
+
 Import graph (strictly unidirectional, issue #393): ``axis_lexicon`` ->
 ``triple_extraction`` -> ``statement_extraction`` -> this module ->
 ``dimension_protocol`` (never back).
@@ -20,18 +31,101 @@ from typing import Any
 
 from d33d.axis_lexicon import DIMENSION_AXES, Cues, classify
 from d33d.statement_extraction import (
+    StatedFeature,
     _coerce,
     stated_axes_from_message,
+    stated_features_from_messages,
 )
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "carried_stated_features",
     "carried_stated_set",
     "effective_stated_dims",
+    "effective_stated_features",
     "latest_stated_dims_dict",
     "resolve_stated_cues",
 ]
+
+
+def carried_stated_features(row: Any) -> list[StatedFeature]:
+    """The project-level carried stated-feature set (issue #433).
+
+    The reader for the ``projects.carried_stated_features`` column (the
+    JSON list of ``{noun, role, value}`` objects written at the end of
+    every chat/finalize turn — the sibling of ``carried_stated_dims``).
+    ``None`` row, an absent/NULL column, or corrupt JSON yields ``[]``
+    (an honest empty set — never a crash: a stored-set failure degrades
+    to "no stated features" and the extraction re-derives from the
+    message, which is always the freshest evidence).
+    """
+    if row is None:
+        return []
+    raw = row.get("carried_stated_features")
+    if not isinstance(raw, str) or not raw:
+        return []
+    try:
+        loaded = json.loads(raw)
+    except (ValueError, TypeError):
+        return []
+    if not isinstance(loaded, list):
+        return []
+    out: list[StatedFeature] = []
+    for item in loaded:
+        if not isinstance(item, dict):
+            continue
+        value = _coerce(item.get("value"))
+        if value is None:
+            continue
+        noun = item.get("noun")
+        if not isinstance(noun, str) or not noun:
+            continue
+        role = item.get("role")
+        role = role if isinstance(role, str) and role else None
+        out.append(StatedFeature(noun=noun, role=role, value=value))
+    return out
+
+
+def effective_stated_features(
+    carried: list[StatedFeature],
+    message: str,
+) -> list[StatedFeature]:
+    """The carry-forward merge for stated FEATURE sizes (issue #433).
+
+    The one-message feature merge, mirroring :func:`effective_stated_dims`
+    for the W/D/H set: extract the message's stated features
+    (:func:`stated_features_from_messages` over the single message) and
+    apply the operator supersession rule on top of the carried set — a
+    restatement of the SAME feature (same ``noun`` + ``role``) replaces
+    the earlier value; a different feature, or no feature clause, leaves
+    the carried value in place. The result is the fresh set the caller
+    persists (``projects.carried_stated_features``) and the design-state
+    matcher compares against the model's params.
+
+    ANY failure in the extraction degrades to the carried set unchanged
+    (the conservative rule from :func:`resolve_stated_cues` — a failed
+    extraction must never drop a carried feature statement), with a
+    length-only warning (no message text — no PII in logs).
+    """
+    try:
+        fresh = stated_features_from_messages([message])
+    except Exception:
+        logger.warning(
+            "stated-features extraction failed (len(message)=%d) — "
+            "carrying the stated feature set unchanged",
+            len(message),
+            exc_info=True,
+        )
+        return list(carried)
+    if not fresh:
+        return list(carried)
+    by_key: dict[tuple[str, str | None], StatedFeature] = {
+        (f.noun, f.role): f for f in carried
+    }
+    for f in fresh:
+        by_key[(f.noun, f.role)] = f  # supersede (or add)
+    return list(by_key.values())
 
 
 def latest_stated_dims_dict(versions: Any, project_id: int) -> dict[str, float] | None:

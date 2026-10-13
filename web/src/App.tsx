@@ -1475,6 +1475,29 @@ export default function App({ client }: AppProps) {
                   },
                 ]);
               }
+              // Issue #433: the done frame's additive `feature_mismatch`
+              // field (the server built it from the design-state block's
+              // stated-vs-made comparison — one sentence per mismatching
+              // param, the conversational counterpart of the Brief's
+              // `stated 5 / made 8` ochre row) rides the same wiring as the
+              // offer: a plain assistant message AFTER the pass card. The
+              // Brief row is independent (it reads the design-state block
+              // via its existing `disagrees` copy); this is the reply's own
+              // sentence, rendered verbatim (the server is the writer of the
+              // wire string — the deck mirror is `confirmOffer.featureMismatch`).
+              const featureMismatch =
+                typeof data.feature_mismatch === "string" ? data.feature_mismatch : "";
+              if (featureMismatch.length > 0) {
+                const mismatchId = nextMsgId("feature-mismatch");
+                setMessages((prev) => [
+                  ...prev,
+                  {
+                    id: mismatchId,
+                    role: "assistant",
+                    content: featureMismatch,
+                  },
+                ]);
+              }
             },
             onError: (data) => {
               setMessages((prev) =>

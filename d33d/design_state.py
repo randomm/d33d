@@ -512,6 +512,108 @@ def state_block_from_params(
 #: ``unknown``), never silently becomes ``stated``/``measured``.
 AXIS_PARAM_NAMES: tuple[str, str, str] = ("W", "D", "H")
 
+#: The feature-role tolerance (issue #433): a stated feature value
+#: matches the model's param value when ``|stated − made| <=
+#: FEATURE_MISMATCH_TOLERANCE_MM`` (a diff of EXACTLY 0.05 is NOT a
+#: mismatch — the operator decision; the flag fires only strictly above
+#: it). Deliberately tighter than the bbox tolerance (``max(1%, 0.5 mm)``
+#: in ``d33d.design_loop``) — a feature size the user stated to the
+#: millimetre is not the part's envelope, and a 1% / 0.5 mm slack would
+#: let a 5 mm hole through as 8 mm without a flag. The constant is
+#: independent of the bbox pair for the same reason ``DISAGREES_MAJOR_*``
+#: is — different magnitudes, different questions, never unified.
+FEATURE_MISMATCH_TOLERANCE_MM: float = 0.05
+
+#: The role-token vocabulary for stated-feature param matching (issue
+#: #433): a stated feature (``noun``, ``role``) matches a param when the
+#: param's name OR label tokens carry the feature noun AND the role's
+#: size token. The closed pairs — ``hole``+``diameter``/``dia``/``d``/
+#: ``size``, ``groove``+``depth``, ``slot``+``width``. A bare ``d``
+#: token is AMBIGUOUS (a ``d`` in ``draft_angle`` is not a diameter) —
+#: the noun guard requires the feature noun in the same name/label, so
+#: ``d`` alone never matches. ``size`` is a permissive role (a hole's
+#: ``size`` is its diameter); the noun guard keeps it from matching a
+#: non-hole param. A ``role=None`` record (``a 5 mm hole`` — no role
+#: word) matches a noun-only param (``hole`` alone, or ``hole_diameter``
+#: via the noun) — the noun is the binding, the role refines when
+#: present.
+_FEATURE_ROLE_TOKENS: dict[str, frozenset[str]] = {
+    "diameter": frozenset({"diameter", "dia", "d", "size"}),
+    "dia": frozenset({"diameter", "dia", "d", "size"}),
+    "depth": frozenset({"depth"}),
+    "width": frozenset({"width"}),
+    "d": frozenset({"diameter", "dia", "d", "size"}),
+    "size": frozenset({"diameter", "dia", "d", "size"}),
+}
+
+
+def _param_tokens(name: str, label: str | None) -> set[str]:
+    """The param's token set: the name's :func:`_split_name_tokens` plus
+    the label's whitespace/underscore tokens (lowercased, punctuation
+    stripped) — the matcher's token source (issue #433)."""
+    tokens = set(_split_name_tokens(name))
+    if label:
+        for raw in label.replace("_", " ").split():
+            cleaned = raw.strip(".,;:!?()[]{}\"'").lower()
+            if cleaned:
+                tokens.add(cleaned)
+    return tokens
+
+
+def _match_stated_features(
+    entries: list[dict[str, Any]],
+    param_meta: dict[str, Any] | None,
+    stated_features: Any,
+) -> dict[str, float]:
+    """The param-keyed stated feature values (issue #433).
+
+    Matches each stated feature to the param(s) its noun + role name via
+    :func:`_param_tokens` (the name + label token set): the param's
+    tokens must carry the feature noun AND (when the record has an
+    explicit role) a token in the role's closed set (the noun guard — a
+    bare ``d`` without the noun never matches). Zero matches → the
+    param gets no value (the stated value stays in state, unflagged —
+    the operator decision); multiple matches → every matching param
+    gets the value (the operator decision — flag all). Returns
+    ``{param_name: stated_value}`` for the params that matched; an empty
+    dict when nothing matched (the caller keeps the params as-is).
+    Non-numeric / zero param values are never matched (the comparison
+    needs a positive made value).
+    """
+    if not stated_features:
+        return {}
+    meta = param_meta if isinstance(param_meta, dict) else {}
+    out: dict[str, float] = {}
+    for f in stated_features:
+        value = getattr(f, "value", None)
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            continue
+        if float(value) <= 0:
+            continue
+        noun = getattr(f, "noun", "")
+        role = getattr(f, "role", None)
+        role_tokens = _FEATURE_ROLE_TOKENS.get(role) if role else None
+        for entry in entries:
+            if entry.get("kind") != "param":
+                continue
+            value_ = entry.get("value")
+            if not isinstance(value_, (int, float)) or isinstance(value_, bool):
+                continue
+            if float(value_) <= 0:
+                continue
+            name = entry.get("name")
+            label = None
+            m = meta.get(name)
+            if isinstance(m, dict):
+                label = m.get("label")
+            tokens = _param_tokens(name, label if isinstance(label, str) else None)
+            if noun not in tokens:
+                continue  # the noun guard: no feature noun → no match
+            if role_tokens is not None and not (tokens & role_tokens):
+                continue  # the role must also be present
+            out[name] = float(value)
+    return out
+
 #: The literal parameter names that name a W/D/H dimension WITHOUT a
 #: model-declared axis (issue #416, defect 2): ``part_width`` / ``part_depth``
 #: / ``part_height`` (the model's own naming for the part's own W/D/H) —
@@ -599,6 +701,7 @@ def state_block_for_version(
     stated: dict[str, Any] | None = None,
     param_meta: dict[str, Any] | None = None,
     confirmed_params: dict[str, Any] | None = None,
+    stated_features: Any = None,
 ) -> list[dict[str, Any]]:
     """The design-state block for ONE version: the version's params
     snapshot (``state_block_from_params`` — every model-emitted parameter
@@ -710,6 +813,20 @@ def state_block_for_version(
 
     entries = state_block_from_params(params, param_meta)
     evidence = _axis_stated_evidence(stated)
+    # The stated-feature values (issue #433): a param the user's stated
+    # feature (``a 5 mm hole``) matches by noun+role tokens is promoted
+    # ``assumed`` → ``stated`` (the user DID say the value — the
+    # provenance is honest), and when the made value differs from the
+    # stated one by MORE than ``FEATURE_MISMATCH_TOLERANCE_MM`` the row
+    # renders ``disagrees`` with the stated value riding along (the
+    # Brief's ``stated 5 / made 8`` ochre row, no new frontend copy —
+    # the existing ``disagrees`` shape handles it). A matching value
+    # (within tolerance) stays ``stated`` with no flag. A param is
+    # never compared twice: the feature comparison only touches a param
+    # the axis/measurement paths left ``assumed`` (a promoted
+    # stated/measured row is already the user's or the measurement's
+    # number, never re-compared).
+    _apply_stated_features(entries, param_meta, stated_features)
     # The single, clearly-marked promotion seam (issue #248, filled):
     # metadata-declared axis + persisted confirmed value + within-tolerance
     # match promotes ``assumed`` → ``stated``. Name-based promotion is
@@ -1064,6 +1181,55 @@ def _maybe_promote_params(
         if abs(value - confirmed) <= tol:
             entry["provenance"] = "stated"
     return entries
+
+
+def _apply_stated_features(
+    entries: list[dict[str, Any]],
+    param_meta: dict[str, Any] | None,
+    stated_features: Any,
+) -> None:
+    """The stated-feature promotion + mismatch flag (issue #433).
+
+    In-place on ``entries`` (the param rows). A param the user's stated
+    feature matches (``_match_stated_features`` — noun + role tokens)
+    and whose row is ``assumed`` (the model picked the value; the user
+    never confirmed it via the offer flow) is promoted ``stated`` when
+    the made value is within ``FEATURE_MISMATCH_TOLERANCE_MM`` of the
+    stated one (the ``a 5 mm hole`` / ``hole_diameter = 5`` case —
+    honest provenance, no flag), and rendered ``disagrees`` (``value``
+    the made value, ``stated_value`` the stated one, source ``"user"`` —
+    the user gave the evidence) when the made value is STRICTLY more
+    than the tolerance away (the ``a 5 mm hole`` / ``hole_diameter = 8``
+    case — the Brief's ochre ``stated 5 / made 8`` row). A param already
+    ``stated`` (the offer confirmation, or an axis promotion) or
+    ``measured`` is never touched — the feature comparison is the FIRST
+    consumer of a still-``assumed`` feature param, and a param is never
+    compared twice. A param with no stated-feature match is never
+    touched (zero-match → no flag, the stated value stays in state).
+    """
+    if not stated_features:
+        return
+    matched = _match_stated_features(entries, param_meta, stated_features)
+    if not matched:
+        return
+    for entry in entries:
+        if entry.get("kind") != "param":
+            continue
+        if entry.get("provenance") != "assumed":
+            continue  # only the model's own (unconfirmed) value is compared
+        name = entry.get("name")
+        if name not in matched:
+            continue
+        value = entry.get("value")
+        if not _is_number(value) or value <= 0:
+            continue
+        stated_value = matched[name]
+        if abs(float(value) - stated_value) <= FEATURE_MISMATCH_TOLERANCE_MM:
+            entry["provenance"] = "stated"
+        else:
+            entry["provenance"] = "disagrees"
+            entry["stated_value"] = stated_value
+            entry["disagrees_source"] = "user"
 
 
 #: The disagreement-SEVERITY threshold (issue #274): a model-source

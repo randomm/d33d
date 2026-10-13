@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import re
+from dataclasses import dataclass
 from functools import cache
 from typing import Any
 
@@ -38,9 +39,52 @@ from d33d.triple_extraction import (
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "StatedFeature",
     "stated_axes_from_message",
     "stated_dims_from_message",
+    "stated_features_from_messages",
 ]
+
+#: The role words a stated feature clause names the size with (issue #433):
+#: the closed role-token vocabulary that maps a feature size to a
+#: parameter. ``_FEATURE_NOUNS`` (``d33d.axis_lexicon``) names the feature;
+#: this set names the ROLE of the stated size (a hole's diameter, a
+#: groove's depth). Closed and small on purpose: an unmatched clause
+#: records ``role=None`` and the matching in :mod:`d33d.design_state`
+#: falls through (a stated value the param matcher cannot attribute is
+#: kept in state, never flagged).
+_FEATURE_ROLE_WORDS: frozenset[str] = frozenset(
+    {"diameter", "dia", "wide", "deep", "long", "width", "depth"}
+)
+
+_FEATURE_ROLE_RE = re.compile(
+    r"(?<!\w)(?:"
+    + "|".join(sorted(_FEATURE_ROLE_WORDS, key=len, reverse=True))
+    + r")(?!\w)",
+    re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True)
+class StatedFeature:
+    """One stated feature size (issue #433): the user said ``a 5 mm hole``
+    and the model later picks ``hole_diameter = 8`` — the 5 is the stated
+    value, the 8 the made value.
+
+    ``noun`` is the feature noun the clause named (``"hole"``) and ``role``
+    the size role the clause used (``"diameter"``), or ``None`` when the
+    clause stated a size without a role word (``a 5 mm hole`` alone — the
+    noun's default size). ``value`` is the explicit-mm value. The record is
+    the dimension protocol's FEATURE equivalent of the per-axis stated
+    set: it is extracted from the user's words, carried across turns, and
+    NEVER a W/D/H axis (the #398/#413 axis guard is untouched — the
+    feature clause's number stays unmapped for the axis extraction).
+    """
+
+    noun: str
+    role: str | None
+    value: float
+
 
 #: The lexicon's explicit-mm number token, anchored for span matching:
 #: one mm number followed by the lexicon's mm unit alternative. The
@@ -262,6 +306,86 @@ def _unmapped_value_for_axis(cues: Cues, clauses: list[str]) -> float | None:
     if FEATURE_NOUN_RE.search(clause):
         return None
     return _coerce(number)
+
+
+def stated_features_from_messages(
+    messages: list[str] | tuple[str, ...],
+) -> list[StatedFeature]:
+    """The stated feature sizes in a run of user messages (issue #433).
+
+    The FEATURE-clause half of the dimension protocol, mirroring
+    ``stated_axes_from_message`` (which owns the W/D/H half): scan each
+    message's feature clauses (the clauses :mod:`d33d.feature_clause`
+    identifies — a feature noun or a feature-verb sub-clause) and record
+    each explicit-mm number the clause states as a :class:`StatedFeature`
+    (noun, role, value). The clause's number is the FEATURE's size — the
+    axis lexicon suppresses it from W/D/H by design (``feature_clause
+    .feature_clause_suppresses``), and this is the record that keeps the
+    value honest instead of dropping it.
+
+    Supersession (the #416 pattern, the operator decision): a LATER
+    message that restates the SAME feature (same noun + role — a
+    ``role=None`` restatement supersedes a ``role=None`` earlier value,
+    and an explicit role never matches a ``role=None`` one) REPLACES the
+    earlier value in the returned list; a message that names a DIFFERENT
+    feature or no feature clause leaves the earlier value in place. The
+    same (noun, role, value) stated more than once — two holes of the
+    same size, or a restatement — is ONE record, never a duplicate.
+
+    Only explicit-mm numbers count (``12 mm`` / ``12mm`` / ``12
+    millimetres``) — cm/in/unitless feature sizes are out of scope
+    (issue #433 operator decision), exactly as in
+    ``user_quoted_unmapped_mm``'s tier-2 scan.
+    """
+    from d33d import feature_clause
+    from d33d.axis_lexicon import _split_on_and, _numbers_in, _word_re
+
+    #: The current (message index, records) per (noun, role) key — a later
+    #: message restating the same key replaces the earlier records; the
+    #: within-message key set keeps one record per (noun, role, value).
+    current: dict[tuple[str, str | None], tuple[int, list[StatedFeature]]] = {}
+
+    def _record(idx: int, feat: StatedFeature) -> None:
+        key = (feat.noun, feat.role)
+        existing = current.get(key)
+        if existing is not None and existing[0] == idx:
+            # Same message: keep one record per (noun, role, value).
+            if not any(r.value == feat.value for r in existing[1]):
+                existing[1].append(feat)
+            return
+        current[key] = (idx, [feat])  # a later message supersedes
+
+    #: A single message arrives as a bare ``str`` (the per-message seam);
+    #: a list/tuple is the multi-message carry (one element per user
+    #: message, in order).
+    if isinstance(messages, str):
+        messages: list[str] | tuple[str, ...] = [messages]
+    for idx, msg in enumerate(messages):
+        text = str(msg)
+        clauses = split_clauses(text)
+        all_sub_clauses: list[str] = []
+        for clause in clauses:
+            all_sub_clauses.extend(_split_on_and(clause))
+        fc_start = feature_clause.feature_clause_start(
+            all_sub_clauses, FEATURE_NOUN_RE, _numbers_in, _word_re
+        )
+        if fc_start < 0:
+            continue  # no feature clause in this message — nothing stated
+        for clause in all_sub_clauses[fc_start:]:
+            m = FEATURE_NOUN_RE.search(clause)
+            if m is None:
+                continue  # a feature-verb sub-clause without a noun of its
+                # own: the noun (and its value) are recorded from the
+                # clause that names the feature.
+            noun = m.group(0).lower()
+            rm = _FEATURE_ROLE_RE.search(clause)
+            role = rm.group(0).lower() if rm else None
+            for nm in _mm_number_occurrences(clause):
+                value = float(nm.group(1))
+                if value <= 0:
+                    continue
+                _record(idx, StatedFeature(noun=noun, role=role, value=value))
+    return [r for key in current for r in current[key][1]]
 
 
 def stated_axes_from_message(

@@ -418,7 +418,53 @@ def test_chat_feature_clause_does_not_override_carried_axis(app_with_versions):
     assert captured["stated_dims"] == (0.0, 40.0, 0.0)
 
 
-def test_chat_global_cue_releases_all_axes(app_with_versions):
+def test_chat_feature_clause_stated_value_reaches_design_state(
+    app_with_versions,
+):
+    """CARRY-FORWARD (issue #433): a feature clause's stated size reaches
+    the design state (the loop's ``stated_features`` kwarg) AND the
+    project's ``carried_stated_features`` column — while the W/D/H axis
+    behaviour is UNCHANGED (the feature's 10 is never a carried axis,
+    the #398/#413 guard stays green). Pre-fix the loop received no
+    ``stated_features`` kwarg and the column was never written."""
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        await app_with_versions.state.versions.create_version(
+            pid,
+            {"base_depth": 40.0, "base_width": 20.0},
+            stated_dims={"D": 40.0},
+        )
+        captured = await _drive_chat_capture(
+            app_with_versions, client, pid,
+            {"message": "add a 10 mm deep hole", "chat_history": []},
+        )
+        # The project's carried stated features are persisted (the
+        # design-state block's reader for the next turn).
+        row = app_with_versions.state.conn.get_project(pid)
+        import json as _json
+
+        raw = row.get("carried_stated_features")
+        stored = _json.loads(raw) if raw else []
+        return captured, stored
+
+    captured, stored = run_async(app_with_versions, _call)
+    # The feature's 10 is carried as a FEATURE (the design-state
+    # block's stated-vs-made comparison reads it), never as a W/D/H
+    # axis (the gate triple is unchanged — the carried D=40 stands).
+    assert captured["stated_dims"] == (0.0, 40.0, 0.0)
+    assert len(stored) == 1
+    assert stored[0]["noun"] == "hole"
+    assert stored[0]["value"] == 10.0
+    # The loop's ``stated_features`` kwarg carries the same record (the
+    # design prompt's ``Stated feature:`` line + the design-state
+    # comparison both read it).
+    feats = captured.get("stated_features")
+    assert feats is not None and len(feats) == 1
+    assert feats[0].noun == "hole"
+    assert feats[0].value == 10.0
+
     """CARRY-FORWARD (issue #261, global cue): "make it bigger" on a
     project whose latest row persists a FULL {W: 12, D: 8, H: 5} set —
     the loop receives ``None`` (the global cue releases ALL THREE axes,

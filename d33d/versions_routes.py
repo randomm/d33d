@@ -889,6 +889,47 @@ def _finalize_loop_kwargs(
     db_path = getattr(app.state, "db_path", None)
     data_dir = Path(db_path).parent if db_path is not None else Path(".")
 
+    # Issue #433: the stated FEATURE sizes for the finalize seam (the
+    # feature-side sibling of the ``state_stated`` / ``state_bbox`` block
+    # inputs): the project's carried set + the finalize message's
+    # extraction, merged by the SAME helper the chat route uses (a later
+    # restatement supersedes the earlier value). Persisted here (best
+    # effort — a failure degrades to no stated features and never fails
+    # the 201), so the version the finalize creates and the next chat
+    # turn both read the same carried set. ``[]`` when nothing was stated
+    # (the prompt line and the design-state comparison both no-op).
+    from d33d.stated_carry import (
+        carried_stated_features,
+        effective_stated_features,
+    )
+
+    stated_features: list = []
+    try:
+        _msg = (body.request or body.message or "") if hasattr(body, "request") else ""
+        _carried_feats = carried_stated_features(row)
+        stated_features = effective_stated_features(_carried_feats, _msg)
+        app.state.conn.raw.execute(
+            "UPDATE projects SET carried_stated_features = ? WHERE id = ?",
+            (
+                json.dumps(
+                    [
+                        {"noun": f.noun, "role": f.role, "value": f.value}
+                        for f in stated_features
+                    ]
+                )
+                if stated_features
+                else None,
+                project_id,
+            ),
+        )
+        app.state.conn.commit()
+    except Exception:
+        logger.debug(
+            "carried_stated_features write failed for finalize project %s",
+            project_id,
+            exc_info=True,
+        )
+
     def _render_fn(scad_source: str, defines: dict[str, str]) -> Any:
         # Project-scoped persistence (issue #72): bind the per-project
         # renders_dir so the worker's post-harvest step actually fires in
@@ -1191,6 +1232,7 @@ def _finalize_loop_kwargs(
         "state_meta": state_meta,
         "state_confirmed": state_confirmed,
         "design_source": design_source,
+        "stated_features": stated_features,
     }
     if _tb_genus is not None:
         out["through_baseline_genus"] = _tb_genus
