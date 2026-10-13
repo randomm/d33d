@@ -21,6 +21,7 @@ from d33d.fill_recut import FILL_RECUT_DECLINE_REPLY, FRILL_POINT_FIRST_REPLY
 from d33d.fill_recut_region import fill_recut_region_edit
 from d33d.part_http import part_public
 from tests.legacy_bounds_fixtures import _set_legacy_part
+from tests.test_app import _region_edit_body
 
 PLATE_REPORT = {
     "hole_count": 3,
@@ -286,6 +287,84 @@ def test_yes_on_live_positional_offer_accepts_with_the_measured_hole(app_with_pr
     assert pending is not None, "the top-right offer was not stored"
     assert result is not None and result["outcome"] == "accept", result
     assert "(112, 72)" in result["instruction"], result["instruction"]
+
+
+def test_positional_resize_on_measured_part_is_fresh_offer_not_point_first(app_with_projects) -> None:
+    """Issue #437 (review): the region seam's point-first guard mirrors the
+    chat seam's predicate — a trigger (e.g. a resize with the positional
+    word "right") wins over the bare-yes guard. "make the right hole 38 mm"
+    is a fresh offer, never the point-first reply (the chat seam's
+    "trigger is None" check is what prevents the divergence)."""
+
+    async def _call(client):
+        pid = await _new_plate_project(app_with_projects, client)
+        row = app_with_projects.state.conn.get_project(pid)
+        result = fill_recut_region_edit(
+            app_with_projects,
+            pid,
+            "make the right hole 38 mm",
+            face_normal=(0.0, 1.0, 0.0),
+            row=row,
+            part=part_public(row),
+            hit_point_mm=(112.0, 40.0, 3.0),
+        )
+        return result, app_with_projects.state.versions.get_pending_offer(pid)
+
+    result, _offer = _run_async(app_with_projects, _call)
+    assert result is not None, "pre-route handled the turn"
+    # The guard was NOT what fired: a bare-yes point-first reply ("…on the
+    # part first, then I'll fill it…") would be the swallowed-trigger bug.
+    assert result["outcome"] != "point_first", result
+    assert "Point at the hole on the part first" not in result["answer"], result
+    # The trigger was evaluated (it was a resize, not a bare yes): the reply
+    # carries the trigger's one-decimal size. The "right" edge names no hole
+    # and the pick is not on one, so the hole-noun dispatch point-at's.
+    assert "Ø38.0 mm" in result["answer"], result
+
+
+def test_positional_resize_via_region_bar_is_fresh_offer_not_point_first(app_with_projects, monkeypatch) -> None:
+    """Issue #437 (review), end to end: a user can TYPE a resize with the
+    positional word "right" into the region-edit bar. The region seam must
+    offer it as a fresh trigger — the point-first guard must not swallow it
+    just because "right" is in the affirmation heuristic."""
+    import d33d.design_loop_events as dle_mod
+    loop_calls: list[dict[str, Any]] = []
+
+    async def _fake_loop(app, pid, **kwargs):
+        loop_calls.append(kwargs)
+        yield ("done", {"message": "ok", "kind": "loop_done"})
+
+    monkeypatch.setattr(dle_mod, "run_design_loop_with_events", _fake_loop)
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "RightHole"})
+        pid = r.json()["id"]
+        _set_legacy_part(app_with_projects, pid, PLATE_REPORT)
+        r2 = await client.post(
+            f"/api/projects/{pid}/region-edits",
+            json=_region_edit_body(instruction="make the right hole 38 mm"),
+        )
+        source = app_with_projects.state.event_sources.get(pid)
+        frames = []
+        if source is not None:
+            async for event, data in source:
+                frames.append((event, data))
+                if event in ("done", "error"):
+                    break
+        return pid, r2.status_code, frames
+
+    _pid, status, frames = _run_async(app_with_projects, _call)
+    assert status == 202, status
+    assert not loop_calls, f"the design loop was called: {loop_calls}"
+    done = [d for e, d in frames if e == "done"]
+    assert done, f"no done frame: {frames}"
+    assert done[0].get("kind") == "answer", done
+    # The guard was NOT what fired: no point-first reply for a resize.
+    assert "Point at the hole on the part first" not in done[0]["message"], done
+    # The trigger was evaluated (it was a resize, not a bare yes): the no-face
+    # reply is the #338 operator-decision-6 copy (the region bar carries no
+    # face normal, so the axis-dependent offer is impossible).
+    assert "pin a flat face on it" in done[0]["message"], done
 
 
 def test_corner_one_on_symmetric_plate_is_point_at(app_with_projects) -> None:

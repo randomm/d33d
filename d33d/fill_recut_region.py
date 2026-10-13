@@ -218,6 +218,7 @@ def fill_recut_region_edit(
     if pending is not None and pending.get("kind") == "fill_recut":
         return _handle_live_offer(versions, project_id, instruction, pending)
 
+    trigger = fill_recut_trigger(instruction)
     # Issue #437: a bare "yes" with NO live offer, on a part with measured
     # holes, is the user answering a point-at ask — there is no offer to
     # accept and no hole to fill yet. This is the region-edit twin of the
@@ -227,7 +228,11 @@ def fill_recut_region_edit(
     # centre-less "...: yes" request. Point-first reply, no loop, no offer.
     # The measured-hole gate keeps the operator's #351 behaviour for
     # unknown-count parts (a bare yes on those falls through as before).
-    if is_clean_yes(instruction) and _has_measured_holes(part):
+    # Mirroring the chat seam's predicate, the trigger is evaluated FIRST
+    # and wins: a resize like "make the right hole 38 mm" contains the
+    # affirmation word "right", but it is a fresh trigger, never a bare
+    # yes, so it must reach the offer, not the point-first reply.
+    if trigger is None and is_clean_yes(instruction) and _has_measured_holes(part):
         versions.set_pending_offer(project_id, None)
         return {
             "kind": "answer",
@@ -236,7 +241,6 @@ def fill_recut_region_edit(
             "outcome": "point_first",
         }
 
-    trigger = fill_recut_trigger(instruction)
     if trigger is None or trigger["noun"] in own_feature_names(
         versions.latest_version(project_id)
     ):
