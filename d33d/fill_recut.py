@@ -270,9 +270,12 @@ def fill_recut_trigger(message: str) -> dict[str, Any] | None:
         return None
     m = _FRILL_RESIZE_RE.search(message)
     if m is not None:
+        size = float(m.group("size"))
         return {
             "noun": m.group("noun").lower(),
-            "size": float(m.group("size")),
+            # Review round 2: a 400-digit typed size parses to inf; it is
+            # no size at all (the one-decimal copy has nothing to format).
+            "size": size if math.isfinite(size) else None,
             "move": False,
             "move_distance": None,
             "direction": None,

@@ -44,17 +44,29 @@ const triesWord = (attempts: number): string => (attempts === 1 ? "try" : "tries
 export const mm = (value: number): string => `${value.toFixed(1)}${NB}mm`;
 
 /** One-decimal number, rounded half-up on the decimal the user typed
- *  (issue #437). The TS twin of `fmt_mm1` in d33d/mm_format.py. `toFixed`
- *  works on the binary value (4.35 is stored as 4.3499…, so it gives "4.3");
- *  the shortest round-tripping digits give "4.4". */
+ *  (issue #437). The TS twin of `fmt_mm1` in d33d/mm_format.py. Works on
+ *  the shortest round-tripping digits of `String(value)` as a digit string
+ *  (no float arithmetic): 3.35 is stored as 3.3499…, so `toFixed` and
+ *  `Math.round(x * 10)` both give the wrong answer; the digits give "3.4". */
 export const fmtMm1 = (value: number): string => {
+  if (!Number.isFinite(value)) {
+    return Number.isNaN(value) ? "nan" : value < 0 ? "-inf" : "inf";
+  }
   const sign = value < 0 ? "-" : "";
-  const abs = Math.abs(value);
-  const str = String(abs);
-  // Shift the decimal point one place so Math.round is half-up on the
-  // shortest round-tripping digits (3.25 → 32.5 → 33 → "3.3").
-  const tenths = Math.round(str.includes("e") ? abs * 10 : Number(`${str}e1`));
-  return `${sign}${Math.floor(tenths / 10)}.${tenths % 10}`;
+  const [mantissa, expPart] = String(Math.abs(value)).split("e");
+  const [intPart, fracPart = ""] = mantissa.split(".");
+  // value = digits / 10^scale, with the exponent folded into the scale.
+  let scale = fracPart.length - (expPart === undefined ? 0 : Number(expPart));
+  let digits = intPart + fracPart;
+  if (scale < 0) {
+    digits += "0".repeat(-scale);
+    scale = 0;
+  }
+  const n = BigInt(digits);
+  const scaleTen = 10n ** BigInt(scale);
+  // Half-up to one decimal: tenths = floor(value * 10 + 1/2).
+  const tenths = (20n * n + scaleTen) / (2n * scaleTen);
+  return `${sign}${tenths / 10n}.${tenths % 10n}`;
 };
 
 /** Diameter, for bores and shafts (one decimal, half-up — issue #437). */

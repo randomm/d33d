@@ -601,7 +601,7 @@ def fill_recut_turn(
     calls the shared body.
 
     Returns ``{"kind": "answer", "answer": <sentence>, "run_loop": bool,
-    "outcome": "fresh_offer" | "decline" | "accept" | "no_feature" | "no_match"}``
+    "outcome": "fresh_offer" | "decline" | "accept" | "no_feature" | "no_match" | "point_at" | "point_first"}``
     when the turn is handled here, else ``None`` (fall-through to the
     existing routes).
     """
