@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+from dataclasses import dataclass
 from typing import Any
 
 from d33d.axis_lexicon import (
@@ -65,6 +66,19 @@ __all__ = [
 MAX_CARRIED_FEATURES: int = 32
 
 
+@dataclass(frozen=True)
+class _Unreadable:
+    """A stored carried value that is present but not a JSON list of features.
+
+    ``length`` is the raw stored text's length, kept for the replacement log.
+    The turn's merge starts from an empty carry; the persist replaces the stored
+    value only when this turn states a feature (a corrupt row must not stay
+    corrupt forever and silently drop every later statement).
+    """
+
+    length: int
+
+
 def _parse_stored(row: Any) -> list[StatedFeature] | None:
     """Parse the stored carried set: ``[]`` for a ``None`` row or an absent /
     NULL column, ``None`` when the stored value is UNREADABLE (not a JSON
@@ -86,8 +100,6 @@ def _parse_stored(row: Any) -> list[StatedFeature] | None:
         return None
     out: list[StatedFeature] = []
     for item in loaded:
-        if len(out) >= MAX_CARRIED_FEATURES:
-            break
         if not isinstance(item, dict):
             continue
         value = _coerce(item.get("value"))
@@ -103,7 +115,8 @@ def _parse_stored(row: Any) -> list[StatedFeature] | None:
         if role is not None and (not isinstance(role, str) or role not in FEATURE_ROLE_TOKENS):
             continue
         out.append(StatedFeature(noun=noun, role=role, value=value))
-    return out
+    # Keep the NEWEST entries, matching the write side (plan_carried_stated_features).
+    return out[-MAX_CARRIED_FEATURES:]
 
 
 def carried_stated_features(row: Any) -> list[StatedFeature]:
@@ -113,16 +126,19 @@ def carried_stated_features(row: Any) -> list[StatedFeature]:
     JSON list of ``{noun, role, value}`` objects written at the end of
     every chat/finalize turn — the sibling of ``carried_stated_dims``).
     ``None`` row, an absent/NULL column, or unreadable JSON yields ``[]``
-    (an honest empty set — never a crash). The write path never overwrites
-    an unreadable row (see :func:`carry_stated_features_for_turn`).
+    (an honest empty set — never a crash). A corrupt row is replaced by the
+    next turn that states a feature (see :func:`persist_carried_stated_features`).
     """
     return _parse_stored(row) or []
 
 
-def _read_stored(versions: Any, project_id: int) -> list[StatedFeature] | None:
-    """The project's stored carried set, or ``None`` when it cannot be read: a
-    failed read or an unreadable stored value. Either way a WARNING names the
-    project and the operation; the caller must NOT write over that row.
+def _read_stored(
+    versions: Any, project_id: int
+) -> list[StatedFeature] | _Unreadable | None:
+    """The project's stored carried set. ``None`` when the READ failed (the stored
+    value is unknown: the caller must never write over it). ``_Unreadable`` when
+    the stored value is present but not a JSON list of features (see
+    :class:`_Unreadable`). A WARNING names the project and the operation.
     """
     try:
         row = versions.get_project(project_id)
@@ -137,13 +153,14 @@ def _read_stored(versions: Any, project_id: int) -> list[StatedFeature] | None:
         return None
     parsed = _parse_stored(row)
     if parsed is None:
+        raw = row.get("carried_stated_features") if row is not None else None
         logger.warning(
             "carried_stated_features is UNREADABLE for project %s "
             "(operation: read carried stated features; stored value is not a "
-            "JSON list); merging the message's features only, stored set left "
-            "unchanged",
+            "JSON list); the carry starts empty for this turn",
             project_id,
         )
+        return _Unreadable(len(raw) if isinstance(raw, str) else 0)
     return parsed
 
 
@@ -151,19 +168,27 @@ def persist_carried_stated_features(
     versions: Any,
     project_id: int,
     features: list[StatedFeature],
-    carried: list[StatedFeature] | None,
+    carried: list[StatedFeature] | _Unreadable | None,
 ) -> None:
     """Write the project's carried stated-feature set (issue #433) — the ONE
     persist helper for the chat turn and the finalize turn.
 
-    ``carried`` is the stored set the merge started from (``None`` when it was
-    unreadable). The write is skipped when the stored set is unreadable (an
-    unreadable row is never overwritten) or when ``features`` equals the stored
-    set (no write for an unchanged set). A failed write never fails the turn,
-    but it is LOUD: a WARNING with the traceback, naming the project and the
+    ``carried`` is the stored set the merge started from: ``None`` when the read
+    failed (never write over an unknown value); ``_Unreadable`` when the stored
+    value is corrupt (replaced by a NON-empty ``features``, logged with the
+    replaced length; an empty set leaves it alone); a list (no write when
+    ``features`` equals it by value). A failed write never fails the turn, but
+    it is LOUD: a WARNING with the traceback, naming the project and the
     operation.
     """
-    if carried is None or features == carried:
+    if carried is None:
+        return
+    replaced: int | None = None
+    if isinstance(carried, _Unreadable):
+        if not features:
+            return
+        replaced = carried.length
+    elif features == carried:
         return
     try:
         versions.set_carried_stated_features(
@@ -174,6 +199,15 @@ def persist_carried_stated_features(
             if features
             else None,
         )
+        if replaced is not None:
+            logger.warning(
+                "carried_stated_features REPLACED an unreadable stored value for "
+                "project %s (operation: persist carried stated features; replaced "
+                "value length %d chars) with the %d feature(s) stated this turn",
+                project_id,
+                replaced,
+                len(features),
+            )
     except Exception:
         logger.warning(
             "carried_stated_features WRITE failed for project %s "
@@ -186,18 +220,18 @@ def persist_carried_stated_features(
 
 def plan_carried_stated_features(
     versions: Any, project_id: int, message: str
-) -> tuple[list[StatedFeature], list[StatedFeature] | None]:
+) -> tuple[list[StatedFeature], list[StatedFeature] | _Unreadable | None]:
     """Merge the message's features over the stored set WITHOUT writing.
 
     Returns ``(merged, carried)``: ``merged`` is the set the turn uses, capped
     at :data:`MAX_CARRIED_FEATURES` keeping the NEWEST entries; ``carried`` is
-    the stored set it started from (``None`` when unreadable — see
-    :func:`persist_carried_stated_features`). A failed read merges the
-    message's own features over an empty carry, so the current message is
-    never lost.
+    the stored value it started from (see :func:`persist_carried_stated_features`).
+    A failed or unreadable stored value merges the message's own features over
+    an empty carry, so the current message is never lost.
     """
     carried = _read_stored(versions, project_id)
-    merged = effective_stated_features(carried or [], message)
+    base = carried if isinstance(carried, list) else []
+    merged = effective_stated_features(base, message)
     return merged[-MAX_CARRIED_FEATURES:], carried
 
 

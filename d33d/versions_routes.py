@@ -611,6 +611,9 @@ def create_versions_router() -> APIRouter:
                     **_finalize_loop_kwargs(request, project_id, body),
                 )
             else:
+                # A stub seam with no ``app`` parameter never reaches
+                # ``_finalize_loop_kwargs``: its feature carry is not planned
+                # or persisted (production always takes ``app``).
                 result = run_loop()
             if inspect.isawaitable(result):
                 result = await result
@@ -910,10 +913,13 @@ def _finalize_loop_kwargs(
     # extraction, merged by the SAME helper the chat route uses (a later
     # restatement supersedes the earlier value). ``[]`` when nothing was
     # stated (the prompt line and the design-state comparison both no-op).
-    # The merge is computed here in memory only; it is PERSISTED at the very
-    # end of this builder (just before the loop kwargs are returned), so a
-    # request rejected by any gate above that point leaves the carried column
-    # untouched.
+    # The merge is computed here in memory only and PERSISTED at the very end
+    # of this builder, just before the loop kwargs are returned. Gates above
+    # that point (404, params, photo, bad input) leave the carried column
+    # untouched. Gates AFTER this builder (a loop exception -> 502, a non-pass
+    # -> 422, no parameter set -> 502, a version conflict -> 409) do NOT undo
+    # it: the turn's statement is carried pass-or-fail, the same as the chat
+    # turn and ``carried_stated_dims``.
     from d33d.stated_carry import (
         persist_carried_stated_features,
         plan_carried_stated_features,
