@@ -402,7 +402,7 @@ def holes_in_mm(report: dict[str, Any] | None, scale: float | None) -> list[dict
         factor = float(scale) if scale is not None else 0.0
     except (TypeError, ValueError):
         factor = 0.0
-    if factor <= 0:
+    if factor <= 0 or not math.isfinite(factor):
         # A missing, non-numeric, or non-positive scale means the holes
         # are in unknown units — returning them unscaled would report
         # file-unit values as mm (a lie). No measured holes instead.
@@ -416,6 +416,7 @@ def holes_in_mm(report: dict[str, Any] | None, scale: float | None) -> list[dict
             isinstance(diameter, (int, float))
             and not isinstance(diameter, bool)
             and diameter > 0
+            and math.isfinite(diameter)
         ):
             continue
         center_mm = _numeric_vec(center, 2)

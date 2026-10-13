@@ -44,8 +44,9 @@ const triesWord = (attempts: number): string => (attempts === 1 ? "try" : "tries
 export const mm = (value: number): string => `${value.toFixed(1)}${NB}mm`;
 
 /** One-decimal number, rounded half-up on the decimal the user typed
- *  (issue #437). The TS twin of `fmt_mm1` in d33d/mm_format.py — `toFixed`
- *  rounds binary halves down (3.25 → "3.2"), so it is not used here. */
+ *  (issue #437). The TS twin of `fmt_mm1` in d33d/mm_format.py. `toFixed`
+ *  works on the binary value (4.35 is stored as 4.3499…, so it gives "4.3");
+ *  the shortest round-tripping digits give "4.4". */
 export const fmtMm1 = (value: number): string => {
   const sign = value < 0 ? "-" : "";
   const abs = Math.abs(value);
