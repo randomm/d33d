@@ -499,4 +499,3 @@ def holes_in_mm(report: dict[str, Any] | None, scale: float | None) -> list[dict
             }
         )
     return holes
-

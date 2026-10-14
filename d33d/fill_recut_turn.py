@@ -20,7 +20,11 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-from d33d.acknowledgement import offer_is_live, point_first_reply
+from d33d.acknowledgement import (
+    acknowledgement_route,
+    offer_is_live,
+    point_first_answer,
+)
 from d33d.fill_recut import (
     FILL_RECUT_DECLINE_REPLY,
     boundary_sentence,
@@ -277,15 +281,15 @@ def _fill_recut_turn_body(
     latest = versions.latest_version(project_id)
     live = offer_is_live(pending, latest)
     trigger = fill_recut_trigger(message)
+    route = acknowledgement_route(message, part, live=live, trigger=trigger)
     if part.get("unit_status") not in USABLE_UNIT_STATUSES:
-        # Issue #449: a literal yes on a measured part with NO live offer is
-        # point-first even when the units are unsettled (measured wins over
-        # unit status); every other turn on an unsettled part returns None.
-        if live:
+        # SEAM (#449, unsettled-unit asymmetry): a literal yes on a measured
+        # part with NO live offer is point-first even when the units are
+        # unsettled (measured wins over unit status). "no_offer" is NOT acted
+        # on here: the settle-first gate runs before the #349 guard upstream.
+        if live or route != "point_first":
             return None
-        return point_first_reply(
-            versions, project_id, message, part, live=False, trigger=trigger
-        )
+        return point_first_answer(versions, project_id)
     if pending is not None and pending.get("kind") == "fill_recut":
         # A LIVE fill-recut offer: "yes" clears the offer and runs the
         # loop with the explicit fill-and-recut instruction (the caller
@@ -329,11 +333,10 @@ def _fill_recut_turn_body(
     # so the bare-affirmation word set still applies: a live fill-recut offer
     # plus "do it all" is point-first on chat (main's recorded result).
     # Recomputing would pick the literal-yes set and send it to the loop.
-    point_first = point_first_reply(
-        versions, project_id, message, part, live=live, trigger=trigger
-    )
-    if point_first is not None:
-        return point_first
+    # SEAM: ``route`` is computed from the turn-start ``live`` (the supersede
+    # above does not recompute it) — the chat seam's deliberate ordering.
+    if route == "point_first":
+        return point_first_answer(versions, project_id)
     if pending is None and trigger is not None:
         own = own_feature_names(versions.latest_version(project_id))
         if trigger["noun"] not in own:

@@ -27,9 +27,11 @@ from typing import Any, Literal, TypedDict
 from fastapi.responses import JSONResponse
 
 from d33d.acknowledgement import (
-    no_offer_notice_applies,
+    NoOfferAnswer,
+    PointFirstAnswer,
+    acknowledgement_route,
     offer_is_live,
-    point_first_reply,
+    point_first_answer,
 )
 from d33d.chat_frames import answered_frames, register_event_source
 from d33d.fill_recut import (
@@ -126,20 +128,6 @@ class _FillPointAt(TypedDict):
     outcome: Literal["point_at"]
 
 
-class _FillPointFirst(TypedDict):
-    kind: Literal["answer"]
-    answer: str
-    run_loop: bool
-    outcome: Literal["point_first"]
-
-
-class _FillNoOffer(TypedDict):
-    kind: Literal["answer"]
-    answer: str
-    run_loop: bool
-    outcome: Literal["no_offer"]
-
-
 #: The decision union: an ``accept`` member, or any of the four
 #: answer-frame members (the caller dispatches on ``outcome``; only
 #: ``fresh_offer`` surfaces the SPA's offer buttons — the decline /
@@ -151,8 +139,8 @@ FillResult = (
     | _FillNoNormal
     | _FillNoFeature
     | _FillPointAt
-    | _FillPointFirst
-    | _FillNoOffer
+    | PointFirstAnswer
+    | NoOfferAnswer
 )
 
 
@@ -225,31 +213,27 @@ def fill_recut_region_edit(
     latest = versions.latest_version(project_id)
     live = offer_is_live(pending, latest)
     trigger = fill_recut_trigger(instruction)
+    route = acknowledgement_route(instruction, part, live=live, trigger=trigger)
     if part.get("unit_status") not in USABLE_UNIT_STATUSES:
-        # Issue #449: a literal yes on a measured part with NO live offer is
-        # point-first before the unit-status gate (measured wins over unit
-        # status); every other turn on an unsettled part returns None.
-        if live:
+        # SEAM (#449, unsettled-unit asymmetry): point-first before the
+        # unit-status gate (measured wins over unit status), with NO live
+        # offer only; every other turn on an unsettled part returns None.
+        if live or route != "point_first":
             return None
-        return point_first_reply(
-            versions, project_id, instruction, part, live=False, trigger=trigger
-        )
+        return point_first_answer(versions, project_id)
     if pending is not None and pending.get("kind") == "fill_recut":
+        # SEAM: a live fill-recut row is consumed by its own accept / decline /
+        # supersede path. A superseded row returns None here; the chat seam
+        # instead re-evaluates point-first after the supersede.
         return _handle_live_offer(versions, project_id, instruction, pending)
 
-    # Issue #449: a LIVE #250 param offer keeps its bare acknowledgement, as
-    # the chat seam does (it returns None before point-first). Point-first here
-    # would clear the live row. With no trigger the decision is None below, so
-    # the request runs the loop with its text (main's routing for a #250 row).
+    # SEAM: a LIVE #250 param offer with no trigger keeps main's routing (the
+    # request runs the loop with its text). The chat seam returns None for ANY
+    # live #250 turn before point-first; this region seam does not.
     if live and trigger is None:
         return None
-    # Issue #437 / #449: point-first for a literal yes with no live offer on
-    # a measured part. The trigger wins: a resize is never a bare yes.
-    point_first = point_first_reply(
-        versions, project_id, instruction, part, live=live, trigger=trigger
-    )
-    if point_first is not None:
-        return point_first
+    if route == "point_first":
+        return point_first_answer(versions, project_id)
     if trigger is None or trigger["noun"] in own_feature_names(
         versions.latest_version(project_id)
     ):
@@ -395,7 +379,7 @@ def _no_offer_notice(
     project_id: int,
     instruction: str,
     part: dict[str, Any] | None,
-) -> _FillNoOffer | None:
+) -> NoOfferAnswer | None:
     """The #349 no-offer notice for the edit bar (issue #449): a bare
     affirmation with no live offer, unless it is a literal yes on a measured
     part (that one is point-first). The liveness check is the chat guard's."""
@@ -403,12 +387,13 @@ def _no_offer_notice(
         # Cheap text test first: a non-acknowledgement never reads the state.
         return None
     versions = app.state.versions
-    if not no_offer_notice_applies(
-        instruction,
-        part,
-        versions.get_pending_offer(project_id),
-        versions.latest_version(project_id),
-    ):
+    live = offer_is_live(
+        versions.get_pending_offer(project_id), versions.latest_version(project_id)
+    )
+    route = acknowledgement_route(
+        instruction, part, live=live, trigger=fill_recut_trigger(instruction)
+    )
+    if route != "no_offer":
         return None
     return {
         "kind": "answer",
@@ -461,6 +446,7 @@ def region_edit_preroute(
     point (as before); this function only releases on the pre-route's
     own no-source failure exits.
     """
+    fill_result: FillResult | None = None
     try:
         # Issue #449: the #349 no-offer notice runs first — before the part
         # and unit-status gates, so it also covers no part and unsettled units.

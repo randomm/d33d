@@ -31,7 +31,7 @@ from pydantic import BaseModel, field_validator
 
 from d33d import db as db_mod
 from d33d import fill_recut, fill_recut_history
-from d33d.acknowledgement import literal_yes_pre_unit_gate, no_offer_notice_applies
+from d33d.acknowledgement import acknowledgement_route, offer_is_live
 from d33d.chat_frames import answered_frames as _answered_frames
 from d33d.chat_loop import run_design_loop as chat_loop_run_design_loop
 from d33d.design_frames import PHOTO_MISSING_NOTICE, SAVED_DESIGN_MISSING_REPLY
@@ -130,6 +130,30 @@ class ChatRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+def _literal_yes_point_first(
+    app: Any, project_id: int, message: str, part: dict[str, Any] | None
+) -> bool:
+    """The unsettled-unit seam (issue #449): True iff a literal yes on a
+    measured part with NO live offer is point-first BEFORE the settle-first
+    notice (measured wins over unit status). A live offer always gets the
+    notice here (the seam's deliberate asymmetry); the decision is
+    :func:`d33d.acknowledgement.acknowledgement_route`."""
+    versions = app.state.versions
+    if offer_is_live(
+        versions.get_pending_offer(project_id), versions.latest_version(project_id)
+    ):
+        return False
+    return (
+        acknowledgement_route(
+            message,
+            part,
+            live=False,
+            trigger=fill_recut.fill_recut_trigger(message),
+        )
+        == "point_first"
+    )
+
+
 def _is_bare_affirmation_no_offer(
     app: Any,
     project_id: int,
@@ -140,7 +164,7 @@ def _is_bare_affirmation_no_offer(
     """The #449 partition: the notice fires iff NO live offer is pending and
     ``message`` is a bare affirmation, EXCEPT a literal yes on a measured part
     (that one is point-first, answered before this guard). The one predicate
-    both seams read is :func:`d33d.acknowledgement.no_offer_notice_applies`.
+    both seams read is :func:`d33d.acknowledgement.acknowledgement_route`.
 
     True iff ``message`` is a BARE AFFIRMATION (the issue #437
     closed-set ``is_bare_affirmation`` — "yes" yes; "yes, add a chamfer
@@ -178,8 +202,16 @@ def _is_bare_affirmation_no_offer(
     # Issue #449: the narrowed guard. A LIVE offer of either shape is never
     # stolen; a literal yes on a measured part is point-first (fill_recut_turn
     # runs before this guard), so it never reaches the notice from here.
-    return no_offer_notice_applies(
-        message, part, app.state.versions.get_pending_offer(project_id), latest
+    if offer_is_live(app.state.versions.get_pending_offer(project_id), latest):
+        return False
+    return (
+        acknowledgement_route(
+            message,
+            part,
+            live=False,
+            trigger=fill_recut.fill_recut_trigger(message),
+        )
+        == "no_offer"
     )
 
 
@@ -485,7 +517,7 @@ def create_projects_router() -> APIRouter:
             if (
                 _part is not None
                 and _part.get("unit_status") not in USABLE_UNIT_STATUSES
-                and not literal_yes_pre_unit_gate(app, project_id, body.message, _part)
+                and not _literal_yes_point_first(app, project_id, body.message, _part)
             ):
                 logger.warning(
                     "chat for project %s: the part's units are unsettled — "
