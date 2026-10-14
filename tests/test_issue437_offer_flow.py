@@ -568,7 +568,6 @@ def test_bare_affirmation_parity_with_349_guard(app_with_projects) -> None:
     predicate. On a MEASURED part the guard excludes a literal yes (point-first
     owns it), and point-first is exactly the literal-yes subset."""
     from d33d.acknowledgement import no_offer_notice_applies, point_first_applies
-
     from d33d.projects import _is_bare_affirmation_no_offer
 
     samples = list(BARE_AFFIRMATIONS) + [
