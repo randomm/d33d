@@ -335,6 +335,22 @@ def is_clean_yes(message: str) -> bool:
 
     return _is_clean_affirmation(message)
 
+
+#: The three literal yes forms that get point-first on a measured part with
+#: no live offer (issue #449). "yes, do it" / "yes thanks" are NOT here.
+_LITERAL_YES_FORMS = frozenset({"yes", "yes please", "yes do that"})
+
+
+def is_literal_yes(text: str) -> bool:
+    """True iff ``text`` is exactly one of the literal yes forms ("yes",
+    "yes please", "yes do that"), ignoring case, punctuation and extra
+    whitespace. Any text containing "?" is rejected FIRST, before
+    normalisation, so "yes?" never matches."""
+    if "?" in text:
+        return False
+    stripped = re.sub(r"[^\w\s]", " ", text.lower())
+    return " ".join(stripped.split()) in _LITERAL_YES_FORMS
+
 #: The closed bare-affirmation token set (issue #437, adversarial review):
 #: a point-first reply is warranted ONLY for an acceptance with nothing
 #: else in the turn — every token in this set. A yes plus an instruction
@@ -608,3 +624,4 @@ def __getattr__(name: str):
 
         return getattr(_frt, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+

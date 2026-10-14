@@ -1752,11 +1752,10 @@ def test_region_edit_bare_yes_measured_part_point_first(app_with_projects, monke
 
 
 def test_region_edit_bare_yes_unknown_count_part_falls_through(app_with_projects, monkeypatch):
-    """Issue #437 operator decision: the point-first rule applies ONLY to
-    parts whose holes were measured. A part with UNKNOWN hole count (no
-    report / legacy row) keeps the #351 behaviour — a bare "yes" via region
-    edit is not a resize trigger, so it falls through to the design loop
-    exactly as before."""
+    """Issue #437 / #449: the point-first rule applies ONLY to parts whose
+    holes were measured. A part with UNKNOWN hole count (no report / legacy
+    row) gets no point-first; a bare "yes" with no offer gets the #349
+    no-offer notice via region edit, never the design loop."""
     import d33d.design_loop_events as dle_mod
     loop_calls: list[dict[str, Any]] = []
 
@@ -1785,12 +1784,15 @@ def test_region_edit_bare_yes_unknown_count_part_falls_through(app_with_projects
                     break
         return pid, r2.status_code, frames
 
-    _pid, status, _frames = _run_async(app_with_projects, _call)
+    _pid, status, frames = _run_async(app_with_projects, _call)
     assert status == 202, status
-    # The loop WAS called via the patched seam (the #351 fall-through).
-    assert loop_calls, "the design loop was not called"
-    rt = loop_calls[0].get("request_text", "")
-    assert "yes" in rt, rt
+    # Issue #449: a bare yes on an unknown-count part is an acknowledgement
+    # with no offer — the #349 no-offer notice, and NO design loop.
+    from d33d.question_answer import NO_OFFER_AFFIRMATION_REPLY
+
+    assert not loop_calls, f"the design loop ran: {loop_calls}"
+    done = [d for e, d in frames if e == "done"]
+    assert done and done[0]["message"] == NO_OFFER_AFFIRMATION_REPLY, frames
 
 
 def test_region_edit_no_part_fallthrough_runs_loop(app_with_projects, monkeypatch):

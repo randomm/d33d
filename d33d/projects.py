@@ -134,6 +134,7 @@ def _is_bare_affirmation_no_offer(
     project_id: int,
     message: str,
     latest: dict[str, Any] | None = None,
+    part: dict[str, Any] | None = None,
 ) -> bool:
     """True iff ``message`` is a BARE AFFIRMATION (the issue #437
     closed-set ``is_bare_affirmation`` — "yes" yes; "yes, add a chamfer
@@ -168,20 +169,14 @@ def _is_bare_affirmation_no_offer(
     predicate — the same rule the offer pre-route applies via
     ``is_pending_offer_acceptance``.
     """
-    from d33d.confirm_offer import is_live_param_offer
+    from d33d.acknowledgement import no_offer_notice_applies
 
-    offer = app.state.versions.get_pending_offer(project_id)
-    if offer is not None and (
-        offer.get("kind") == "fill_recut" or is_live_param_offer(offer, latest)
-    ):
-        # A live offer of either shape (param or fill-recut) — its own
-        # pre-route handles it; the guard never steals that acceptance.
-        return False
-    # Issue #437 (adversarial review): the narrow BARE-affirmation
-    # predicate, not the clean-affirmation heuristic — a yes plus an
-    # instruction ("yes, add a chamfer here") carries real work and must
-    # flow to the design loop, never the no-offer notice.
-    return fill_recut.is_bare_affirmation(message)
+    # Issue #449: the narrowed guard. A LIVE offer of either shape is never
+    # stolen; a literal yes on a measured part is point-first (fill_recut_turn
+    # runs before this guard), so it never reaches the notice from here.
+    return no_offer_notice_applies(
+        message, part, app.state.versions.get_pending_offer(project_id), latest
+    )
 
 
 async def _confirm_offer_route(app: Any, project_id: int, message: str):
@@ -480,7 +475,15 @@ def create_projects_router() -> APIRouter:
 
             _part = part_public(row) if row.get("part_filename") else None
             _fill_recut_instruction: str | None = None
-            if _part is not None and _part.get("unit_status") not in USABLE_UNIT_STATUSES:
+            from d33d.acknowledgement import literal_yes_pre_unit_gate
+
+            # Issue #449: a literal yes on a measured part (no live offer) is
+            # point-first before the settle-first notice (measured wins).
+            if (
+                _part is not None
+                and _part.get("unit_status") not in USABLE_UNIT_STATUSES
+                and not literal_yes_pre_unit_gate(app, project_id, body.message, _part)
+            ):
                 logger.warning(
                     "chat for project %s: the part's units are unsettled — "
                     "replying with the settle-first notice, no design run",
@@ -621,7 +624,9 @@ def create_projects_router() -> APIRouter:
         # Reused for the guard and the loop's ``own_feature_names`` below
         # (issue #437 lens round 1: one ``latest_version`` read per request).
         _latest = app.state.versions.latest_version(project_id)
-        if _is_bare_affirmation_no_offer(app, project_id, body.message, _latest):
+        if _is_bare_affirmation_no_offer(
+            app, project_id, body.message, _latest, _part
+        ):
             logger.info(
                 "chat for project %s: bare affirmation with no live "
                 "offer — replying with the no-offer notice, no design "

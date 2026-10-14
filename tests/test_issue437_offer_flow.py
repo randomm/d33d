@@ -21,6 +21,7 @@ from d33d import fill_recut
 from d33d.fill_recut import FILL_RECUT_DECLINE_REPLY, FRILL_POINT_FIRST_REPLY
 from d33d.fill_recut_region import fill_recut_region_edit
 from d33d.part_http import part_public
+from d33d.question_answer import NO_OFFER_AFFIRMATION_REPLY
 from tests.legacy_bounds_fixtures import _set_legacy_part
 from tests.test_app import _region_edit_body
 
@@ -562,13 +563,12 @@ def test_is_bare_affirmation_pins_six_token_cap() -> None:
 
 
 def test_bare_affirmation_parity_with_349_guard(app_with_projects) -> None:
-    """Issue #437 (lens round 1) parity pin: for the shared sample list, the
-    #349 no-offer guard (``_is_bare_affirmation_no_offer`` — the chat route's
-    no-live-offer predicate) and the point-first predicate
-    (``fill_recut.is_bare_affirmation``) classify identically. They are the
-    same underlying function (the guard applies ``is_bare_affirmation`` after
-    its own no-offer check, which holds for an offer-less project) — pin that
-    so a future split of the two call sites cannot drift."""
+    """Issue #449 partition pin. On a part with NO measured holes the #349
+    no-offer guard (``_is_bare_affirmation_no_offer``) is exactly the bare
+    predicate. On a MEASURED part the guard excludes a literal yes (point-first
+    owns it), and point-first is exactly the literal-yes subset."""
+    from d33d.acknowledgement import no_offer_notice_applies, point_first_applies
+
     from d33d.projects import _is_bare_affirmation_no_offer
 
     samples = list(BARE_AFFIRMATIONS) + [
@@ -578,21 +578,31 @@ def test_bare_affirmation_parity_with_349_guard(app_with_projects) -> None:
         "nope, thanks",
         "maybe",
     ]
+    measured = {"report": PLATE_REPORT}
 
     async def _probe(client):
         r = await client.post("/api/projects", json={"name": "Parity"})
         pid = r.json()["id"]
         results = []
         for text in samples:
-            guard = _is_bare_affirmation_no_offer(
-                app_with_projects, pid, text, app_with_projects.state.versions.latest_version(pid)
+            latest = app_with_projects.state.versions.latest_version(pid)
+            guard = _is_bare_affirmation_no_offer(app_with_projects, pid, text, latest)
+            guard_measured = _is_bare_affirmation_no_offer(
+                app_with_projects, pid, text, latest, measured
             )
-            results.append((text, guard, fill_recut.is_bare_affirmation(text)))
+            results.append((text, guard, guard_measured))
         return results
 
     rows = _run_async(app_with_projects, _probe)
-    for text, guard, point_first in rows:
-        assert guard == point_first, (text, guard, point_first)
+    for text, guard, guard_measured in rows:
+        assert guard == fill_recut.is_bare_affirmation(text), (text, guard)
+        assert guard_measured == (
+            fill_recut.is_bare_affirmation(text) and not fill_recut.is_literal_yes(text)
+        ), (text, guard_measured)
+        assert point_first_applies(text, measured, live=False) == fill_recut.is_literal_yes(
+            text
+        ), text
+        assert no_offer_notice_applies(text, None, None, None) == guard, text
 
 
 def test_is_bare_affirmation_rejects_negation() -> None:
@@ -729,7 +739,11 @@ def test_region_bare_affirmations_stay_point_first(app_with_projects, monkeypatc
     assert not loop_calls, f"the design loop ran: {loop_calls}"
     for text, done, offer in results:
         assert done is not None, (text, done)
-        assert "Point at the hole on the part first" in done["message"], (text, done)
+        if text == "ok":
+            # Issue #449: "ok" is a bare acknowledgement, not a literal yes.
+            assert done["message"] == NO_OFFER_AFFIRMATION_REPLY, (text, done)
+        else:
+            assert "Point at the hole on the part first" in done["message"], (text, done)
         assert offer is None, (text, offer)
 
 
@@ -741,7 +755,7 @@ def test_chat_bare_affirmations_stay_point_first(app_with_projects) -> None:
     async def _call(client):
         pid = await _new_plate_project(app_with_projects, client)
         results = []
-        for text in ("yes, do that", "ok", "yes please", "Yes, do that"):
+        for text in ("yes, do that", "yes please", "Yes, do that"):
             done = await _chat(app_with_projects, client, pid, text)
             results.append((text, done))
         return results
@@ -750,6 +764,19 @@ def test_chat_bare_affirmations_stay_point_first(app_with_projects) -> None:
     for text, done in results:
         assert done["message"] == FRILL_POINT_FIRST_REPLY, (text, done)
         assert not done.get("fill_recut_offer"), (text, done)
+
+
+def test_chat_ok_on_measured_part_gets_no_offer_notice(app_with_projects) -> None:
+    """Issue #449: "ok" is a bare acknowledgement, not a literal yes, so on a
+    measured part with no offer it gets the #349 notice (never point-first)."""
+
+    async def _call(client):
+        pid = await _new_plate_project(app_with_projects, client)
+        return await _chat(app_with_projects, client, pid, "ok")
+
+    done = _run_async(app_with_projects, _call)
+    assert done["message"] == NO_OFFER_AFFIRMATION_REPLY, done
+    assert not done.get("fill_recut_offer"), done
 
 
 # ---------------------------------------------------------------------------

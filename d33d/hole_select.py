@@ -426,6 +426,13 @@ def has_measured_holes(report: Any) -> bool:
     )
 
 
+def part_has_measured_holes(part: dict[str, Any] | None) -> bool:
+    """The ONE "measured" predicate both fill-and-recut routes use (issue
+    #449): a part whose ``part_public`` dict carries a measured hole list,
+    whether or not its holes convert to mm."""
+    return has_measured_holes(part.get("report") if part else None)
+
+
 def holes_in_mm(report: dict[str, Any] | None, scale: float | None) -> list[dict[str, Any]]:
     """The stored ``part_report["holes"]`` list converted to MM (issue
     #396).
@@ -492,3 +499,4 @@ def holes_in_mm(report: dict[str, Any] | None, scale: float | None) -> list[dict
             }
         )
     return holes
+
