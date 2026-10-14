@@ -324,6 +324,11 @@ def _fill_recut_turn_body(
     # Issue #437 / #449: point-first (a literal yes with NO live offer on a
     # measured part, a bare affirmation with a live one); it clears a stale
     # pending row. A yes plus an instruction is never point-first (trigger).
+    # ``live`` is the TURN-START value, deliberately not recomputed after the
+    # supersede above. The message answers the offer that was live on screen,
+    # so the bare-affirmation word set still applies: a live fill-recut offer
+    # plus "do it all" is point-first on chat (main's recorded result).
+    # Recomputing would pick the literal-yes set and send it to the loop.
     point_first = point_first_reply(
         versions, project_id, message, part, live=live, trigger=trigger
     )

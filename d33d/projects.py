@@ -31,6 +31,7 @@ from pydantic import BaseModel, field_validator
 
 from d33d import db as db_mod
 from d33d import fill_recut, fill_recut_history
+from d33d.acknowledgement import literal_yes_pre_unit_gate, no_offer_notice_applies
 from d33d.chat_frames import answered_frames as _answered_frames
 from d33d.chat_loop import run_design_loop as chat_loop_run_design_loop
 from d33d.design_frames import PHOTO_MISSING_NOTICE, SAVED_DESIGN_MISSING_REPLY
@@ -136,7 +137,12 @@ def _is_bare_affirmation_no_offer(
     latest: dict[str, Any] | None = None,
     part: dict[str, Any] | None = None,
 ) -> bool:
-    """True iff ``message`` is a BARE AFFIRMATION (the issue #437
+    """The #449 partition: the notice fires iff NO live offer is pending and
+    ``message`` is a bare affirmation, EXCEPT a literal yes on a measured part
+    (that one is point-first, answered before this guard). The one predicate
+    both seams read is :func:`d33d.acknowledgement.no_offer_notice_applies`.
+
+    True iff ``message`` is a BARE AFFIRMATION (the issue #437
     closed-set ``is_bare_affirmation`` — "yes" yes; "yes, add a chamfer
     here" no) and NO live offer is pending (the guard checks
     ``versions.get_pending_offer`` itself — issue #349: the guard is
@@ -169,8 +175,6 @@ def _is_bare_affirmation_no_offer(
     predicate — the same rule the offer pre-route applies via
     ``is_pending_offer_acceptance``.
     """
-    from d33d.acknowledgement import no_offer_notice_applies
-
     # Issue #449: the narrowed guard. A LIVE offer of either shape is never
     # stolen; a literal yes on a measured part is point-first (fill_recut_turn
     # runs before this guard), so it never reaches the notice from here.
@@ -475,7 +479,6 @@ def create_projects_router() -> APIRouter:
 
             _part = part_public(row) if row.get("part_filename") else None
             _fill_recut_instruction: str | None = None
-            from d33d.acknowledgement import literal_yes_pre_unit_gate
 
             # Issue #449: a literal yes on a measured part (no live offer) is
             # point-first before the settle-first notice (measured wins).

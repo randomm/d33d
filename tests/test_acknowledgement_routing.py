@@ -372,3 +372,62 @@ def test_measured_but_unscaled_counts_as_measured(app_with_projects, loop_calls)
         assert done is not None and done["message"] == FRILL_POINT_FIRST_REPLY, (route, done)
         assert loops == 0
 
+
+# ---------------------------------------------------------------------------
+# Issue #449 review: a LIVE #250 row is not point-first on the edit bar.
+# ---------------------------------------------------------------------------
+
+
+def test_region_live_250_row_bare_yes_on_measured_leaves_row_and_runs_loop(
+    app_with_projects, loop_calls, monkeypatch
+):
+    """Region route, measured part, LIVE #250 row, bare "ok": the fill-recut
+    decision returns None (as the chat route does for a live #250 row), so no
+    point-first reply is sent, the pending row survives, and the request runs
+    the loop with its text (main's routing for a #250 row)."""
+    live_250 = {"version_id": 7, "param": "wall_thickness"}
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "live250-449"})
+        pid = r.json()["id"]
+        _set_legacy_part(app_with_projects, pid, PLATE_REPORT)
+        versions = app_with_projects.state.versions
+        versions.set_pending_offer(pid, dict(live_250))
+        monkeypatch.setattr(versions, "latest_version", lambda _pid: {"id": 7, "version_id": 7})
+        loop_calls.clear()
+        done = await _send(app_with_projects, client, pid, "region", "ok")
+        return done, len(loop_calls), versions.get_pending_offer(pid)
+
+    done, loops, offer = _run_async(app_with_projects, _call)
+    assert done is None or done["message"] != FRILL_POINT_FIRST_REPLY, done
+    assert loops == 1, f"the design loop must run exactly once, ran {loops}"
+    assert offer == live_250, offer
+
+
+def test_region_notice_does_not_leave_project_in_flight(app_with_projects, loop_calls):
+    """No pre-discard of the in-flight flag: after a region "ok" no-offer
+    notice on an unmeasured part is drained, the project is not left in
+    flight, so the next region edit is accepted (not answered busy)."""
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "inflight-449"})
+        pid = r.json()["id"]
+        _set_legacy_part(app_with_projects, pid, BOUNDS)
+        first = await client.post(
+            f"/api/projects/{pid}/region-edits", json=_region_edit_body(instruction="ok")
+        )
+        assert first.status_code == 202, first.text
+        # Drain through the SSE endpoint: its ``finally`` is the in-flight
+        # release point (draining the raw generator would bypass it).
+        drained = await client.get(f"/api/stream/{pid}")
+        assert drained.status_code == 200, drained.text
+        assert pid not in app_with_projects.state.design_loop_inflight
+        second = await client.post(
+            f"/api/projects/{pid}/region-edits",
+            json=_region_edit_body(instruction="right, all of it"),
+        )
+        return second.status_code
+
+    status = _run_async(app_with_projects, _call)
+    assert status == 202, status
+

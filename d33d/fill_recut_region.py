@@ -237,9 +237,14 @@ def fill_recut_region_edit(
     if pending is not None and pending.get("kind") == "fill_recut":
         return _handle_live_offer(versions, project_id, instruction, pending)
 
+    # Issue #449: a LIVE #250 param offer keeps its bare acknowledgement, as
+    # the chat seam does (it returns None before point-first). Point-first here
+    # would clear the live row. With no trigger the decision is None below, so
+    # the request runs the loop with its text (main's routing for a #250 row).
+    if live and trigger is None:
+        return None
     # Issue #437 / #449: point-first for a literal yes with no live offer on
-    # a measured part (a bare affirmation with a live #250 offer keeps main's
-    # routing). The trigger wins: a resize is never a bare yes.
+    # a measured part. The trigger wins: a resize is never a bare yes.
     point_first = point_first_reply(
         versions, project_id, instruction, part, live=live, trigger=trigger
     )
