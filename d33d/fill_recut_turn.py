@@ -20,13 +20,16 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+from d33d.acknowledgement import (
+    acknowledgement_route,
+    clear_and_point_first_answer,
+    offer_is_live,
+)
 from d33d.fill_recut import (
     FILL_RECUT_DECLINE_REPLY,
-    FRILL_POINT_FIRST_REPLY,
     boundary_sentence,
     fill_and_recut_instruction,
     fill_recut_trigger,
-    is_bare_affirmation,
     is_clean_no,
     is_clean_yes,
     no_match_hole_reply,
@@ -270,11 +273,23 @@ def _fill_recut_turn_body(
     if row is None:
         return None
     part = part_public(row) if row.get("part_filename") else None
-    if part is None or part.get("unit_status") not in USABLE_UNIT_STATUSES:
+    if part is None:
         return None
 
     versions = app.state.versions
     pending = versions.get_pending_offer(project_id)
+    latest = versions.latest_version(project_id)
+    live = offer_is_live(pending, latest)
+    trigger = fill_recut_trigger(message)
+    route = acknowledgement_route(message, part, live=live, trigger=trigger)
+    if part.get("unit_status") not in USABLE_UNIT_STATUSES:
+        # SEAM (#449, unsettled-unit asymmetry): a literal yes on a measured
+        # part with NO live offer is point-first even when the units are
+        # unsettled (measured wins over unit status). "no_offer" is NOT acted
+        # on here: the settle-first gate runs before the #349 guard upstream.
+        if live or route != "point_first":
+            return None
+        return clear_and_point_first_answer(versions, project_id)
     if pending is not None and pending.get("kind") == "fill_recut":
         # A LIVE fill-recut offer: "yes" clears the offer and runs the
         # loop with the explicit fill-and-recut instruction (the caller
@@ -306,192 +321,181 @@ def _fill_recut_turn_body(
         versions.set_pending_offer(project_id, None)
         pending = None
 
-    if pending is None:
-        trigger = fill_recut_trigger(message)
-        # Issue #437: a BARE affirmation with NO live offer, on a part with
-        # measured holes, is the user answering a point-at ask — there is
-        # no offer to accept and no hole to fill yet. Point-first reply,
-        # no loop, no offer (never a centre-less instruction). A yes plus
-        # an instruction ("yes, add a chamfer here") is NOT a bare
-        # affirmation (``is_bare_affirmation``), and a resize request is
-        # never a bare yes ("top right" contains "right"), so the trigger
-        # wins either way.
-        if (
-            trigger is None
-            and is_bare_affirmation(message)
-            and _has_measured_holes(part)
-        ):
-            return {
-                "kind": "answer",
-                "answer": FRILL_POINT_FIRST_REPLY,
-                "run_loop": False,
-                "outcome": "point_first",
-            }
-        if trigger is not None:
-            own = own_feature_names(versions.latest_version(project_id))
-            if trigger["noun"] not in own:
-                # Issue #351 (operator decisions 1–4): a hole-family noun
-                # is offered ONLY when the import stored hole evidence —
-                # ``hole_count == 0`` → the honest no-hole reply (no
-                # offer, no loop, no flag); ``None`` (unknown — no
-                # report, legacy row, corrupt blob) keeps today's
-                # behaviour. Other nouns keep current behaviour.
-                if (
-                    trigger["noun"] in HOLE_NOUNS
-                    and part_has_hole_evidence(part) is False
-                ):
-                    return {
-                        "kind": "answer",
-                        "answer": no_hole_reply(trigger["noun"]),
-                        "run_loop": False,
-                        "outcome": "no_feature",
-                    }
-
-                # Issue #396: if the part has measured holes, select the
-                # hole the user is referring to and store its geometry in
-                # the offer so the instruction can carry the numbers.
-                offer_dict: dict[str, Any] = {
-                    "kind": "fill_recut",
-                    "noun": trigger["noun"],
-                    "size": trigger["size"],
+    # A LIVE #250 param offer at turn start keeps main's routing: no
+    # point-first, no fresh-trigger handling, the offer pre-route decides.
+    if pending is not None and live:
+        return None
+    # Issue #437 / #449: point-first (a literal yes with NO live offer on a
+    # measured part, a bare affirmation with a live one); it clears a stale
+    # pending row. A yes plus an instruction is never point-first (trigger).
+    # ``live`` is the TURN-START value, deliberately not recomputed after the
+    # supersede above. The message answers the offer that was live on screen,
+    # so the bare-affirmation word set still applies: a live fill-recut offer
+    # plus "do it all" is point-first on chat (main's recorded result).
+    # Recomputing would pick the literal-yes set and send it to the loop.
+    # SEAM: ``route`` is computed from the turn-start ``live`` (the supersede
+    # above does not recompute it) — the chat seam's deliberate ordering.
+    if route == "point_first":
+        return clear_and_point_first_answer(versions, project_id)
+    if pending is None and trigger is not None:
+        own = own_feature_names(versions.latest_version(project_id))
+        if trigger["noun"] not in own:
+            # Issue #351 (operator decisions 1–4): a hole-family noun
+            # is offered ONLY when the import stored hole evidence —
+            # ``hole_count == 0`` → the honest no-hole reply (no
+            # offer, no loop, no flag); ``None`` (unknown — no
+            # report, legacy row, corrupt blob) keeps today's
+            # behaviour. Other nouns keep current behaviour.
+            if (
+                trigger["noun"] in HOLE_NOUNS
+                and part_has_hole_evidence(part) is False
+            ):
+                return {
+                    "kind": "answer",
+                    "answer": no_hole_reply(trigger["noun"]),
+                    "run_loop": False,
+                    "outcome": "no_feature",
                 }
-                point_at_fallback = False
-                no_match = False
 
-                if trigger["noun"] in HOLE_NOUNS:
-                    # Issue #396 (round 2): the stored holes are in FILE
-                    # units; convert to mm via the part's scale BEFORE
-                    # selection and instruction (the user's numbers are
-                    # in mm — comparing file units against an mm trigger
-                    # size and an mm bbox would pick the wrong hole).
-                    # Issue #414: the centre reference is the part's
-                    # REAL bounds (``bbox_bounds_file_units`` scaled by
-                    # the same scale — extents/2 is only the
-                    # origin-anchored special case).
-                    report = part.get("report") if part else None
-                    scale = part.get("scale")
-                    holes = holes_in_mm(report, scale) if report else []
-                    # Issue #414 (part 3): ``report_bounds_mm`` was
-                    # called twice per turn — store the first result.
-                    bounds_mm = report_bounds_mm(report, scale) if report else None
-                    bbox_mm: list[float] | None = None
-                    if bounds_mm is None and report is not None:
-                        # Issue #414 (part 2): a LEGACY report has no
-                        # ``bbox_bounds_file_units`` (``report_bounds_mm``
-                        # → ``None``), and extents/2 is the part centre
-                        # ONLY for origin-anchored parts — wrong for every
-                        # off-origin part already imported (most real
-                        # imports predate the fix). The caller has
-                        # already resolved (and, for the async path,
-                        # awaited off the event loop + cached) the mesh
-                        # bounds — ``legacy_bounds_mm`` — or ``None``
-                        # when the stored mesh is unavailable (a 3MF
-                        # import, a missing file, a load timeout), in
-                        # which case the old extents/2 behaviour (the
-                        # origin-anchored special case) is kept.
-                        bounds_mm = legacy_bounds_mm
-                    if isinstance(report, dict):
-                        bbox_fu = report.get("bbox_file_units")
-                        # Guard the scale and bbox arithmetic against
-                        # non-numeric stored values (issue #396 lens
-                        # fix): treat them as unavailable rather than
-                        # letting a corrupt row 500 the chat route.
+            # Issue #396: if the part has measured holes, select the
+            # hole the user is referring to and store its geometry in
+            # the offer so the instruction can carry the numbers.
+            offer_dict: dict[str, Any] = {
+                "kind": "fill_recut",
+                "noun": trigger["noun"],
+                "size": trigger["size"],
+            }
+            point_at_fallback = False
+            no_match = False
+
+            if trigger["noun"] in HOLE_NOUNS:
+                # Issue #396 (round 2): the stored holes are in FILE
+                # units; convert to mm via the part's scale BEFORE
+                # selection and instruction (the user's numbers are
+                # in mm — comparing file units against an mm trigger
+                # size and an mm bbox would pick the wrong hole).
+                # Issue #414: the centre reference is the part's
+                # REAL bounds (``bbox_bounds_file_units`` scaled by
+                # the same scale — extents/2 is only the
+                # origin-anchored special case).
+                report = part.get("report") if part else None
+                scale = part.get("scale")
+                holes = holes_in_mm(report, scale) if report else []
+                # Issue #414 (part 3): ``report_bounds_mm`` was
+                # called twice per turn — store the first result.
+                bounds_mm = report_bounds_mm(report, scale) if report else None
+                bbox_mm: list[float] | None = None
+                if bounds_mm is None and report is not None:
+                    # Issue #414 (part 2): a LEGACY report has no
+                    # ``bbox_bounds_file_units`` (``report_bounds_mm``
+                    # → ``None``), and extents/2 is the part centre
+                    # ONLY for origin-anchored parts — wrong for every
+                    # off-origin part already imported (most real
+                    # imports predate the fix). The caller has
+                    # already resolved (and, for the async path,
+                    # awaited off the event loop + cached) the mesh
+                    # bounds — ``legacy_bounds_mm`` — or ``None``
+                    # when the stored mesh is unavailable (a 3MF
+                    # import, a missing file, a load timeout), in
+                    # which case the old extents/2 behaviour (the
+                    # origin-anchored special case) is kept.
+                    bounds_mm = legacy_bounds_mm
+                if isinstance(report, dict):
+                    bbox_fu = report.get("bbox_file_units")
+                    # Guard the scale and bbox arithmetic against
+                    # non-numeric stored values (issue #396 lens
+                    # fix): treat them as unavailable rather than
+                    # letting a corrupt row 500 the chat route.
+                    try:
+                        scale_f = float(scale) if scale is not None else 0.0
+                    except (TypeError, ValueError):
+                        scale_f = 0.0
+                    if (
+                        isinstance(bbox_fu, (list, tuple))
+                        and len(bbox_fu) >= 2
+                        and scale_f > 0
+                    ):
                         try:
-                            scale_f = float(scale) if scale is not None else 0.0
+                            bbox_mm = [
+                                float(bbox_fu[0]) * scale_f,
+                                float(bbox_fu[1]) * scale_f,
+                            ]
                         except (TypeError, ValueError):
-                            scale_f = 0.0
-                        if (
-                            isinstance(bbox_fu, (list, tuple))
-                            and len(bbox_fu) >= 2
-                            and scale_f > 0
-                        ):
-                            try:
-                                bbox_mm = [
-                                    float(bbox_fu[0]) * scale_f,
-                                    float(bbox_fu[1]) * scale_f,
-                                ]
-                            except (TypeError, ValueError):
-                                bbox_mm = None
-                    if holes:
-                        selected = select_measured_hole(
-                            holes, message, bbox_mm,
-                            trigger_size=trigger["size"],
-                            bounds_mm=bounds_mm,
-                        )
-                        if selected is None:
-                            # Ambiguous or no qualifier matched: use the
-                            # point-at copy (never an instruction without
-                            # a location).
-                            point_at_fallback = True
-                        elif selected is _NO_MATCH_HOLE:
-                            # Issue #414 (part 3): identity check against
-                            # ``d33d.hole_select``'s module sentinel (the
-                            # selector returns the same singleton for
-                            # every no-match) instead of ``isinstance``.
-                            no_match = True
-                        else:
-                            offer_dict["center"] = selected.get("center")
-                            offer_dict["axis"] = selected.get("axis")
-                            offer_dict["diameter_mm"] = selected.get("diameter_mm")
-                    elif has_measured_holes(report):
-                        # Issue #437: the part HAS a measured hole list but
-                        # none converts to mm (no usable scale) — there is no
-                        # location to offer, so point at the hole (never a
-                        # centre-less Yes).
+                            bbox_mm = None
+                if holes:
+                    selected = select_measured_hole(
+                        holes, message, bbox_mm,
+                        trigger_size=trigger["size"],
+                        bounds_mm=bounds_mm,
+                    )
+                    if selected is None:
+                        # Ambiguous or no qualifier matched: use the
+                        # point-at copy (never an instruction without
+                        # a location).
                         point_at_fallback = True
+                    elif selected is _NO_MATCH_HOLE:
+                        # Issue #414 (part 3): identity check against
+                        # ``d33d.hole_select``'s module sentinel (the
+                        # selector returns the same singleton for
+                        # every no-match) instead of ``isinstance``.
+                        no_match = True
+                    else:
+                        offer_dict["center"] = selected.get("center")
+                        offer_dict["axis"] = selected.get("axis")
+                        offer_dict["diameter_mm"] = selected.get("diameter_mm")
+                elif has_measured_holes(report):
+                    # Issue #437: the part HAS a measured hole list but
+                    # none converts to mm (no usable scale) — there is no
+                    # location to offer, so point at the hole (never a
+                    # centre-less Yes).
+                    point_at_fallback = True
 
-                if point_at_fallback:
-                    # Issue #437: the point-at reply stores NO offer (the
-                    # done frame carries no Yes); the next turn is a fresh
-                    # evaluation. Point-at is only reached for HOLE_NOUNS.
-                    sentence = point_at_sentence(trigger["noun"], trigger["size"])
-                    versions.set_pending_offer(project_id, None)
-                    return {
-                        "kind": "answer",
-                        "answer": sentence,
-                        "run_loop": False,
-                        "outcome": "point_at",
-                    }
-
-                if no_match:
-                    # Issue #414: the user named a hole by position but no
-                    # measured hole matches — say so and list the measured
-                    # holes (diameter + centre). No recut offer is made
-                    # (nothing is stored server-side), so the done frame
-                    # carries no offer flag (the ``outcome`` is not
-                    # ``fresh_offer``) and no design loop runs.
-                    sentence = no_match_hole_reply(trigger["noun"], holes)
-                    return {
-                        "kind": "answer",
-                        "answer": sentence,
-                        "run_loop": False,
-                        "outcome": "no_match",
-                    }
-
-                # Issue #437: the one-decimal copy only for a resolved
-                # measured hole (``center`` is set only on that path).
-                sentence = boundary_sentence(
-                    trigger["noun"],
-                    trigger["size"],
-                    move=trigger["move"],
-                    move_distance_mm=trigger.get("move_distance"),
-                    move_direction=trigger.get("direction"),
-                    measured="center" in offer_dict,
-                )
-                versions.set_pending_offer(project_id, offer_dict)
+            if point_at_fallback:
+                # Issue #437: the point-at reply stores NO offer (the
+                # done frame carries no Yes); the next turn is a fresh
+                # evaluation. Point-at is only reached for HOLE_NOUNS.
+                sentence = point_at_sentence(trigger["noun"], trigger["size"])
+                versions.set_pending_offer(project_id, None)
                 return {
                     "kind": "answer",
                     "answer": sentence,
                     "run_loop": False,
-                    "outcome": "fresh_offer",
+                    "outcome": "point_at",
                 }
+
+            if no_match:
+                # Issue #414: the user named a hole by position but no
+                # measured hole matches — say so and list the measured
+                # holes (diameter + centre). No recut offer is made
+                # (nothing is stored server-side), so the done frame
+                # carries no offer flag (the ``outcome`` is not
+                # ``fresh_offer``) and no design loop runs.
+                sentence = no_match_hole_reply(trigger["noun"], holes)
+                return {
+                    "kind": "answer",
+                    "answer": sentence,
+                    "run_loop": False,
+                    "outcome": "no_match",
+                }
+
+            # Issue #437: the one-decimal copy only for a resolved
+            # measured hole (``center`` is set only on that path).
+            sentence = boundary_sentence(
+                trigger["noun"],
+                trigger["size"],
+                move=trigger["move"],
+                move_distance_mm=trigger.get("move_distance"),
+                move_direction=trigger.get("direction"),
+                measured="center" in offer_dict,
+            )
+            versions.set_pending_offer(project_id, offer_dict)
+            return {
+                "kind": "answer",
+                "answer": sentence,
+                "run_loop": False,
+                "outcome": "fresh_offer",
+            }
     return None
-
-
-def _has_measured_holes(part: dict[str, Any] | None) -> bool:
-    """Whether the part carries a measured hole list (issue #437), whether
-    or not its holes convert to mm."""
-    return has_measured_holes(part.get("report") if part else None)
 
 
 def _report_is_legacy(report: dict[str, Any] | None) -> bool:
