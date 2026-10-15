@@ -263,8 +263,28 @@ async def run_design_loop(
     # prompt's ``Stated feature:`` line and the design-state
     # stated-vs-made comparison (``d33d.design_state``) both read it.
     # Best-effort: a failure degrades to no stated features (the honest
-    # empty set) and never fails the 202.
-    stated_features = carry_stated_features_for_turn(app.state.versions, project_id, message)
+    # empty set) and never fails the 202. The guard is HERE, at the call
+    # site (issue #448): the claim held only because ``stated_carry`` guards
+    # its own read/extract/write paths, and one path is not guarded — a
+    # non-dict projects row raises AttributeError out of ``_parse_stored``
+    # and would fail the 202. Nothing is lost by the fallback: the message's
+    # own features are the only thing this turn could have contributed, and
+    # they are unrecoverable once the carry itself raised — the turn proceeds
+    # with the honest empty set, reported once with the project id (never the
+    # message text — no PII in logs).
+    try:
+        stated_features = carry_stated_features_for_turn(
+            app.state.versions, project_id, message
+        )
+    except Exception:
+        logger.warning(
+            "carried_stated_features carry failed for project %s "
+            "(operation: chat turn stated-feature carry); the turn continues "
+            "with no stated features",
+            project_id,
+            exc_info=True,
+        )
+        stated_features = []
 
     # Photo: read the project's stored photo NOW (synchronously, before
     # the 202 response) — the background task runs via asyncio and the
