@@ -567,7 +567,7 @@ def test_bare_affirmation_parity_with_349_guard(app_with_projects) -> None:
     no-offer guard (``_is_bare_affirmation_no_offer``) is exactly the bare
     predicate. On a MEASURED part the guard excludes a literal yes (point-first
     owns it), and point-first is exactly the literal-yes subset."""
-    from d33d.acknowledgement import no_offer_notice_applies, point_first_applies
+    from d33d.acknowledgement import acknowledgement_route
     from d33d.projects import _is_bare_affirmation_no_offer
 
     samples = list(BARE_AFFIRMATIONS) + [
@@ -598,10 +598,12 @@ def test_bare_affirmation_parity_with_349_guard(app_with_projects) -> None:
         assert guard_measured == (
             fill_recut.is_bare_affirmation(text) and not fill_recut.is_literal_yes(text)
         ), (text, guard_measured)
-        assert point_first_applies(text, measured, live=False) == fill_recut.is_literal_yes(
-            text
-        ), text
-        assert no_offer_notice_applies(text, None, None, None) == guard, text
+        assert (
+            acknowledgement_route(text, measured, live=False, trigger=None) == "point_first"
+        ) == fill_recut.is_literal_yes(text), text
+        assert (
+            acknowledgement_route(text, None, live=False, trigger=None) == "no_offer"
+        ) == guard, text
 
 
 def test_is_bare_affirmation_rejects_negation() -> None:

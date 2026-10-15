@@ -30,8 +30,8 @@ from d33d.acknowledgement import (
     NoOfferAnswer,
     PointFirstAnswer,
     acknowledgement_route,
+    clear_and_point_first_answer,
     offer_is_live,
-    point_first_answer,
 )
 from d33d.chat_frames import answered_frames, register_event_source
 from d33d.fill_recut import (
@@ -220,7 +220,7 @@ def fill_recut_region_edit(
         # offer only; every other turn on an unsettled part returns None.
         if live or route != "point_first":
             return None
-        return point_first_answer(versions, project_id)
+        return clear_and_point_first_answer(versions, project_id)
     if pending is not None and pending.get("kind") == "fill_recut":
         # SEAM: a live fill-recut row is consumed by its own accept / decline /
         # supersede path. A superseded row returns None here; the chat seam
@@ -233,7 +233,7 @@ def fill_recut_region_edit(
     if live and trigger is None:
         return None
     if route == "point_first":
-        return point_first_answer(versions, project_id)
+        return clear_and_point_first_answer(versions, project_id)
     if trigger is None or trigger["noun"] in own_feature_names(
         versions.latest_version(project_id)
     ):

@@ -31,7 +31,11 @@ from pydantic import BaseModel, field_validator
 
 from d33d import db as db_mod
 from d33d import fill_recut, fill_recut_history
-from d33d.acknowledgement import acknowledgement_route, offer_is_live
+from d33d.acknowledgement import (
+    acknowledgement_route,
+    clear_and_point_first_answer,
+    offer_is_live,
+)
 from d33d.chat_frames import answered_frames as _answered_frames
 from d33d.chat_loop import run_design_loop as chat_loop_run_design_loop
 from d33d.design_frames import PHOTO_MISSING_NOTICE, SAVED_DESIGN_MISSING_REPLY
@@ -130,28 +134,31 @@ class ChatRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def _literal_yes_point_first(
+def _unsettled_point_first_answer(
     app: Any, project_id: int, message: str, part: dict[str, Any] | None
-) -> bool:
-    """The unsettled-unit seam (issue #449): True iff a literal yes on a
-    measured part with NO live offer is point-first BEFORE the settle-first
-    notice (measured wins over unit status). A live offer always gets the
-    notice here (the seam's deliberate asymmetry); the decision is
+) -> dict[str, Any] | None:
+    """The unsettled-unit seam (issue #449): a literal yes on a measured part
+    with NO live offer is answered point-first HERE, before the settle-first
+    notice (measured wins over unit status). Returns the point-first answer
+    (built by the shared :func:`d33d.acknowledgement.clear_and_point_first_answer`,
+    which also clears any stale pending row) or ``None`` to fall through to
+    the settle-first notice. A live offer always gets the notice here (the
+    seam's deliberate asymmetry); the decision is
     :func:`d33d.acknowledgement.acknowledgement_route`."""
     versions = app.state.versions
     if offer_is_live(
         versions.get_pending_offer(project_id), versions.latest_version(project_id)
     ):
-        return False
-    return (
-        acknowledgement_route(
-            message,
-            part,
-            live=False,
-            trigger=fill_recut.fill_recut_trigger(message),
-        )
-        == "point_first"
+        return None
+    route = acknowledgement_route(
+        message,
+        part,
+        live=False,
+        trigger=fill_recut.fill_recut_trigger(message),
     )
+    if route != "point_first":
+        return None
+    return clear_and_point_first_answer(versions, project_id)
 
 
 def _is_bare_affirmation_no_offer(
@@ -512,13 +519,18 @@ def create_projects_router() -> APIRouter:
             _part = part_public(row) if row.get("part_filename") else None
             _fill_recut_instruction: str | None = None
 
-            # Issue #449: a literal yes on a measured part (no live offer) is
-            # point-first before the settle-first notice (measured wins).
-            if (
-                _part is not None
-                and _part.get("unit_status") not in USABLE_UNIT_STATUSES
-                and not _literal_yes_point_first(app, project_id, body.message, _part)
-            ):
+            # Issue #449: on an unsettled part a literal yes on a measured part
+            # (no live offer) is answered point-first HERE and the turn ends;
+            # every other message gets the settle-first notice.
+            if _part is not None and _part.get("unit_status") not in USABLE_UNIT_STATUSES:
+                _point_first = _unsettled_point_first_answer(
+                    app, project_id, body.message, _part
+                )
+                if _point_first is not None:
+                    app.state.event_sources[project_id] = _answered_frames(
+                        _point_first["answer"]
+                    )
+                    return {"status": "accepted"}
                 logger.warning(
                     "chat for project %s: the part's units are unsettled — "
                     "replying with the settle-first notice, no design run",

@@ -22,8 +22,8 @@ logger = logging.getLogger(__name__)
 
 from d33d.acknowledgement import (
     acknowledgement_route,
+    clear_and_point_first_answer,
     offer_is_live,
-    point_first_answer,
 )
 from d33d.fill_recut import (
     FILL_RECUT_DECLINE_REPLY,
@@ -289,7 +289,7 @@ def _fill_recut_turn_body(
         # on here: the settle-first gate runs before the #349 guard upstream.
         if live or route != "point_first":
             return None
-        return point_first_answer(versions, project_id)
+        return clear_and_point_first_answer(versions, project_id)
     if pending is not None and pending.get("kind") == "fill_recut":
         # A LIVE fill-recut offer: "yes" clears the offer and runs the
         # loop with the explicit fill-and-recut instruction (the caller
@@ -336,7 +336,7 @@ def _fill_recut_turn_body(
     # SEAM: ``route`` is computed from the turn-start ``live`` (the supersede
     # above does not recompute it) — the chat seam's deliberate ordering.
     if route == "point_first":
-        return point_first_answer(versions, project_id)
+        return clear_and_point_first_answer(versions, project_id)
     if pending is None and trigger is not None:
         own = own_feature_names(versions.latest_version(project_id))
         if trigger["noun"] not in own:

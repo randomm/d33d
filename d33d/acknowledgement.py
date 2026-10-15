@@ -19,7 +19,7 @@ live-#250 bypass) stays at the seam as an explicit, commented line.
 
 from __future__ import annotations
 
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal, Protocol, TypedDict
 
 from d33d.confirm_offer import is_live_param_offer
 from d33d.fill_recut import (
@@ -30,6 +30,12 @@ from d33d.fill_recut import (
 from d33d.hole_select import part_has_measured_holes
 
 AcknowledgementRoute = Literal["point_first", "no_offer"]
+
+
+class PendingOfferStore(Protocol):
+    """The one versions-store method the point-first answer writes to."""
+
+    def set_pending_offer(self, project_id: int, offer: dict[str, Any] | None) -> None: ...
 
 
 class PointFirstAnswer(TypedDict):
@@ -83,9 +89,12 @@ def acknowledgement_route(
     return None
 
 
-def point_first_answer(versions: Any, project_id: int) -> PointFirstAnswer:
-    """Build the point-first answer. Clears a stale pending row first: both
-    seams do so when point-first applies (the row is never left behind)."""
+def clear_and_point_first_answer(
+    versions: PendingOfferStore, project_id: int
+) -> PointFirstAnswer:
+    """Build the point-first answer. SIDE EFFECT: clears the project's pending
+    row first (``set_pending_offer(project_id, None)``); both seams do so when
+    point-first applies, so the row is never left behind."""
     versions.set_pending_offer(project_id, None)
     return {
         "kind": "answer",
@@ -95,31 +104,12 @@ def point_first_answer(versions: Any, project_id: int) -> PointFirstAnswer:
     }
 
 
-def point_first_applies(text: str, part: dict[str, Any] | None, *, live: bool) -> bool:
-    """Thin caller of :func:`acknowledgement_route` (no trigger)."""
-    return acknowledgement_route(text, part, live=live, trigger=None) == "point_first"
-
-
-def no_offer_notice_applies(
-    text: str,
-    part: dict[str, Any] | None,
-    pending: dict[str, Any] | None,
-    latest: dict[str, Any] | None,
-) -> bool:
-    """Thin caller of :func:`acknowledgement_route`: the #349 notice fires
-    with NO live offer and the route says ``no_offer``."""
-    if offer_is_live(pending, latest):
-        return False
-    return acknowledgement_route(text, part, live=False, trigger=None) == "no_offer"
-
 
 __all__ = [
     "AcknowledgementRoute",
     "NoOfferAnswer",
     "PointFirstAnswer",
     "acknowledgement_route",
-    "no_offer_notice_applies",
+    "clear_and_point_first_answer",
     "offer_is_live",
-    "point_first_answer",
-    "point_first_applies",
 ]

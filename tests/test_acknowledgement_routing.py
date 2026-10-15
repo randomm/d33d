@@ -431,3 +431,45 @@ def test_region_notice_does_not_leave_project_in_flight(app_with_projects, loop_
     status = _run_async(app_with_projects, _call)
     assert status == 202, status
 
+
+# ---------------------------------------------------------------------------
+# Issue #449 (lens round 2): the unsettled-unit gate answers point-first
+# ITSELF. The settle-first gate must not rely on fill_recut_turn_async to
+# produce the point-first answer later on the same turn.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("pending", [None, STALE_250], ids=["no-row", "stale-250-row"])
+def test_unsettled_measured_literal_yes_is_point_first_without_fill_recut_turn(
+    app_with_projects, loop_calls, monkeypatch, pending
+):
+    # The seam under test is ``d33d.projects``' call through the
+    # ``d33d.fill_recut`` PEP 562 re-export, so the seam is patched there —
+    # with the real function restored at teardown, the re-export falls back
+    # to the module attribute and the unpatched path is unaffected.
+    import d33d.fill_recut as fill_recut_mod
+
+    async def _no_fill_recut_turn(app, pid, message):
+        return None
+
+    monkeypatch.setattr(
+        fill_recut_mod, "fill_recut_turn_async", _no_fill_recut_turn, raising=False
+    )
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "ack449-unsettled"})
+        pid = r.json()["id"]
+        _set_legacy_part(app_with_projects, pid, PLATE_REPORT)
+        conn = app_with_projects.state.conn
+        conn.raw.execute(
+            "UPDATE projects SET part_unit_status='unsettled' WHERE id=?", (pid,)
+        )
+        conn.commit()
+        if pending is not None:
+            app_with_projects.state.versions.set_pending_offer(pid, dict(pending))
+        loop_calls.clear()
+        done = await _send(app_with_projects, client, pid, "chat", "yes")
+        return done, len(loop_calls), app_with_projects.state.versions.get_pending_offer(pid)
+
+    done, loops, offer = _run_async(app_with_projects, _call)
+    _assert_point_first(done, loops, offer)
