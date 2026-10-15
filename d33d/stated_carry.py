@@ -48,6 +48,17 @@ from d33d.statement_extraction import (
 
 logger = logging.getLogger(__name__)
 
+#: Projects whose corrupt ``carried_stated_features`` row has already been
+#: reported by :func:`_read_stored` in THIS process (issue #448).
+#: A corrupt row stays corrupt across turns, so an undeduped WARNING fires on
+#: every chat turn for as long as the user states no feature — the same row,
+#: the same reason, reported again and again. Logged once per project per
+#: server process instead. Cleared on the REPLACED path (a later turn stated
+#: a feature and the row healed) so a row that corrupts a SECOND time is
+#: reported again rather than silenced forever. Process-global and in-memory
+#: only: a restart reports the current state again.
+_CORRUPT_CARRY_LOGGED: set[int] = set()
+
 __all__ = [
     "carried_stated_features",
     "carried_stated_set",
@@ -154,12 +165,15 @@ def _read_stored(
     parsed = _parse_stored(row)
     if parsed is None:
         raw = row.get("carried_stated_features") if row is not None else None
-        logger.warning(
-            "carried_stated_features is UNREADABLE for project %s "
-            "(operation: read carried stated features; stored value is not a "
-            "JSON list); the carry starts empty for this turn",
-            project_id,
-        )
+        # Once per project per process (issue #448) — see _CORRUPT_CARRY_LOGGED.
+        if project_id not in _CORRUPT_CARRY_LOGGED:
+            _CORRUPT_CARRY_LOGGED.add(project_id)
+            logger.warning(
+                "carried_stated_features is UNREADABLE for project %s "
+                "(operation: read carried stated features; stored value is not a "
+                "JSON list); the carry starts empty for this turn",
+                project_id,
+            )
         return _Unreadable(len(raw) if isinstance(raw, str) else 0)
     return parsed
 
@@ -200,6 +214,10 @@ def persist_carried_stated_features(
             else None,
         )
         if replaced is not None:
+            # The corrupt row has been replaced by a real set: forget that it
+            # was ever reported, so a row that turns corrupt again is reported
+            # once more instead of staying silent forever.
+            _CORRUPT_CARRY_LOGGED.discard(project_id)
             logger.warning(
                 "carried_stated_features REPLACED an unreadable stored value for "
                 "project %s (operation: persist carried stated features; replaced "
