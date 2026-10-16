@@ -9,6 +9,12 @@ function that both the live design prompt builder (``d33d.design_loop``)
 and the API route the SPA reads (``d33d.versions_routes``) call — the same
 callable, asserted by the tests, not two functions that happen to agree.
 
+The stated-feature matcher is NOT in this module (issue #447): it lives in
+:mod:`d33d.feature_match`, with the two primitives it and this module
+share (the numeric check, the name tokeniser) in the leaf
+:mod:`d33d.param_tokens`. ``feature_mismatches_from_block`` and
+``FEATURE_MISMATCH_TOLERANCE_MM`` stay importable from here (``__all__``).
+
 Entry shape (the contract the SPA's Brief renders and the prompt renders):
 ``name`` (the parameter key), ``kind`` (``"param" | "axis"`` — the
 discriminator, below), ``label`` (the human label — for a parameter
@@ -157,6 +163,29 @@ from d33d.design_loop import (
     BBOX_TOLERANCE_REL,
 )
 
+# The stated-feature matcher lives in ``d33d.feature_match`` (issue #447).
+# ``FEATURE_MISMATCH_TOLERANCE_MM`` and ``feature_mismatches_from_block``
+# are re-exported from here — they are part of this module's public
+# surface, so both are listed in ``__all__`` below (the same convention
+# ``d33d.question_answer`` uses for ``LLM_CALL_TIMEOUT_SECONDS``).
+# ``d33d.design_loop_events`` imports the mismatch builder lazily from
+# ``d33d.design_state`` and the #433 tests read both names from here.
+# ``_apply_stated_features`` is this module's one call site (inside
+# ``state_block_for_version``), kept under the name it had before the
+# split. The matcher itself is ONE function object in
+# ``d33d.feature_match`` — nothing here keeps a private copy of it.
+from d33d.feature_match import (
+    FEATURE_MISMATCH_TOLERANCE_MM,
+    feature_mismatches_from_block,
+)
+from d33d.feature_match import apply_stated_features as _apply_stated_features
+from d33d.param_tokens import is_number as _is_number
+
+# ``d33d.design_loop`` (issue #420) reaches ``_split_name_tokens`` through
+# this module; the primitive itself lives in the leaf ``d33d.param_tokens``
+# so ``d33d.feature_match`` can use it without importing back here.
+from d33d.param_tokens import split_name_tokens as _split_name_tokens
+
 if TYPE_CHECKING:
     from d33d.statement_extraction import StatedFeature
 
@@ -176,10 +205,12 @@ DISAGREES_MAJOR_THRESHOLD_MIN_MM: float = 5.0
 
 __all__ = [
     "AXIS_PARAM_NAMES",
+    "FEATURE_MISMATCH_TOLERANCE_MM",
     "MAX_STATE_BLOCK_ENTRIES",
     "Provenance",
     "StateEntry",
     "build_design_state_block",
+    "feature_mismatches_from_block",
     "format_design_state_block",
     "normalize_param_meta",
     "persisted_bbox_extents",
@@ -265,11 +296,6 @@ class StateEntry(TypedDict):
     disagrees_major: NotRequired[bool]
 
 
-def _is_number(value: Any) -> bool:
-    """True for int/float (bool is excluded — it is not a measurement)."""
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
-
-
 #: Matched per snake/camel token; fused names (e.g. 'flareangle') are out of
 #: scope — the design prompt asks for snake_case. Words that end in "angle"
 #: yet name a shape ("tangle"/"triangle") fall through to mm simply because
@@ -318,24 +344,6 @@ _COUNT_WORDS: frozenset[str] = frozenset(
     )
 )
 _COUNT_PREFIXES: tuple[str, str] = ("n_", "num_")
-
-
-def _split_name_tokens(name: str) -> list[str]:
-    """The name's tokens: split on ``_``, each piece on camelCase
-    boundaries (``draftAngle`` → ``["draft", "angle"]``). Empty dropped."""
-    pieces: list[str] = []
-    for raw in name.split("_"):
-        if not raw:
-            continue
-        token = ""
-        for i, ch in enumerate(raw):
-            if ch.isupper() and i > 0:
-                pieces.append(token.lower())
-                token = ""
-            token += ch
-        if token:
-            pieces.append(token.lower())
-    return pieces
 
 
 def _infer_unit(name: str) -> str | None:
@@ -516,18 +524,6 @@ def state_block_from_params(
 #: ``unknown``), never silently becomes ``stated``/``measured``.
 AXIS_PARAM_NAMES: tuple[str, str, str] = ("W", "D", "H")
 
-#: The feature-role tolerance (issue #433): a stated feature value
-#: matches the model's param value when ``|stated − made| <=
-#: FEATURE_MISMATCH_TOLERANCE_MM`` (a diff of EXACTLY 0.05 is NOT a
-#: mismatch — the operator decision; the flag fires only strictly above
-#: it). Deliberately tighter than the bbox tolerance (``max(1%, 0.5 mm)``
-#: in ``d33d.design_loop``) — a feature size the user stated to the
-#: millimetre is not the part's envelope, and a 1% / 0.5 mm slack would
-#: let a 5 mm hole through as 8 mm without a flag. The constant is
-#: independent of the bbox pair for the same reason ``DISAGREES_MAJOR_*``
-#: is — different magnitudes, different questions, never unified.
-FEATURE_MISMATCH_TOLERANCE_MM: float = 0.05
-
 #: The role-token vocabulary for stated-feature param matching (issue
 #: #433): a stated feature (``noun``, ``role``) matches a param when the
 #: param's name OR label tokens carry the feature noun AND the role's
@@ -543,98 +539,12 @@ FEATURE_MISMATCH_TOLERANCE_MM: float = 0.05
 #: present.
 #: The size param tokens and the closed role vocabulary are defined ONCE in
 #: ``d.axis_lexicon`` (issue #433) — the extraction's role words derive from
-#: the same map, so the matcher and the extraction cannot drift apart.
+#: the same map, so the matcher and the extraction cannot drift apart. The
+#: matcher (:mod:`d33d.feature_match`, issue #447) reads the same objects
+#: from there; these two names are this module's view of that vocabulary,
+#: still read by the #433 review test as the single-vocabulary assertion.
 _SIZE_TOKENS: frozenset[str] = SIZE_PARAM_TOKENS
 _FEATURE_ROLE_TOKENS: dict[str, frozenset[str]] = FEATURE_ROLE_TOKENS
-
-#: Dimension tokens that name a NON-size role: a role-less feature size never
-#: binds a param carrying one of these (``a 5 mm hole`` must not flag
-#: ``hole_depth``).
-_NON_SIZE_DIM_TOKENS: frozenset[str] = frozenset({"depth", "width", "length", "height"})
-
-
-def _param_tokens(name: str, label: str | None) -> set[str]:
-    """The param's token set: the name's :func:`_split_name_tokens` plus
-    the label's whitespace/underscore tokens (lowercased, punctuation
-    stripped) — the matcher's token source (issue #433)."""
-    tokens = set(_split_name_tokens(name))
-    if label:
-        for raw in label.replace("_", " ").split():
-            cleaned = raw.strip(".,;:!?()[]{}\"'").lower()
-            if cleaned:
-                tokens.add(cleaned)
-    return tokens
-
-
-def _match_stated_features(
-    entries: list[dict[str, Any]],
-    param_meta: dict[str, Any] | None,
-    stated_features: list[StatedFeature] | None,
-) -> dict[str, StatedFeature]:
-    """The param-keyed stated feature values (issue #433).
-
-    Matches each stated feature to the param(s) its noun + role name via
-    :func:`_param_tokens` (the name + label token set): the param's
-    tokens must carry the feature noun AND (when the record has an
-    explicit role) a token in the role's closed set (the noun guard — a
-    bare ``d`` without the noun never matches). Zero matches → the
-    param gets no value (the stated value stays in state, unflagged —
-    the operator decision); multiple matches → every matching param
-    gets the value (the operator decision — flag all). Returns
-    ``{param_name: stated_value}`` for the params that matched; an empty
-    dict when nothing matched (the caller keeps the params as-is).
-    Non-numeric / zero param values are never matched (the comparison
-    needs a positive made value). Returns ``{param_name: StatedFeature}``
-    — the matched record itself, so the caller reads its noun and value.
-    """
-    if not stated_features:
-        return {}
-    meta = param_meta if isinstance(param_meta, dict) else {}
-    out: dict[str, StatedFeature] = {}
-    ambiguous: set[str] = set()
-    for f in stated_features:
-        value = f.value
-        if not isinstance(value, (int, float)) or isinstance(value, bool):
-            continue
-        if float(value) <= 0:
-            continue
-        noun = f.noun
-        role = f.role
-        if role is not None and role not in _FEATURE_ROLE_TOKENS:
-            continue  # an unknown role binds nothing (never a guess)
-        role_tokens = _FEATURE_ROLE_TOKENS.get(role) if role else None
-        for entry in entries:
-            if entry.get("kind") != "param":
-                continue
-            value_ = entry.get("value")
-            if not isinstance(value_, (int, float)) or isinstance(value_, bool):
-                continue
-            if float(value_) <= 0:
-                continue
-            name = entry.get("name")
-            label = None
-            m = meta.get(name)
-            if isinstance(m, dict):
-                label = m.get("label")
-            tokens = _param_tokens(name, label if isinstance(label, str) else None)
-            if noun not in tokens:
-                continue  # the noun guard: no feature noun → no match
-            if role is None:
-                # Role-less: a size param (diameter/size token) or the bare
-                # noun param — never a depth/width/length/height param.
-                if tokens & _NON_SIZE_DIM_TOKENS:
-                    continue
-                if not (tokens & _SIZE_TOKENS or tokens <= {noun}):
-                    continue
-            elif not (tokens & role_tokens):
-                continue  # the role must also be present
-            prior = out.get(name)
-            if prior is not None and prior.value != f.value:
-                ambiguous.add(name)  # two stated values, one param: no call
-            out.setdefault(name, f)
-    for name in ambiguous:
-        out.pop(name, None)
-    return out
 
 #: The literal parameter names that name a W/D/H dimension WITHOUT a
 #: model-declared axis (issue #416, defect 2): ``part_width`` / ``part_depth``
@@ -1211,89 +1121,6 @@ def _maybe_promote_params(
         if abs(value - confirmed) <= tol:
             entry["provenance"] = "stated"
     return entries
-
-
-def _apply_stated_features(
-    entries: list[dict[str, Any]],
-    param_meta: dict[str, Any] | None,
-    stated_features: list[StatedFeature] | None,
-) -> None:
-    """The stated-feature promotion + mismatch flag (issue #433).
-
-    In-place on ``entries`` (the param rows). A param the user's stated
-    feature matches (``_match_stated_features`` — noun + role tokens)
-    and whose row is ``assumed`` (the model picked the value; the user
-    never confirmed it via the offer flow) is promoted ``stated`` when
-    the made value is within ``FEATURE_MISMATCH_TOLERANCE_MM`` of the
-    stated one (the ``a 5 mm hole`` / ``hole_diameter = 5`` case —
-    honest provenance, no flag), and rendered ``disagrees`` (``value``
-    the made value, ``stated_value`` the stated one, source ``"user"`` —
-    the user gave the evidence) when the made value is STRICTLY more
-    than the tolerance away (the ``a 5 mm hole`` / ``hole_diameter = 8``
-    case — the Brief's ochre ``stated 5 / made 8`` row). A param already
-    ``stated`` (the offer confirmation, or an axis promotion) or
-    ``measured`` is never touched — the feature comparison is the FIRST
-    consumer of a still-``assumed`` feature param, and a param is never
-    compared twice. A param with no stated-feature match is never
-    touched (zero-match → no flag, the stated value stays in state).
-    """
-    if not stated_features:
-        return
-    matched = _match_stated_features(entries, param_meta, stated_features)
-    if not matched:
-        return
-    for entry in entries:
-        if entry.get("kind") != "param":
-            continue
-        if entry.get("provenance") != "assumed":
-            continue  # only the model's own (unconfirmed) value is compared
-        name = entry.get("name")
-        if name not in matched:
-            continue
-        value = entry.get("value")
-        if not _is_number(value) or value <= 0:
-            continue
-        feature = matched[name]
-        stated_value = float(feature.value)
-        entry["stated_feature"] = feature.noun
-        # Round the diff: float subtraction lands just above an exact 0.05
-        # (1.05 - 1.0 == 0.050000000000000044); the tolerance is exact.
-        if round(abs(float(value) - stated_value), 6) <= FEATURE_MISMATCH_TOLERANCE_MM:
-            entry["provenance"] = "stated"
-        else:
-            entry["provenance"] = "disagrees"
-            entry["stated_value"] = stated_value
-            entry["disagrees_source"] = "user"
-
-
-def feature_mismatches_from_block(
-    entries: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """The stated-vs-made feature mismatches the design-state block carries
-    (issue #433): one record per ``disagrees`` row whose stated value came
-    from the user's feature statement (``stated_feature`` + ``stated_value``).
-    The reply's done-frame list is built from THIS function, so the Brief row
-    and the reply are one fact by construction (never a second comparison).
-    """
-    out: list[dict[str, Any]] = []
-    for e in entries:
-        if e.get("kind") != "param" or e.get("provenance") != "disagrees":
-            continue
-        if e.get("disagrees_source") != "user" or "stated_feature" not in e:
-            continue
-        made = e.get("value")
-        if not _is_number(made):
-            continue
-        label = e.get("label")
-        out.append(
-            {
-                "noun": e["stated_feature"],
-                "stated_mm": float(e["stated_value"]),
-                "made_mm": float(made),
-                "label": label if isinstance(label, str) and label else e["name"],
-            }
-        )
-    return out
 
 
 #: The disagreement-SEVERITY threshold (issue #274): a model-source
